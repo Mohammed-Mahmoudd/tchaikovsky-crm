@@ -1,26 +1,90 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+  /* Surface / Background */
+  --bg-page: #f2f2f7;
+  --bg-card: #ffffff;
+  --bg-panel: #fafafa;
+  --bg-input: #f2f2f7;
+  --bg-column: #e8e8ed;
+  --bg-sidebar: #f2f2f7;
+  --bg-hover: rgba(0, 0, 0, 0.04);
+  --bg-selected: #E5F0FF;
+  --bg-chat-incoming: #ffffff;
+  --bg-chat-outgoing: #E5F0FF;
+  --bg-today: #EEF4FF;
+  --bg-today-cell: #F5F9FF;
+  --bg-table-header: #e5e5ea;
+  --bg-table-alt: #f7f7f7;
+  --bg-pill: #f2f2f7;
+  --bg-kpi: #ffffff;
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  /* Border */
+  --border-main: #e5e5ea;
+  --border-sidebar: #d5d5d8;
+  --border-input: #d1d1d6;
+
+  /* Text */
+  --text-primary: #1c1c1e;
+  --text-secondary: #6e6e73;
+  --text-muted: #aeaeb2;
+  --text-on-card: #1c1c1e;
+  --text-chat-incoming: #1c1c1e;
+  --text-chat-outgoing: #003380;
+
+  /* Other */
+  --bg-banner: #0066FF;
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.05);
+
+  /* Font */
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+.dark {
+  /* Surface / Background */
+  --bg-page: #000000;
+  --bg-card: #121212;
+  --bg-panel: #0a0a0a;
+  --bg-input: #1e1e1e;
+  --bg-column: #0a0a0a;
+  --bg-sidebar: #050505;
+  --bg-hover: rgba(255, 255, 255, 0.05);
+  --bg-selected: #1e1e1e;
+  --bg-chat-incoming: #1e1e1e;
+  --bg-chat-outgoing: #262626;
+  --bg-today: #1e1e1e;
+  --bg-today-cell: #0a0a0a;
+  --bg-table-header: #121212;
+  --bg-table-alt: #0a0a0a;
+  --bg-pill: #262626;
+  --bg-kpi: #121212;
+
+  /* Border */
+  --border-main: #262626;
+  --border-sidebar: #1e1e1e;
+  --border-input: #333333;
+
+  /* Text */
+  --text-primary: #e5e5ea;
+  --text-secondary: #8e8e93;
+  --text-muted: #636366;
+  --text-on-card: #e5e5ea;
+  --text-chat-incoming: #e5e5ea;
+  --text-chat-outgoing: #e5e5ea;
+
+  /* Other */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+@theme inline {
+  --color-background: var(--bg-page);
+  --color-foreground: var(--text-primary);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg-page);
+  color: var(--text-primary);
 }
