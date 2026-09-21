@@ -2,7 +2,7 @@ import React from 'react';
 
 export default function SettingsPage() {
   return (
-    <div className="p-6 max-w-4xl mx-auto h-full" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
+    <div className="p-4 md:p-6 max-w-4xl mx-auto pb-10" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
       <h1 className="text-[15px] font-bold mb-5" style={{ color: 'var(--text-primary)' }}>Settings</h1>
 
       {/* Your account Card */}

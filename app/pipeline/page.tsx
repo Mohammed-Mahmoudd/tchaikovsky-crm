@@ -5,6 +5,7 @@ import {
   DndContext,
   DragOverlay,
   PointerSensor,
+  TouchSensor,
   useSensor,
   useSensors,
   closestCorners,
@@ -82,7 +83,20 @@ function LeadCard({ lead, onAdvance, isDragging, onClick }: { lead: Lead; onAdva
         }`}
       style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)', boxShadow: 'var(--shadow-card)' }}
     >
-      <p className="text-[15px] font-bold leading-tight" style={{ color: 'var(--text-primary)' }}>{lead.name}</p>
+      {/* Drag handle — visible on touch devices as a hint */}
+      <div className="flex items-start justify-between gap-2">
+        <p className="text-[15px] font-bold leading-tight" style={{ color: 'var(--text-primary)' }}>{lead.name}</p>
+        <div className="shrink-0 mt-0.5 touch-hint" style={{ color: 'var(--text-muted)' }}>
+          <svg width="12" height="16" viewBox="0 0 12 16" fill="currentColor" opacity={0.4}>
+            <circle cx="3" cy="3" r="1.5" />
+            <circle cx="9" cy="3" r="1.5" />
+            <circle cx="3" cy="8" r="1.5" />
+            <circle cx="9" cy="8" r="1.5" />
+            <circle cx="3" cy="13" r="1.5" />
+            <circle cx="9" cy="13" r="1.5" />
+          </svg>
+        </div>
+      </div>
       <p className="text-[13px] mt-0.5 leading-snug" style={{ color: 'var(--text-secondary)' }}>{lead.campaign}</p>
       <div className="flex items-center justify-between mt-2.5">
         <span className="text-[12px]" style={{ color: 'var(--text-muted)' }}>{lead.date.split(",")[0]}</span>
@@ -106,10 +120,16 @@ function SortableLeadCard({ lead, onAdvance, onClick }: { lead: Lead; onAdvance:
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.3 : 1,
-    cursor: "grab",
+    // cursor handled per-device via CSS
   };
   return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
+    <div
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...listeners}
+      className="touch-manipulation"
+    >
       <LeadCard lead={lead} onAdvance={onAdvance} onClick={onClick} />
     </div>
   );
@@ -170,7 +190,10 @@ export default function PipelinePage() {
   });
 
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+    // Desktop: start drag after moving 5px
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    // Mobile/tablet: start drag after holding for 250 ms (long-press)
+    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 8 } })
   );
 
   const activeLead = activeId ? leads.find(l => l.id === activeId) : null;
