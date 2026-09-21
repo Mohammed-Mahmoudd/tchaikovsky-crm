@@ -51,7 +51,7 @@ export default function SettingsPage() {
       </div>
 
       {/* Team Card */}
-      <div className="rounded-xl p-5 shadow-sm" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}>
+      <div className="rounded-xl p-5 shadow-sm overflow-hidden" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}>
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>Team</h2>
           <span className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>3 / 10 seats used</span>
@@ -60,63 +60,63 @@ export default function SettingsPage() {
         <div className="mb-1" style={{ borderBottom: '1px solid var(--border-main)' }} />
 
         {/* Member 1 */}
-        <div className="flex items-center justify-between py-3" style={{ borderBottom: '1px solid var(--border-main)' }}>
-          <div className="w-[200px]">
-            <p className="text-[13px] font-medium leading-tight" style={{ color: 'var(--text-primary)' }}>Jwana</p>
-            <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>jwana@tchaikovsky.demo</p>
+        <div className="flex items-center gap-2 py-3" style={{ borderBottom: '1px solid var(--border-main)' }}>
+          <div className="flex-1 min-w-0">
+            <p className="text-[13px] font-medium leading-tight truncate" style={{ color: 'var(--text-primary)' }}>Jwana</p>
+            <p className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>jwana@tchaikovsky.demo</p>
           </div>
-          <select className="h-[26px] text-[11px] rounded-[6px] px-2 outline-none w-[90px] mr-auto" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}>
+          <select className="h-[26px] text-[11px] rounded-[6px] px-1.5 outline-none shrink-0 w-[78px]" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}>
             <option>Owner</option>
             <option>Manager</option>
             <option>Agent</option>
           </select>
-          <div className="flex gap-2">
-            <button className="h-[26px] px-2.5 text-[11px] font-medium rounded-[6px] transition-colors shadow-sm" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)', color: 'var(--text-primary)' }}>
-              Send reset
+          <div className="flex gap-1.5 shrink-0">
+            <button className="h-[26px] px-2 text-[10px] font-medium rounded-[6px] transition-colors whitespace-nowrap" style={{ background: 'var(--bg-page)', border: '1px solid var(--border-main)', color: 'var(--text-secondary)' }}>
+              Reset
             </button>
-            <button className="h-[26px] px-2.5 text-[11px] font-medium rounded-[6px] cursor-not-allowed" style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}>
+            <button className="h-[26px] px-2 text-[10px] font-medium rounded-[6px] cursor-not-allowed whitespace-nowrap" style={{ background: 'var(--bg-pill)', color: 'var(--text-muted)' }}>
               Deactivate
             </button>
           </div>
         </div>
 
         {/* Member 2 */}
-        <div className="flex items-center justify-between py-3" style={{ borderBottom: '1px solid var(--border-main)' }}>
-          <div className="w-[200px]">
-            <p className="text-[13px] font-medium leading-tight" style={{ color: 'var(--text-primary)' }}>Rokaia</p>
-            <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>rokaia@tchaikovsky.demo</p>
+        <div className="flex items-center gap-2 py-3" style={{ borderBottom: '1px solid var(--border-main)' }}>
+          <div className="flex-1 min-w-0">
+            <p className="text-[13px] font-medium leading-tight truncate" style={{ color: 'var(--text-primary)' }}>Rokaia</p>
+            <p className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>rokaia@tchaikovsky.demo</p>
           </div>
-          <select className="h-[26px] text-[11px] rounded-[6px] px-2 outline-none w-[90px] mr-auto" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }} defaultValue="Manager">
+          <select className="h-[26px] text-[11px] rounded-[6px] px-1.5 outline-none shrink-0 w-[78px]" defaultValue="Manager" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}>
             <option>Owner</option>
             <option>Manager</option>
             <option>Agent</option>
           </select>
-          <div className="flex gap-2">
-            <button className="h-[26px] px-2.5 text-[11px] font-medium rounded-[6px] transition-colors shadow-sm" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)', color: 'var(--text-primary)' }}>
-              Send reset
+          <div className="flex gap-1.5 shrink-0">
+            <button className="h-[26px] px-2 text-[10px] font-medium rounded-[6px] transition-colors whitespace-nowrap" style={{ background: 'var(--bg-page)', border: '1px solid var(--border-main)', color: 'var(--text-secondary)' }}>
+              Reset
             </button>
-            <button className="h-[26px] px-2.5 text-[11px] font-medium transition-colors rounded-[6px]" style={{ background: 'var(--bg-pill)', color: 'var(--text-primary)' }}>
+            <button className="h-[26px] px-2 text-[10px] font-medium transition-colors rounded-[6px] whitespace-nowrap" style={{ background: 'var(--bg-pill)', color: 'var(--text-primary)' }}>
               Deactivate
             </button>
           </div>
         </div>
 
         {/* Member 3 */}
-        <div className="flex items-center justify-between py-3" style={{ borderBottom: '1px solid var(--border-main)' }}>
-          <div className="w-[200px]">
-            <p className="text-[13px] font-medium leading-tight" style={{ color: 'var(--text-primary)' }}>Sara</p>
-            <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>sara@tchaikovsky.demo</p>
+        <div className="flex items-center gap-2 py-3" style={{ borderBottom: '1px solid var(--border-main)' }}>
+          <div className="flex-1 min-w-0">
+            <p className="text-[13px] font-medium leading-tight truncate" style={{ color: 'var(--text-primary)' }}>Sara</p>
+            <p className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>sara@tchaikovsky.demo</p>
           </div>
-          <select className="h-[26px] text-[11px] rounded-[6px] px-2 outline-none w-[90px] mr-auto" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }} defaultValue="Agent">
+          <select className="h-[26px] text-[11px] rounded-[6px] px-1.5 outline-none shrink-0 w-[78px]" defaultValue="Agent" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}>
             <option>Owner</option>
             <option>Manager</option>
             <option>Agent</option>
           </select>
-          <div className="flex gap-2">
-            <button className="h-[26px] px-2.5 text-[11px] font-medium rounded-[6px] transition-colors shadow-sm" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)', color: 'var(--text-primary)' }}>
-              Send reset
+          <div className="flex gap-1.5 shrink-0">
+            <button className="h-[26px] px-2 text-[10px] font-medium rounded-[6px] transition-colors whitespace-nowrap" style={{ background: 'var(--bg-page)', border: '1px solid var(--border-main)', color: 'var(--text-secondary)' }}>
+              Reset
             </button>
-            <button className="h-[26px] px-2.5 text-[11px] font-medium transition-colors rounded-[6px]" style={{ background: 'var(--bg-pill)', color: 'var(--text-primary)' }}>
+            <button className="h-[26px] px-2 text-[10px] font-medium transition-colors rounded-[6px] whitespace-nowrap" style={{ background: 'var(--bg-pill)', color: 'var(--text-primary)' }}>
               Deactivate
             </button>
           </div>
@@ -124,8 +124,8 @@ export default function SettingsPage() {
 
         {/* Add Someone Section */}
         <div className="pt-5">
-          <div className="flex items-center mb-3">
-            <span className="text-[10px] font-bold uppercase tracking-wide mr-4" style={{ color: 'var(--text-secondary)' }}>Add someone</span>
+          <div className="flex items-center flex-wrap gap-2 mb-3">
+            <span className="text-[10px] font-bold uppercase tracking-wide" style={{ color: 'var(--text-secondary)' }}>Add someone</span>
             <div className="flex gap-2">
               <button className="px-3 py-1 text-[11px] font-medium text-white bg-[#0066FF] rounded-full">
                 Email invite
@@ -136,32 +136,33 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          <div className="flex gap-3 mb-3">
-            <input 
-              type="text" 
-              placeholder="Full name" 
-              className="flex-1 h-[28px] px-2.5 text-[12px] rounded-[6px] outline-none transition-colors focus:border-[#0066FF] placeholder-gray-400"
+          {/* Inputs stack vertically on mobile, side by side on sm+ */}
+          <div className="flex flex-col sm:flex-row gap-2 mb-3">
+            <input
+              type="text"
+              placeholder="Full name"
+              className="flex-1 min-w-0 h-[28px] px-2.5 text-[12px] rounded-[6px] outline-none transition-colors focus:border-[#0066FF] placeholder-gray-400"
               style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
             />
-            <input 
-              type="email" 
-              placeholder="Email" 
-              className="flex-1 h-[28px] px-2.5 text-[12px] rounded-[6px] outline-none transition-colors focus:border-[#0066FF] placeholder-gray-400"
+            <input
+              type="email"
+              placeholder="Email"
+              className="flex-1 min-w-0 h-[28px] px-2.5 text-[12px] rounded-[6px] outline-none transition-colors focus:border-[#0066FF] placeholder-gray-400"
               style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
             />
           </div>
 
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-              They'll get an email to choose their own password.
+              They&apos;ll get an email to choose their own password.
             </p>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 shrink-0">
               <select className="h-[28px] text-[11px] rounded-[6px] px-2 outline-none w-[100px]" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}>
                 <option>Owner</option>
                 <option>Manager</option>
-                <option defaultValue="Agent">Agent</option>
+                <option>Agent</option>
               </select>
-              <button className="h-[28px] px-4 text-[12px] font-medium text-white bg-[#0066FF] rounded-[6px] hover:bg-blue-700 transition-colors shadow-sm">
+              <button className="h-[28px] px-4 text-[12px] font-medium text-white bg-[#0066FF] rounded-[6px] hover:bg-blue-700 transition-colors shadow-sm whitespace-nowrap">
                 Send invite
               </button>
             </div>
