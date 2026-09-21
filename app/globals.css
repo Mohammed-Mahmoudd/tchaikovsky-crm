@@ -118,39 +118,22 @@ body {
   -webkit-user-select: none;
 }
 
-/* Touch drag target behaviour */
-.touch-manipulation {
-  touch-action: manipulation;
-  -webkit-user-select: none;
-  user-select: none;
-  cursor: grab;
-}
-
-.touch-manipulation:active {
-  cursor: grabbing;
-}
-
-/* Long-press ripple on mobile drag cards */
+/* Show drag handle dots only on touch screens */
 @media (pointer: coarse) {
-  .touch-manipulation:active {
-    animation: long-press-pulse 0.25s ease forwards;
-  }
-
-  /* Show drag handle only on touch devices */
   .touch-hint {
     display: block;
   }
 }
 
 @media (pointer: fine) {
-  /* Hide drag handle dots on desktop — not needed */
   .touch-hint {
     display: none;
   }
 }
 
+/* Long-press visual feedback on touch cards */
 @keyframes long-press-pulse {
-  0%   { transform: scale(1); }
-  60%  { transform: scale(0.97); }
-  100% { transform: scale(1.01); }
+  0%   { transform: scale(1); box-shadow: 0 0 0 0 rgba(0, 102, 255, 0); }
+  40%  { transform: scale(0.98); }
+  100% { transform: scale(1); box-shadow: 0 0 0 6px rgba(0, 102, 255, 0); }
 }

@@ -116,11 +116,16 @@ function LeadCard({ lead, onAdvance, isDragging, onClick }: { lead: Lead; onAdva
 
 function SortableLeadCard({ lead, onAdvance, onClick }: { lead: Lead; onAdvance: () => void; onClick: () => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: lead.id });
-  const style = {
+  const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.3 : 1,
-    // cursor handled per-device via CSS
+    cursor: isDragging ? 'grabbing' : 'grab',
+    // CRITICAL for mobile: tell the browser NOT to handle this touch event
+    // so dnd-kit's TouchSensor can intercept it for drag.
+    touchAction: 'none',
+    WebkitUserSelect: 'none',
+    userSelect: 'none',
   };
   return (
     <div
@@ -128,7 +133,6 @@ function SortableLeadCard({ lead, onAdvance, onClick }: { lead: Lead; onAdvance:
       style={style}
       {...attributes}
       {...listeners}
-      className="touch-manipulation"
     >
       <LeadCard lead={lead} onAdvance={onAdvance} onClick={onClick} />
     </div>
@@ -190,10 +194,10 @@ export default function PipelinePage() {
   });
 
   const sensors = useSensors(
-    // Desktop: start drag after moving 5px
+    // Desktop/mouse: activate after moving 5px
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    // Mobile/tablet: start drag after holding for 250 ms (long-press)
-    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 8 } })
+    // Touch/mobile: long-press 200ms, allow 5px of finger wobble during hold
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 5 } })
   );
 
   const activeLead = activeId ? leads.find(l => l.id === activeId) : null;
