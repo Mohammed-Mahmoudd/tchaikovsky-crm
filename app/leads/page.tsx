@@ -19,7 +19,7 @@ export default function LeadsPage() {
   return (
     <div className="flex flex-col h-full" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
       {/* Header */}
-      <div className="px-6 py-4" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
+      <div className="px-4 md:px-6 py-4" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
         <h1 className="text-[15px] font-bold mb-0.5" style={{ color: 'var(--text-primary)' }}>Leads</h1>
         <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
           Every Meta lead, tagged with the campaign that produced it. Newest first.
@@ -27,8 +27,8 @@ export default function LeadsPage() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 overflow-x-auto p-6">
-        <div className="min-w-[900px]">
+      <div className="flex-1 overflow-x-auto">
+        <div className="min-w-[800px] p-4 md:p-6">
           <table className="w-full text-left border-collapse rounded-xl overflow-hidden shadow-sm">
             <thead className="text-[10px] uppercase tracking-widest font-bold" style={{ background: 'var(--bg-table-header)', color: 'var(--text-secondary)' }}>
               <tr>

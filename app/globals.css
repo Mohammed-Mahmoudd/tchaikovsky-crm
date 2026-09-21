@@ -87,4 +87,33 @@
 body {
   background: var(--bg-page);
   color: var(--text-primary);
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Smooth scrolling for all scrollable areas */
+* {
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-main) transparent;
+}
+
+/* Custom scrollbar for webkit */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-input);
+  border-radius: 4px;
+}
+
+/* Prevent text selection on drag */
+.select-none {
+  user-select: none;
+  -webkit-user-select: none;
 }

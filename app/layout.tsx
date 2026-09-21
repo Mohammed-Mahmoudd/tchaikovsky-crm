@@ -1,8 +1,8 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { Sidebar } from "./components/Sidebar";
 import { ThemeProvider } from "./components/ThemeProvider";
+import { AppLayout } from "./components/AppLayout";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -35,6 +35,17 @@ export const metadata: Metadata = {
   },
 };
 
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f2f2f7" },
+    { media: "(prefers-color-scheme: dark)", color: "#000000" },
+  ],
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -49,12 +60,9 @@ export default function RootLayout({
             Demo — sample data only, nothing connects to real WhatsApp or Meta.
           </div>
           {/* Main Content Area */}
-          <div className="flex flex-1 overflow-hidden">
-            <Sidebar />
-            <main className="flex-1 overflow-y-auto" style={{ background: 'var(--bg-page)' }}>
-              {children}
-            </main>
-          </div>
+          <AppLayout>
+            {children}
+          </AppLayout>
         </ThemeProvider>
       </body>
     </html>

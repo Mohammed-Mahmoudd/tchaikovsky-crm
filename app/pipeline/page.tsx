@@ -257,38 +257,35 @@ export default function PipelinePage() {
   if (!isMounted) return null;
 
   return (
-    <div className="flex flex-col h-full relative" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
+    <div className="flex flex-col h-full relative overflow-hidden" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
 
       {/* Top bar: view switcher + lead count */}
-      <div className="px-6 py-2.5 flex items-center gap-2" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
+      <div className="px-4 md:px-6 py-2.5 flex items-center gap-2 flex-wrap" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
         <button
           onClick={() => setView("pipeline")}
           className={`text-[12px] font-semibold px-3 py-1.5 rounded-[8px] transition-colors`}
           style={view === "pipeline" ? { background: 'var(--bg-selected)', color: '#0066FF' } : { color: 'var(--text-secondary)' }}
         >
-          Pipeline view
+          Pipeline
         </button>
         <button
           onClick={() => setView("table")}
           className={`text-[12px] font-semibold px-3 py-1.5 rounded-[8px] transition-colors`}
           style={view === "table" ? { background: 'var(--bg-selected)', color: '#0066FF' } : { color: 'var(--text-secondary)' }}
         >
-          Table view
+          Table
         </button>
         <span className="text-[12px] ml-1" style={{ color: 'var(--text-muted)' }}>{filteredLeads.length} leads</span>
 
         <div className="ml-auto flex items-center gap-2">
-          <button className="text-[11px] rounded-[6px] px-3 py-1.5 transition-colors" style={{ border: '1px solid var(--border-main)', color: 'var(--text-secondary)', background: 'var(--bg-card)' }}>
-            Clear filters
-          </button>
-          <button className="text-[11px] rounded-[6px] px-3 py-1.5 transition-colors" style={{ border: '1px solid var(--border-main)', color: 'var(--text-secondary)', background: 'var(--bg-card)' }}>
-            Hide filters
+          <button className="text-[11px] rounded-[6px] px-2.5 py-1 transition-colors" style={{ border: '1px solid var(--border-main)', color: 'var(--text-secondary)', background: 'var(--bg-card)' }}>
+            Clear
           </button>
         </div>
       </div>
 
       {/* Filter row */}
-      <div className="px-6 py-2.5 flex items-center gap-4 flex-wrap" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
+      <div className="px-4 md:px-6 py-2.5 flex items-center gap-3 flex-wrap overflow-x-auto" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
         <FilterPill label="RECEIVED" value={filterReceived} options={["Any time", "Today", "This week", "This month"]} onChange={setFilterReceived} />
         <FilterPill label="AGENT" value={filterAgent} options={["Everyone", "Jwana", "Rokaia", "Mona"]} onChange={setFilterAgent} />
         <FilterPill label="CAMPAIGN" value={filterCampaign} options={["All campaigns", "KSA – Adult Music Classes", "Jeddah – Piano & Violin Leads (Aug)", "IG Click-to-WhatsApp – Auditions"]} onChange={setFilterCampaign} />
@@ -384,7 +381,7 @@ export default function PipelinePage() {
 
       {/* Side Panel Overlay */}
       {panelLead && (
-        <div className="absolute right-0 top-0 h-full w-[360px] z-50 flex flex-col overflow-y-auto" style={{ background: 'var(--bg-panel)', borderLeft: '1px solid var(--border-main)', boxShadow: '-10px 0 20px rgba(0,0,0,0.05)' }}>
+        <div className="absolute right-0 top-0 h-full w-full sm:w-[360px] z-50 flex flex-col overflow-y-auto" style={{ background: 'var(--bg-panel)', borderLeft: '1px solid var(--border-main)', boxShadow: '-10px 0 20px rgba(0,0,0,0.05)' }}>
           {/* Header */}
           <div className="px-6 py-4 flex items-start justify-between" style={{ borderBottom: '1px solid var(--border-main)' }}>
             <div>
