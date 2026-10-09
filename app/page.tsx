@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { ArrowLeft, Info, X } from "lucide-react";
 
 type Channel = "WA" | "IG" | "FB";
@@ -38,113 +38,100 @@ type Conversation = {
   messages: Message[];
 };
 
-const INBOX_CONVERSATIONS: Conversation[] = [
-  {
-    id: "1",
-    name: "Noura",
-    phone: "+966 50 0000 101",
-    agent: "Sara",
-    channel: "WA",
-    status: "Open",
-    unreadCount: 2,
-    windowLeft: "23h 17m left",
-    pipeline: "Contacted",
-    source: {
-      campaign: "Jeddah – Piano & Violin Leads (Aug)",
-      adset: "Jeddah parents 28–45",
-      ad: "Video – child at the piano",
-    },
-    formAnswers: {
-      instrument: "Piano",
-      studentAge: "9",
-    },
-    messages: [
-      { id: "m1", text: "السلام عليكم، شفت إعلانكم عن دروس البيانو. بنتي عمرها 9 سنوات، هل عندكم أوقات بعد المدرسة؟", time: "PM 03:24", isIncoming: true, dir: "rtl" },
-      { id: "m2", text: "وعليكم السلام نورة! أهلاً فيك 🌟 نعم عندنا أوقات من ٤ العصر. أول خطوة نحجز لها جلسة تقييم مجانية مع المدرّسة — تناسبكم يوم الأحد؟", time: "PM 03:36", isIncoming: false, isRead: true, dir: "rtl" },
-      { id: "m3", text: "الأحد ممتاز. أي ساعة متاحة؟", time: "PM 05:05", isIncoming: true, dir: "rtl" },
-      { id: "m4", text: "وهل البيانو متوفر عندكم ولا لازم نجيب معنا شي؟", time: "PM 05:12", isIncoming: true, dir: "rtl" },
-    ],
-  },
-  {
-    id: "2",
-    name: "Faisal",
-    phone: "+966 50 0000 102",
-    agent: "Unassigned",
-    channel: "WA",
-    status: "Open",
-    unreadCount: 1,
-    windowLeft: "21h 57m left",
-    pipeline: "New",
-    source: {
-      campaign: "IG Click-to-WhatsApp – Auditions",
-      adset: "IG engagers",
-      ad: "CTWA – chat with us",
-    },
-    messages: [
-      { id: "m1", text: "Hi, I clicked your Instagram ad. Do you teach oud for complete beginners? I'm 32, never played anything.", time: "03:54 PM", isIncoming: true, dir: "ltr" },
-    ],
-  },
-  {
-    id: "3",
-    name: "Reem",
-    phone: "+966 50 0000 103",
-    agent: "Rokaia",
-    channel: "WA",
-    status: "Pending",
-    windowLeft: "Closed",
-    pipeline: "Contacted",
-    source: {
-      campaign: "KSA – Adult Music Classes",
-      adset: "Adults 20–40 broad",
-      ad: "Carousel – it's never too late",
-    },
-    messages: [
-      { id: "m1", text: "مرحبا، كم رسوم دروس الجيتار للكبار؟", time: "AM 10:24", isIncoming: true, dir: "rtl" },
-      { id: "m2", text: "أهلاً ريم! حالياً ما نقدم جيتار، بس سجلناك بقائمة الانتظار وأول ما نفتح الصف بنتواصل معك 🙏", time: "AM 10:54", isIncoming: false, isRead: true, dir: "rtl" },
-    ],
-  },
-  {
-    id: "4",
-    name: "Lina",
-    phone: "+966 50 0000 104",
-    agent: "Unassigned",
-    channel: "IG",
-    unreadCount: 1,
-    status: "Open",
-    windowLeft: "",
-    pipeline: "direct",
-    source: "direct",
-    messages: [
-      { id: "m1", text: "Saw your reel! 😍 Do you have violin classes for teenagers?", time: "02:24 PM", isIncoming: true, dir: "ltr" },
-    ],
-  },
-  {
-    id: "5",
-    name: "Omar",
-    phone: "+966 50 0000 105",
-    agent: "Sara",
-    channel: "FB",
-    status: "Resolved",
-    windowLeft: "",
-    pipeline: "direct",
-    source: "direct",
-    messages: [
-      { id: "m1", text: "هل عندكم فرع في الرياض؟", time: "PM 02:24", isIncoming: true, dir: "rtl" },
-      { id: "m2", text: "حالياً جدة وأونلاين فقط — تقدر تجرب حصة أونلاين تجريبية إذا حابب!", time: "PM 03:24", isIncoming: false, isRead: true, dir: "rtl" },
-    ],
-  },
-];
+// Removed dummy data
 
 type MobileView = "list" | "chat" | "details";
 
 export default function InboxPage() {
   const [activeFilter, setActiveFilter] = useState("All");
-  const [activeConvId, setActiveConvId] = useState<string | null>("1");
+  const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [mobileView, setMobileView] = useState<MobileView>("list");
   const [showDetailsPanel, setShowDetailsPanel] = useState(false);
+  const [replyText, setReplyText] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  
   const filters = ["All", "Mine", "Unassigned", "Open", "Resolved"];
 
-  const activeConv = INBOX_CONVERSATIONS.find((c) => c.id === activeConvId);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  
+  useEffect(() => {
+    // Poll the live webhook server every 3 seconds
+    const fetchMessages = async () => {
+      try {
+        const res = await fetch("https://api.tchaikovskyschool.com/crm-api/messages");
+        const json = await res.json();
+        
+        if (json.success && json.data) {
+          const liveConvs: Conversation[] = json.data.map((c: any) => ({
+            id: c.senderId,
+            name: c.name || `${c.channel} User ...${c.senderId.slice(-6)}`,
+            phone: c.phone || `Live ${c.channel}`,
+            agent: c.agent || "Unassigned",
+            channel: c.channel,
+            status: c.status || "Open",
+            unreadCount: c.unreadCount,
+            windowLeft: "Active",
+            pipeline: c.pipeline || "New",
+            source: c.source || "direct",
+            formAnswers: c.formAnswers,
+            messages: c.messages.map((m: any) => ({
+              id: m.messageId,
+              text: m.text,
+              time: new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              isIncoming: m.direction === 'incoming',
+            }))
+          }));
+          
+          // Set live conversations
+          setConversations(liveConvs);
+        }
+      } catch (err) {
+        console.error("Failed to fetch live messages:", err);
+      }
+    };
+
+    fetchMessages();
+    const interval = setInterval(fetchMessages, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const activeConv = conversations.find((c) => c.id === activeConvId);
+
+  // ── Generic PATCH helper ───────────────────────────────────────────
+  const patchConversation = async (senderId: string, updates: Record<string, any>) => {
+    // Optimistically update local state immediately
+    setConversations(prev =>
+      prev.map(c => c.id === senderId ? { ...c, ...updates } : c)
+    );
+    try {
+      await fetch(`https://api.tchaikovskyschool.com/crm-api/messages/${senderId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates),
+      });
+    } catch (err) {
+      console.error("Failed to patch conversation:", err);
+    }
+  };
+
+  const handleSendReply = async () => {
+    if (!replyText.trim() || !activeConv) return;
+    setIsSending(true);
+    try {
+      const res = await fetch(`https://api.tchaikovskyschool.com/crm-api/messages/${activeConv.id}/reply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: replyText, channel: activeConv.channel }),
+      });
+      if (res.ok) {
+        setReplyText("");
+      }
+    } catch (err) {
+      console.error("Failed to send reply:", err);
+    } finally {
+      setIsSending(false);
+    }
+  };
 
   const handleSelectConv = (id: string) => {
     setActiveConvId(id);
@@ -191,7 +178,7 @@ export default function InboxPage() {
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          {INBOX_CONVERSATIONS.map((conv) => {
+          {conversations.map((conv) => {
             const isActive = conv.id === activeConvId;
             return (
               <div
@@ -285,17 +272,17 @@ export default function InboxPage() {
                 <div className="hidden sm:flex items-center gap-2">
                   <select
                     value={activeConv.agent}
-                    onChange={() => {}}
+                    onChange={(e) => patchConversation(activeConv.id, { agent: e.target.value })}
                     className="rounded-[6px] text-[12px] py-1 px-2 outline-none"
                     style={{ border: "1px solid var(--border-input)", color: "var(--text-primary)", background: "var(--bg-input)" }}
                   >
+                    <option value="Unassigned">Unassigned</option>
                     <option value="Sara">Sara</option>
                     <option value="Rokaia">Rokaia</option>
-                    <option value="Unassigned">Unassigned</option>
                   </select>
                   <select
                     value={activeConv.status}
-                    onChange={() => {}}
+                    onChange={(e) => patchConversation(activeConv.id, { status: e.target.value })}
                     className="rounded-[6px] text-[12px] py-1 px-2 outline-none"
                     style={{ border: "1px solid var(--border-input)", color: "var(--text-primary)", background: "var(--bg-input)" }}
                   >
@@ -367,12 +354,20 @@ export default function InboxPage() {
                 <div className="flex gap-2">
                   <input
                     type="text"
+                    value={replyText}
+                    onChange={(e) => setReplyText(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleSendReply()}
                     placeholder="Type a reply..."
                     className="flex-1 rounded-[8px] px-3 py-2 text-[13px] outline-none placeholder-gray-400 transition-colors focus:border-[#0066FF]"
                     style={{ border: "1px solid var(--border-main)", background: "var(--bg-input)", color: "var(--text-primary)" }}
+                    disabled={isSending}
                   />
-                  <button className="bg-[#78B4F9] text-white font-semibold text-[13px] px-4 rounded-[8px] shrink-0">
-                    Send
+                  <button 
+                    onClick={handleSendReply}
+                    disabled={isSending || !replyText.trim()}
+                    className="bg-[#0066FF] disabled:bg-[#78B4F9] text-white font-semibold text-[13px] px-4 rounded-[8px] shrink-0 transition-colors"
+                  >
+                    {isSending ? "Sending..." : "Send"}
                   </button>
                 </div>
               )}
@@ -411,12 +406,24 @@ export default function InboxPage() {
           >
             {/* Mobile close button */}
             <div className="flex items-center justify-between mb-6">
-              <div>
-                <h2 className="text-[16px] font-bold" style={{ color: "var(--text-primary)" }}>
-                  {activeConv.name}
-                </h2>
-                <p className="text-[12px]" style={{ color: "var(--text-secondary)" }}>
-                  {activeConv.phone}
+              <div className="flex-1 min-w-0">
+                {/* Editable name — agents can set real name when auto-fetch fails */}
+                <input
+                  key={activeConv.id + '-name'}
+                  type="text"
+                  defaultValue={activeConv.name}
+                  placeholder="Enter customer name..."
+                  className="w-full text-[16px] font-bold bg-transparent outline-none border-b border-transparent focus:border-[#0066FF] transition-colors pb-0.5 truncate"
+                  style={{ color: "var(--text-primary)" }}
+                  onBlur={(e) => {
+                    const newName = e.target.value.trim();
+                    if (newName && newName !== activeConv.name) {
+                      patchConversation(activeConv.id, { name: newName });
+                    }
+                  }}
+                />
+                <p className="text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
+                  {activeConv.phone || activeConv.id}
                 </p>
               </div>
               <button
@@ -454,15 +461,17 @@ export default function InboxPage() {
                   No lead record — this contact messaged directly.
                 </p>
               ) : (
-                <select
+              <select
                   value={activeConv.pipeline}
-                  onChange={() => {}}
+                  onChange={(e) => patchConversation(activeConv.id, { pipeline: e.target.value })}
                   className="w-full rounded-[6px] text-[12px] py-1.5 px-2 outline-none"
                   style={{ border: "1px solid var(--border-input)", background: "var(--bg-input)", color: "var(--text-primary)" }}
                 >
                   <option value="New">New</option>
                   <option value="Contacted">Contacted</option>
-                  <option value="Audition booked">Audition booked</option>
+                  <option value="Audition Booked">Audition Booked</option>
+                  <option value="Enrolled">Enrolled</option>
+                  <option value="Lost">Lost</option>
                 </select>
               )}
             </div>
@@ -499,24 +508,19 @@ export default function InboxPage() {
               <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Follow-up</h3>
               <input
                 type="text"
+                defaultValue={activeConv.formAnswers?.followUpNote || ""}
                 placeholder="e.g. Call back about Sunday"
                 className="w-full rounded-[6px] text-[11px] py-1.5 px-2 mb-2 outline-none placeholder-gray-400"
                 style={{ border: "1px solid var(--border-input)", background: "var(--bg-input)", color: "var(--text-primary)" }}
+                onBlur={(e) => patchConversation(activeConv.id, { followUpNote: e.target.value })}
               />
               <div className="flex gap-2">
-                <div
-                  className="flex-1 rounded-[6px] px-2 py-1.5 flex items-center justify-between"
-                  style={{ border: "1px solid var(--border-input)", background: "var(--bg-input)" }}
-                >
-                  <span className="text-[11px]" style={{ color: "var(--text-primary)" }}>09 / 21 / 2026</span>
-                  <svg className="w-3 h-3" style={{ color: "var(--text-secondary)" }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-                    <line x1="16" y1="2" x2="16" y2="6" />
-                    <line x1="8" y1="2" x2="8" y2="6" />
-                    <line x1="3" y1="10" x2="21" y2="10" />
-                  </svg>
-                </div>
-                <button className="bg-[#0066FF] text-white font-semibold text-[11px] px-3 rounded-[6px]">Add</button>
+                <input
+                  type="date"
+                  className="flex-1 rounded-[6px] px-2 py-1.5 text-[11px] outline-none"
+                  style={{ border: "1px solid var(--border-input)", background: "var(--bg-input)", color: "var(--text-primary)" }}
+                  onChange={(e) => patchConversation(activeConv.id, { followUpDate: e.target.value })}
+                />
               </div>
             </div>
 
@@ -524,9 +528,12 @@ export default function InboxPage() {
               <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Notes</h3>
               <textarea
                 rows={3}
+                key={activeConv.id}
+                defaultValue={activeConv.formAnswers?.notes || ""}
                 placeholder="Instrument, age, follow-up promises..."
                 className="w-full rounded-[6px] text-[11px] p-2 outline-none placeholder-gray-400 resize-y"
                 style={{ border: "1px solid var(--border-input)", background: "var(--bg-input)", color: "var(--text-primary)" }}
+                onBlur={(e) => patchConversation(activeConv.id, { notes: e.target.value })}
               />
             </div>
 

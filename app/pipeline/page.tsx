@@ -1,6 +1,9 @@
 "use client";
 
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useCallback } from "react";
+
+const API = "https://api.tchaikovskyschool.com/crm-api";
+
 import {
   DndContext,
   DragOverlay,
@@ -27,7 +30,7 @@ import { CSS } from "@dnd-kit/utilities";
 type Stage =
   | "New"
   | "Contacted"
-  | "Audition booked"
+  | "Audition Booked"
   | "Attended"
   | "Enrolled"
   | "Unqualified"
@@ -43,32 +46,16 @@ type Lead = {
   agent?: string;
 };
 
-// ─── Demo data ───────────────────────────────────────────────────────────────
-
-const INITIAL_LEADS: Lead[] = [
-  { id: "1", name: "Khalid", campaign: "KSA – Adult Music Classes", date: "Sep 01, 09:49 AM", stage: "Contacted", agent: "Jwana" },
-  { id: "2", name: "Reem", campaign: "KSA – Adult Music Classes", date: "Aug 31, 07:49 AM", stage: "New", agent: "Rokaia", phone: "+966 50 0000 103" },
-  { id: "3", name: "Walk-in – Mona", campaign: "Organic", date: "Sep 01, 02:49 AM", stage: "New", agent: "Unassigned" },
-  { id: "4", name: "Noura", campaign: "Jeddah – Piano & Violin Leads (Aug)", date: "Sep 01, 12:49 PM", stage: "Audition booked", phone: "+966 50 0000 101", agent: "Sara" },
-  { id: "5", name: "Faisal", campaign: "IG Click-to-WhatsApp – Auditions", date: "Sep 01, 01:19 PM", stage: "Audition booked", phone: "+966 50 0000 102", agent: "Unassigned" },
-  { id: "6", name: "Huda", campaign: "Jeddah – Piano & Violin Leads (Aug)", date: "Aug 31, 12:49 PM", stage: "Audition booked", phone: "+966 50 0000 106", agent: "Rokaia" },
-  { id: "7", name: "Tariq", campaign: "KSA – Adult Music Classes", date: "Aug 31, 06:49 PM", stage: "Contacted", agent: "Jwana" },
-  { id: "8", name: "Salma", campaign: "Jeddah – Piano & Violin Leads (Aug)", date: "Aug 28, 02:49 PM", stage: "Attended", agent: "Sara" },
-  { id: "9", name: "Yara", campaign: "Jeddah – Piano & Violin Leads (Aug)", date: "Aug 25, 02:49 PM", stage: "Enrolled", agent: "Rokaia" },
-  { id: "10", name: "Abdulrahman", campaign: "IG Click-to-WhatsApp – Auditions", date: "Aug 24, 06:49 AM", stage: "Enrolled", agent: "Sara" },
-  { id: "11", name: "Majed", campaign: "KSA – Adult Music Classes", date: "Aug 30, 01:49 PM", stage: "Unqualified", agent: "Sara" },
-  { id: "12", name: "Dana", campaign: "Jeddah – Piano & Violin Leads (Aug)", date: "Aug 22, 02:49 PM", stage: "Lost", agent: "Sara" },
-];
 
 const STAGES: Stage[] = [
-  "New", "Contacted", "Audition booked", "Attended", "Enrolled", "Unqualified", "Lost",
+  "New", "Contacted", "Audition Booked", "Attended", "Enrolled", "Unqualified", "Lost",
 ];
 
 // Next-stage label map
 const NEXT_STAGE: Partial<Record<Stage, string>> = {
   "New": "→ Contacted",
-  "Contacted": "→ Audition booked",
-  "Audition booked": "→ Attended",
+  "Contacted": "→ Audition Booked",
+  "Audition Booked": "→ Attended",
   "Attended": "→ Enrolled",
 };
 
@@ -172,13 +159,11 @@ function Column({ stage, leads, onAdvance, onSelectLead }: { stage: Stage; leads
 
 export default function PipelinePage() {
   const [isMounted, setIsMounted] = useState(false);
-
-  useEffect(() => {
-    setIsMounted(true);
-  }, []);
+  useEffect(() => { setIsMounted(true); }, []);
 
   const [view, setView] = useState<"pipeline" | "table">("pipeline");
-  const [leads, setLeads] = useState<Lead[]>(INITIAL_LEADS);
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [loading, setLoading] = useState(true);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [panelLeadId, setPanelLeadId] = useState<string | null>(null);
   const [filterAgent, setFilterAgent] = useState("Everyone");
@@ -186,6 +171,37 @@ export default function PipelinePage() {
   const [filterReceived, setFilterReceived] = useState("Any time");
   const [filterSource, setFilterSource] = useState("All sources");
   const [hiddenStages, setHiddenStages] = useState<Set<Stage>>(new Set());
+
+  const fetchLeads = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/messages`);
+      const json = await res.json();
+      if (json.success && json.data) {
+        const mapped: Lead[] = json.data.map((c: any) => ({
+          id: c.senderId,
+          name: c.name || `User ${c.senderId.slice(-4)}`,
+          campaign: typeof c.source === "object" ? c.source?.campaign || "Direct" : "Direct",
+          date: c.createdAt
+            ? new Date(c.createdAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+            : "—",
+          stage: (c.pipeline as Stage) || "New",
+          phone: c.phone,
+          agent: c.agent || "Unassigned",
+        }));
+        setLeads(mapped);
+      }
+    } catch (err) {
+      console.error("Failed to fetch leads:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchLeads();
+    const interval = setInterval(fetchLeads, 5000);
+    return () => clearInterval(interval);
+  }, [fetchLeads]);
 
   // Apply filters
   const filteredLeads = leads.filter(lead => {
@@ -241,6 +257,25 @@ export default function PipelinePage() {
     );
   };
 
+
+  // Advance a lead to the next stage with the button
+  const advanceLead = (id: string) => {
+    const lead = leads.find(l => l.id === id);
+    if (!lead) return;
+    const stageIdx = STAGES.indexOf(lead.stage);
+    const nextStage = STAGES[stageIdx + 1];
+    if (!nextStage) return;
+    // Optimistic update
+    setLeads(prev => prev.map(l => l.id === id ? { ...l, stage: nextStage } : l));
+    // Persist to DB
+    fetch(`${API}/messages/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pipeline: nextStage }),
+    }).catch(console.error);
+  };
+
+  // Drag end — persist the new stage to DB
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     setActiveId(null);
@@ -248,11 +283,21 @@ export default function PipelinePage() {
 
     const activeLeadId = active.id as string;
     const overId = over.id as string;
-
     const activeLead = leads.find(l => l.id === activeLeadId);
     const overLead = leads.find(l => l.id === overId);
 
-    if (!activeLead || !overLead || activeLead.stage !== overLead.stage) return;
+    if (!activeLead || !overLead || activeLead.stage !== overLead.stage) {
+      // Cross-column drop: stage already changed in handleDragOver, persist it
+      const newStage = leads.find(l => l.id === activeLeadId)?.stage;
+      if (newStage) {
+        fetch(`${API}/messages/${activeLeadId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pipeline: newStage }),
+        }).catch(console.error);
+      }
+      return;
+    }
 
     // Reorder within the same column
     setLeads(prev => {
@@ -261,27 +306,9 @@ export default function PipelinePage() {
       const oldIdx = stageLeads.findIndex(l => l.id === activeLeadId);
       const newIdx = stageLeads.findIndex(l => l.id === overId);
       const reordered = arrayMove(stageLeads, oldIdx, newIdx);
-      // Rebuild preserving original order of other stages
-      return prev.map(l => {
-        const updated = reordered.find(r => r.id === l.id);
-        return updated ?? l;
-      });
+      return prev.map(l => { const updated = reordered.find(r => r.id === l.id); return updated ?? l; });
     });
   };
-
-  // Advance a lead to the next stage with the button
-  const advanceLead = (id: string) => {
-    setLeads(prev =>
-      prev.map(l => {
-        if (l.id !== id) return l;
-        const stageIdx = STAGES.indexOf(l.stage);
-        const next = STAGES[stageIdx + 1];
-        return next ? { ...l, stage: next } : l;
-      })
-    );
-  };
-
-  if (!isMounted) return null;
 
   return (
     <div className="flex flex-col h-full relative overflow-hidden" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>

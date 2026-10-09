@@ -1,6 +1,8 @@
 "use client";
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+
+const API = "https://api.tchaikovskyschool.com/crm-api";
 
 type AuditionStatus = 'attended' | 'no-show' | 'free' | 'booked';
 
@@ -14,6 +16,14 @@ type Slot = {
 };
 
 type DaySlots = { [dateKey: string]: Slot[] };
+
+type LiveAudition = {
+  id: string;
+  name: string;
+  stage: string;
+  agent: string;
+  phone: string;
+};
 
 function addDays(date: Date, days: number) {
   const d = new Date(date);
@@ -60,12 +70,56 @@ export default function AuditionsPage() {
   const [slots, setSlots] = useState<DaySlots>(initialSlots);
   const [nextId, setNextId] = useState(100);
 
-  // "+ slot" inline form state: key = dateKey, value = { time, agent }
+  // Live Auditions state
+  const [liveAuditions, setLiveAuditions] = useState<LiveAudition[]>([]);
+
+  // "+ slot" inline form state
   const [addingSlot, setAddingSlot] = useState<{ dateKey: string; time: string; agent: string } | null>(null);
 
   // "Book" modal state
   const [bookingModal, setBookingModal] = useState<BookingModal>(null);
   const [bookForm, setBookForm] = useState({ name: '', type: 'Adult', age: '', instrument: '' });
+
+  const fetchLiveAuditions = async () => {
+    try {
+      const res = await fetch(`${API}/messages`);
+      const json = await res.json();
+      if (json.success && json.data) {
+        const booked = json.data
+          .filter((c: any) => c.pipeline === "Audition Booked")
+          .map((c: any) => ({
+            id: c.senderId,
+            name: c.name || `User ${c.senderId.slice(-4)}`,
+            stage: c.pipeline,
+            agent: c.agent || "Unassigned",
+            phone: c.phone || "—",
+          }));
+        setLiveAuditions(booked);
+      }
+    } catch (err) {
+      console.error("Failed to fetch live auditions:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchLiveAuditions();
+    const interval = setInterval(fetchLiveAuditions, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const completeLiveAudition = async (id: string, status: "Attended" | "No-Show") => {
+    // Optimistic removal
+    setLiveAuditions(prev => prev.filter(a => a.id !== id));
+    try {
+      await fetch(`${API}/messages/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pipeline: status }),
+      });
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   const weekDays = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
   const weekEnd = weekDays[6];
@@ -74,7 +128,6 @@ export default function AuditionsPage() {
   const nextWeek = () => setWeekStart(d => addDays(d, 7));
   const goToday = () => setWeekStart(getWeekStart(new Date()));
 
-  // Confirm adding a free slot
   const confirmAddSlot = () => {
     if (!addingSlot) return;
     const newSlot: Slot = { id: nextId, time: addingSlot.time, status: 'free', agent: addingSlot.agent || 'Jwana' };
@@ -83,7 +136,6 @@ export default function AuditionsPage() {
     setAddingSlot(null);
   };
 
-  // Book a free slot
   const openBooking = (slotId: number, dateKey: string, time: string, day: Date) => {
     setBookingModal({ slotId, dateKey, time, dayLabel: formatDayLabel(day) });
     setBookForm({ name: '', type: 'Adult', age: '', instrument: '' });
@@ -115,7 +167,7 @@ export default function AuditionsPage() {
       {/* Header */}
       <div className="px-6 py-4 flex items-center justify-between" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
         <div>
-          <h1 className="text-[15px] font-bold leading-none mb-0.5" style={{ color: 'var(--text-primary)' }}>Auditions</h1>
+          <h1 className="text-[15px] font-bold leading-none mb-0.5" style={{ color: 'var(--text-primary)' }}>Auditions Calendar</h1>
           <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>{formatRangeLabel(weekStart, weekEnd)}</p>
         </div>
         <div className="flex items-center gap-2">
@@ -129,80 +181,105 @@ export default function AuditionsPage() {
         </div>
       </div>
 
-      {/* Calendar Grid */}
-      <div className="flex-1 overflow-x-auto" style={{ background: 'var(--bg-page)' }}>
-        <div className="min-w-[700px] h-full flex flex-col">
-          {/* Day headers */}
-          <div className="grid grid-cols-7" style={{ borderBottom: '1px solid var(--border-sidebar)' }}>
-            {weekDays.map((day, i) => {
-              const key = isoDate(day);
-              const isToday = key === TODAY_ISO;
-              return (
-                <div key={key} className="py-1.5 px-2 text-center" style={{ borderRight: '1px solid var(--border-sidebar)', background: isToday ? 'var(--bg-today)' : 'var(--bg-card)' }}>
-                  <span className={`text-[12px] font-medium`} style={{ color: isToday ? '#0066FF' : 'var(--text-secondary)', fontWeight: isToday ? 'bold' : 'normal' }}>
-                    {day.getDate()} {DAYS[i]}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Day cells */}
-          <div className="grid grid-cols-7 flex-1">
-            {weekDays.map((day, i) => {
-              const key = isoDate(day);
-              const isToday = key === TODAY_ISO;
-              const daySlots = slots[key] || [];
-              const isAddingHere = addingSlot?.dateKey === key;
-
-              return (
-                <div key={key} className="p-1.5" style={{ borderRight: '1px solid var(--border-sidebar)', background: isToday ? 'var(--bg-today-cell)' : 'transparent' }}>
-                  <div className="flex flex-col gap-1.5">
-                    {daySlots.map(slot => (
-                      <SlotCard
-                        key={slot.id}
-                        slot={slot}
-                        onBook={() => openBooking(slot.id, key, slot.time, day)}
-                        onStatusChange={(status) => setSlotStatus(key, slot.id, status)}
-                      />
-                    ))}
-
-                    {/* Inline add slot form */}
-                    {isAddingHere ? (
-                      <div className="rounded-md p-2 flex flex-col gap-1.5" style={{ border: '1px solid var(--border-input)', background: 'var(--bg-card)' }}>
-                        <input
-                          type="time"
-                          value={addingSlot.time}
-                          onChange={e => setAddingSlot(a => a ? { ...a, time: e.target.value } : a)}
-                          className="w-full h-[26px] px-2 text-[11px] rounded-[4px] outline-none transition-colors focus:border-[#0066FF]"
-                          style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
-                        />
-                        <input
-                          type="text"
-                          placeholder="Staff (optional)"
-                          value={addingSlot.agent}
-                          onChange={e => setAddingSlot(a => a ? { ...a, agent: e.target.value } : a)}
-                          className="w-full h-[26px] px-2 text-[11px] rounded-[4px] outline-none placeholder-gray-400 transition-colors focus:border-[#0066FF]"
-                          style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
-                        />
-                        <div className="flex gap-1">
-                          <button onClick={confirmAddSlot} className="flex-1 h-[24px] text-[11px] font-semibold text-white bg-[#0066FF] rounded-[4px] hover:bg-blue-700">Add</button>
-                          <button onClick={() => setAddingSlot(null)} className="w-[24px] h-[24px] text-[11px] rounded-[4px] transition-colors" style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}>✕</button>
-                        </div>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => setAddingSlot({ dateKey: key, time: '17:00', agent: '' })}
-                        className="text-[10px] py-1 text-center w-full transition-colors"
-                        style={{ color: 'var(--text-muted)' }}
-                      >
-                        + slot
-                      </button>
-                    )}
+      <div className="flex-1 overflow-y-auto">
+        {/* Live Auditions from CRM */}
+        {liveAuditions.length > 0 && (
+          <div className="px-6 py-5 border-b" style={{ borderColor: 'var(--border-main)' }}>
+            <h2 className="text-[12px] font-bold uppercase tracking-widest text-[#0066FF] mb-3">Live CRM Pipeline: Audition Booked ({liveAuditions.length})</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {liveAuditions.map(a => (
+                <div key={a.id} className="p-3 rounded-lg shadow-sm border" style={{ background: 'var(--bg-card)', borderColor: 'var(--border-main)' }}>
+                  <div className="flex justify-between items-start mb-2">
+                    <h3 className="font-semibold text-[14px]">{a.name}</h3>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#0066FF] text-white">Booked</span>
+                  </div>
+                  <p className="text-[12px] mb-1" style={{ color: 'var(--text-secondary)' }}>Phone: {a.phone}</p>
+                  <p className="text-[12px] mb-3" style={{ color: 'var(--text-secondary)' }}>Agent: {a.agent}</p>
+                  <div className="flex gap-2">
+                    <button onClick={() => completeLiveAudition(a.id, "Attended")} className="flex-1 py-1 text-[11px] font-semibold bg-[#34C759] text-white rounded hover:opacity-90">✓ Attended</button>
+                    <button onClick={() => completeLiveAudition(a.id, "No-Show")} className="flex-1 py-1 text-[11px] font-semibold border border-red-200 text-red-500 rounded hover:bg-red-50">✕ No-Show</button>
                   </div>
                 </div>
-              );
-            })}
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Calendar Grid */}
+        <div className="overflow-x-auto w-full">
+          <div className="min-w-[700px] flex flex-col">
+            {/* Day headers */}
+            <div className="grid grid-cols-7" style={{ borderBottom: '1px solid var(--border-sidebar)' }}>
+              {weekDays.map((day, i) => {
+                const key = isoDate(day);
+                const isToday = key === TODAY_ISO;
+                return (
+                  <div key={key} className="py-2 px-2 text-center" style={{ borderRight: '1px solid var(--border-sidebar)', background: isToday ? 'var(--bg-today)' : 'var(--bg-card)' }}>
+                    <span className={`text-[12px] font-medium`} style={{ color: isToday ? '#0066FF' : 'var(--text-secondary)', fontWeight: isToday ? 'bold' : 'normal' }}>
+                      {day.getDate()} {DAYS[i]}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Day cells */}
+            <div className="grid grid-cols-7 flex-1 min-h-[500px]">
+              {weekDays.map((day, i) => {
+                const key = isoDate(day);
+                const isToday = key === TODAY_ISO;
+                const daySlots = slots[key] || [];
+                const isAddingHere = addingSlot?.dateKey === key;
+
+                return (
+                  <div key={key} className="p-2" style={{ borderRight: '1px solid var(--border-sidebar)', background: isToday ? 'var(--bg-today-cell)' : 'transparent' }}>
+                    <div className="flex flex-col gap-2">
+                      {daySlots.map(slot => (
+                        <SlotCard
+                          key={slot.id}
+                          slot={slot}
+                          onBook={() => openBooking(slot.id, key, slot.time, day)}
+                          onStatusChange={(status) => setSlotStatus(key, slot.id, status)}
+                        />
+                      ))}
+
+                      {/* Inline add slot form */}
+                      {isAddingHere ? (
+                        <div className="rounded-md p-2 flex flex-col gap-1.5" style={{ border: '1px solid var(--border-input)', background: 'var(--bg-card)' }}>
+                          <input
+                            type="time"
+                            value={addingSlot.time}
+                            onChange={e => setAddingSlot(a => a ? { ...a, time: e.target.value } : a)}
+                            className="w-full h-[26px] px-2 text-[11px] rounded-[4px] outline-none transition-colors focus:border-[#0066FF]"
+                            style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
+                          />
+                          <input
+                            type="text"
+                            placeholder="Staff (optional)"
+                            value={addingSlot.agent}
+                            onChange={e => setAddingSlot(a => a ? { ...a, agent: e.target.value } : a)}
+                            className="w-full h-[26px] px-2 text-[11px] rounded-[4px] outline-none placeholder-gray-400 transition-colors focus:border-[#0066FF]"
+                            style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
+                          />
+                          <div className="flex gap-1">
+                            <button onClick={confirmAddSlot} className="flex-1 h-[24px] text-[11px] font-semibold text-white bg-[#0066FF] rounded-[4px] hover:bg-blue-700">Add</button>
+                            <button onClick={() => setAddingSlot(null)} className="w-[24px] h-[24px] text-[11px] rounded-[4px] transition-colors" style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}>✕</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setAddingSlot({ dateKey: key, time: '17:00', agent: '' })}
+                          className="text-[10px] py-1 text-center w-full transition-colors hover:bg-gray-100/5 dark:hover:bg-gray-800/20 rounded"
+                          style={{ color: 'var(--text-muted)' }}
+                        >
+                          + slot
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       </div>
@@ -289,7 +366,6 @@ function SlotCard({ slot, onBook, onStatusChange }: { slot: Slot; onBook: () => 
     );
   }
 
-  // Booked: show both attended/no-show as clickable buttons
   if (slot.status === 'booked') {
     return (
       <div className="rounded-md px-2 py-1.5" style={{ background: 'var(--bg-selected)' }}>
@@ -315,7 +391,6 @@ function SlotCard({ slot, onBook, onStatusChange }: { slot: Slot; onBook: () => 
     );
   }
 
-  // attended = solid green, no-show = light pink
   if (slot.status === 'attended') {
     return (
       <div className="rounded-md bg-[#34C759] px-2 py-1.5">
@@ -329,7 +404,6 @@ function SlotCard({ slot, onBook, onStatusChange }: { slot: Slot; onBook: () => 
     );
   }
 
-  // no-show = light pink
   return (
     <div className="rounded-md px-2 py-1.5" style={{ background: 'rgba(255, 59, 48, 0.1)' }}>
       <p className="text-[10px] font-bold leading-none mb-0.5" style={{ color: 'var(--text-primary)' }}>{slot.time}</p>
