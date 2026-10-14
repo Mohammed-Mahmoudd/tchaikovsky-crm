@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "./components/ThemeProvider";
+import { AuthProvider } from "./components/AuthProvider";
 import { AppLayout } from "./components/AppLayout";
 
 const geistSans = Geist({
@@ -55,14 +56,11 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={`${geistSans.variable} ${geistMono.variable} font-sans antialiased h-screen flex flex-col overflow-hidden`}>
         <ThemeProvider>
-          {/* Top Banner */}
-          <div className="bg-[#0066FF] text-white text-center py-0.5 text-[12px] font-bold flex items-center justify-center">
-            Demo — sample data only, nothing connects to real WhatsApp or Meta.
-          </div>
-          {/* Main Content Area */}
-          <AppLayout>
-            {children}
-          </AppLayout>
+          <AuthProvider>
+            <AppLayout>
+              {children}
+            </AppLayout>
+          </AuthProvider>
         </ThemeProvider>
       </body>
     </html>

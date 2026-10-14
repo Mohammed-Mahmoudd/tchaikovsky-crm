@@ -34,6 +34,8 @@ type Conversation = {
   formAnswers?: {
     instrument?: string;
     studentAge?: string;
+    followUpNote?: string;
+    notes?: string;
   };
   messages: Message[];
 };
@@ -64,7 +66,7 @@ export default function InboxPage() {
         if (json.success && json.data) {
           const liveConvs: Conversation[] = json.data.map((c: any) => ({
             id: c.senderId,
-            name: c.name || `${c.channel} User ...${c.senderId.slice(-6)}`,
+            name: c.name || (c.channel === 'FB' ? `Messenger User` : c.channel === 'IG' ? `Instagram User` : `WhatsApp User`),
             phone: c.phone || `Live ${c.channel}`,
             agent: c.agent || "Unassigned",
             channel: c.channel,

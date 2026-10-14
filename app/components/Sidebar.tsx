@@ -4,6 +4,7 @@ import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useTheme } from './ThemeProvider';
+import { useAuth } from './AuthProvider';
 import {
   Search,
   Inbox,
@@ -25,6 +26,7 @@ interface SidebarProps {
 export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
   const pathname = usePathname();
   const { theme, toggle } = useTheme();
+  const { user, logout } = useAuth();
 
   return (
     <>
@@ -97,11 +99,19 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
           </button>
 
           <div className="mb-3 px-1">
-            <p className="text-[13px] font-medium leading-snug" style={{ color: 'var(--text-primary)' }}>Jwana</p>
-            <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>Owner</p>
+            <p className="text-[13px] font-medium leading-snug truncate" style={{ color: 'var(--text-primary)' }}>
+              {user?.name || 'User'}
+            </p>
+            <p className="text-[11px] capitalize truncate" style={{ color: 'var(--text-secondary)' }}>
+              {user?.role || 'Agent'}
+            </p>
           </div>
 
-          <button className="w-full py-1.5 text-[12px] font-medium transition-colors rounded-lg" style={{ color: 'var(--text-secondary)', border: '1px solid var(--border-input)', background: 'transparent' }}>
+          <button
+            onClick={logout}
+            className="w-full py-1.5 text-[12px] font-medium transition-colors rounded-lg hover:opacity-80 cursor-pointer"
+            style={{ color: 'var(--text-secondary)', border: '1px solid var(--border-input)', background: 'transparent' }}
+          >
             Sign out
           </button>
         </div>

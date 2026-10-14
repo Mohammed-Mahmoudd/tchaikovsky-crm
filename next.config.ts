@@ -7,6 +7,10 @@ const nextConfig: NextConfig = {
         source: "/api/:path*",
         destination: "https://api.tchaikovskyschool.com/crm-api/:path*",
       },
+      {
+        source: "/crm-api/:path*",
+        destination: "https://api.tchaikovskyschool.com/crm-api/:path*",
+      },
     ];
   },
 };
