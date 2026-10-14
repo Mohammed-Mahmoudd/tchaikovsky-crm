@@ -58,7 +58,7 @@ export default function InboxPage() {
     // Poll the live webhook server every 3 seconds
     const fetchMessages = async () => {
       try {
-        const res = await fetch("https://api.tchaikovskyschool.com/crm-api/messages");
+        const res = await fetch("/api/messages");
         const json = await res.json();
         
         if (json.success && json.data) {
@@ -95,6 +95,16 @@ export default function InboxPage() {
     return () => clearInterval(interval);
   }, []);
 
+  // ── Filter logic ──────────────────────────────────────────────────
+  const filteredConversations = conversations.filter((conv) => {
+    if (activeFilter === "All") return true;
+    if (activeFilter === "Mine") return conv.agent === "Jwana";
+    if (activeFilter === "Unassigned") return conv.agent === "Unassigned";
+    if (activeFilter === "Open") return conv.status === "Open";
+    if (activeFilter === "Resolved") return conv.status === "Resolved";
+    return true;
+  });
+
   const activeConv = conversations.find((c) => c.id === activeConvId);
 
   // ── Generic PATCH helper ───────────────────────────────────────────
@@ -104,7 +114,7 @@ export default function InboxPage() {
       prev.map(c => c.id === senderId ? { ...c, ...updates } : c)
     );
     try {
-      await fetch(`https://api.tchaikovskyschool.com/crm-api/messages/${senderId}`, {
+      await fetch(`/api/messages/${senderId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updates),
@@ -118,7 +128,7 @@ export default function InboxPage() {
     if (!replyText.trim() || !activeConv) return;
     setIsSending(true);
     try {
-      const res = await fetch(`https://api.tchaikovskyschool.com/crm-api/messages/${activeConv.id}/reply`, {
+      const res = await fetch(`/api/messages/${activeConv.id}/reply`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: replyText, channel: activeConv.channel }),
@@ -158,8 +168,11 @@ export default function InboxPage() {
         style={{ background: "var(--bg-card)", borderRight: "1px solid var(--border-main)" }}
       >
         <div className="p-4" style={{ borderBottom: "1px solid var(--border-main)" }}>
-          <h1 className="text-[18px] font-bold mb-3" style={{ color: "var(--text-primary)" }}>
+          <h1 className="text-[18px] font-bold mb-3 flex items-center gap-2" style={{ color: "var(--text-primary)" }}>
             Inbox
+            <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full" style={{ background: "var(--bg-pill)", color: "var(--text-secondary)" }}>
+              {filteredConversations.length}
+            </span>
           </h1>
           <div className="flex flex-wrap gap-2">
             {filters.map((filter) => (
@@ -178,7 +191,7 @@ export default function InboxPage() {
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          {conversations.map((conv) => {
+          {filteredConversations.map((conv) => {
             const isActive = conv.id === activeConvId;
             return (
               <div

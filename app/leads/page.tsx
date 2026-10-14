@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 
-const API = "https://api.tchaikovskyschool.com/crm-api";
+const API = "/api";
 
 const STAGE_COLORS: Record<string, string> = {
   "New":            "#0066FF",

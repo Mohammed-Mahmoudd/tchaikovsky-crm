@@ -2,7 +2,7 @@
 
 import React, { useState, useMemo, useEffect, useCallback } from "react";
 
-const API = "https://api.tchaikovskyschool.com/crm-api";
+const API = "/api";
 
 import {
   DndContext,
