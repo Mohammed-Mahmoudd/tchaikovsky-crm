@@ -198,7 +198,7 @@ export default function InboxPage() {
                   >
                     {conv.channel}
                   </span>
-                  {conv.unreadCount && (
+                  {Boolean(conv.unreadCount && conv.unreadCount > 0) && (
                     <span className="flex items-center justify-center w-[16px] h-[16px] bg-[#0066FF] text-white text-[9px] font-bold rounded-full">
                       {conv.unreadCount}
                     </span>
