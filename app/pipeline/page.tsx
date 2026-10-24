@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo, useEffect, useRef } from "react";
+import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import { MessageSquare } from "lucide-react";
 import { useCRM } from "../context/CRMContext";
 
@@ -67,6 +67,9 @@ const STAGE_COLORS: Record<Stage, string> = {
   "Lost": "#FF3B30",
 };
 
+// How many cards to render initially per column
+const INITIAL_VISIBLE_COUNT = 30;
+
 // ─── useIsMobile hook ─────────────────────────────────────────────────────────
 
 function useIsMobile() {
@@ -87,7 +90,7 @@ function useIsMobile() {
 
 // ─── "Move to" Popover ────────────────────────────────────────────────────────
 
-function MoveToPopover({
+const MoveToPopover = React.memo(function MoveToPopover({
   currentStage,
   onMove,
   onClose,
@@ -203,11 +206,11 @@ function MoveToPopover({
       })}
     </div>
   );
-}
+});
 
 // ─── Mobile Lead Card (no drag, with "Move to" button) ───────────────────────
 
-function MobileLeadCard({
+const MobileLeadCard = React.memo(function MobileLeadCard({
   lead,
   onMove,
   onClick,
@@ -217,6 +220,13 @@ function MobileLeadCard({
   onClick?: () => void;
 }) {
   const [showPopover, setShowPopover] = useState(false);
+
+  const handleMoveClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowPopover((prev) => !prev);
+  }, []);
+
+  const handleClosePopover = useCallback(() => setShowPopover(false), []);
 
   return (
     <div
@@ -239,10 +249,7 @@ function MobileLeadCard({
         {/* Move-to button — top right */}
         <button
           type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            setShowPopover((prev) => !prev);
-          }}
+          onClick={handleMoveClick}
           style={{
             display: "flex",
             alignItems: "center",
@@ -303,25 +310,31 @@ function MobileLeadCard({
         <MoveToPopover
           currentStage={lead.stage}
           onMove={onMove}
-          onClose={() => setShowPopover(false)}
+          onClose={handleClosePopover}
         />
       )}
     </div>
   );
-}
+});
 
 // ─── Mobile Column (no DnD) ─────────────────────────────────────────────────
 
-function MobileColumn({
+const MobileColumn = React.memo(function MobileColumn({
   stage,
   leads,
+  totalCount,
   onMove,
   onSelectLead,
+  onShowMore,
+  hasMore,
 }: {
   stage: Stage;
   leads: Lead[];
+  totalCount: number;
   onMove: (id: string, stage: Stage) => void;
   onSelectLead: (id: string) => void;
+  onShowMore: () => void;
+  hasMore: boolean;
 }) {
   return (
     <div className="flex flex-col min-w-[260px] max-w-[260px] shrink-0 h-full">
@@ -354,7 +367,7 @@ function MobileColumn({
               color: "var(--text-secondary)",
             }}
           >
-            {leads.length}
+            {totalCount}
           </span>
         </div>
 
@@ -374,15 +387,28 @@ function MobileColumn({
               onClick={() => onSelectLead(lead.id)}
             />
           ))}
+          {hasMore && (
+            <button
+              onClick={onShowMore}
+              className="text-[12px] font-semibold py-2 rounded-lg transition-colors"
+              style={{
+                background: "var(--bg-pill)",
+                color: "#0066FF",
+                border: "1px solid var(--border-input)",
+              }}
+            >
+              Show more ({totalCount - leads.length} remaining)
+            </button>
+          )}
         </div>
       </div>
     </div>
   );
-}
+});
 
 // ─── Desktop Lead Card (with drag handle dots) ──────────────────────────────
 
-function LeadCard({ lead, onAdvance, isDragging, onClick }: { lead: Lead; onAdvance?: () => void; isDragging?: boolean; onClick?: () => void }) {
+const LeadCard = React.memo(function LeadCard({ lead, onAdvance, isDragging, onClick }: { lead: Lead; onAdvance?: () => void; isDragging?: boolean; onClick?: () => void }) {
   const next = NEXT_STAGE[lead.stage];
   return (
     <div
@@ -419,9 +445,9 @@ function LeadCard({ lead, onAdvance, isDragging, onClick }: { lead: Lead; onAdva
       </div>
     </div>
   );
-}
+});
 
-function SortableLeadCard({ lead, onAdvance, onClick }: { lead: Lead; onAdvance: () => void; onClick: () => void }) {
+const SortableLeadCard = React.memo(function SortableLeadCard({ lead, onAdvance, onClick }: { lead: Lead; onAdvance: () => void; onClick: () => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: lead.id });
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
@@ -442,11 +468,19 @@ function SortableLeadCard({ lead, onAdvance, onClick }: { lead: Lead; onAdvance:
       <LeadCard lead={lead} onAdvance={onAdvance} onClick={onClick} />
     </div>
   );
-}
+});
 
 // ─── Desktop Column (with DnD) ──────────────────────────────────────────────
 
-function Column({ stage, leads, onAdvance, onSelectLead }: { stage: Stage; leads: Lead[]; onAdvance: (id: string) => void; onSelectLead: (id: string) => void }) {
+const Column = React.memo(function Column({ stage, leads, totalCount, onAdvance, onSelectLead, onShowMore, hasMore }: {
+  stage: Stage;
+  leads: Lead[];
+  totalCount: number;
+  onAdvance: (id: string) => void;
+  onSelectLead: (id: string) => void;
+  onShowMore: () => void;
+  hasMore: boolean;
+}) {
   const { setNodeRef } = useDroppable({ id: stage });
   const itemIds = useMemo(() => leads.map(l => l.id), [leads]);
 
@@ -455,7 +489,7 @@ function Column({ stage, leads, onAdvance, onSelectLead }: { stage: Stage; leads
       <div className="flex flex-col flex-1 rounded-2xl overflow-hidden h-full max-h-full" style={{ background: 'var(--bg-column)' }}>
         <div className="flex items-center justify-between px-3 pt-4 pb-2 shrink-0">
           <span className="text-[15px] font-bold" style={{ color: 'var(--text-primary)' }}>{stage}</span>
-          <span className="text-[12px] font-bold px-2.5 py-0.5 rounded-full" style={{ background: 'var(--bg-card)', color: 'var(--text-secondary)' }}>{leads.length}</span>
+          <span className="text-[12px] font-bold px-2.5 py-0.5 rounded-full" style={{ background: 'var(--bg-card)', color: 'var(--text-secondary)' }}>{totalCount}</span>
         </div>
 
         <SortableContext id={stage} items={itemIds} strategy={verticalListSortingStrategy}>
@@ -467,12 +501,25 @@ function Column({ stage, leads, onAdvance, onSelectLead }: { stage: Stage; leads
             {leads.map(lead => (
               <SortableLeadCard key={lead.id} lead={lead} onAdvance={() => onAdvance(lead.id)} onClick={() => onSelectLead(lead.id)} />
             ))}
+            {hasMore && (
+              <button
+                onClick={onShowMore}
+                className="text-[12px] font-semibold py-2 rounded-lg transition-colors"
+                style={{
+                  background: "var(--bg-pill)",
+                  color: "#0066FF",
+                  border: "1px solid var(--border-input)",
+                }}
+              >
+                Show more ({totalCount - leads.length} remaining)
+              </button>
+            )}
           </div>
         </SortableContext>
       </div>
     </div>
   );
-}
+});
 
 // ─── Main Page ───────────────────────────────────────────────────────────────
 
@@ -488,6 +535,12 @@ export default function PipelinePage() {
   const [filterReceived, setFilterReceived] = useState("Any time");
   const [filterSource, setFilterSource] = useState("All sources");
   const [hiddenStages, setHiddenStages] = useState<Set<Stage>>(new Set());
+  // Track how many cards are visible per stage (for "show more" pagination)
+  const [visibleCounts, setVisibleCounts] = useState<Record<Stage, number>>(() => {
+    const initial: Record<string, number> = {};
+    STAGES.forEach(s => { initial[s] = INITIAL_VISIBLE_COUNT; });
+    return initial as Record<Stage, number>;
+  });
 
   // Derive leads dynamically from shared conversations
   const leads: Lead[] = useMemo(() => {
@@ -512,53 +565,72 @@ export default function PipelinePage() {
     });
   }, [leads, filterCampaign]);
 
+  // Pre-group leads by stage (instead of filtering 703 × 7 on every render)
+  const groupedLeads = useMemo(() => {
+    const groups: Record<Stage, Lead[]> = {
+      "New": [], "Contacted": [], "Audition Booked": [], "Attended": [],
+      "Enrolled": [], "Unqualified": [], "Lost": [],
+    };
+    for (const lead of filteredLeads) {
+      if (groups[lead.stage]) {
+        groups[lead.stage].push(lead);
+      }
+    }
+    return groups;
+  }, [filteredLeads]);
+
   // Desktop-only sensors (pointer only, no touch sensor)
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
   );
 
-  const activeLead = activeId ? leads.find(l => l.id === activeId) : null;
-  const panelLead = panelLeadId ? leads.find(l => l.id === panelLeadId) : null;
+  const activeLead = useMemo(() => activeId ? leads.find(l => l.id === activeId) ?? null : null, [activeId, leads]);
+  const panelLead = useMemo(() => panelLeadId ? leads.find(l => l.id === panelLeadId) ?? null : null, [panelLeadId, leads]);
 
-  const leadsPerStage = (stage: Stage) => filteredLeads.filter(l => l.stage === stage);
-  const countPerStage = (stage: Stage) => filteredLeads.filter(l => l.stage === stage).length;
+  const visibleStages = useMemo(() => STAGES.filter(s => !hiddenStages.has(s)), [hiddenStages]);
 
-  const visibleStages = STAGES.filter(s => !hiddenStages.has(s));
-
-  const toggleStage = (stage: Stage) => {
+  const toggleStage = useCallback((stage: Stage) => {
     setHiddenStages(prev => {
       const next = new Set(prev);
       if (next.has(stage)) next.delete(stage);
       else next.add(stage);
       return next;
     });
-  };
+  }, []);
 
-  const handleDragStart = (event: DragStartEvent) => {
+  const handleDragStart = useCallback((event: DragStartEvent) => {
     setActiveId(event.active.id as string);
-  };
+  }, []);
 
-  const handleDragOver = (_event: DragOverEvent) => {
+  const handleDragOver = useCallback((_event: DragOverEvent) => {
     // Handled on drop
-  };
+  }, []);
 
   // Advance a lead to the next stage with the quick-advance button
-  const advanceLead = (id: string) => {
+  const advanceLead = useCallback((id: string) => {
     const lead = leads.find(l => l.id === id);
     if (!lead) return;
     const stageIdx = STAGES.indexOf(lead.stage);
     const nextStage = STAGES[stageIdx + 1];
     if (!nextStage) return;
     patchConversation(id, { pipeline: nextStage });
-  };
+  }, [leads, patchConversation]);
 
   // Move a lead to any stage (used by mobile "Move to" popover)
-  const moveLeadToStage = (id: string, stage: Stage) => {
+  const moveLeadToStage = useCallback((id: string, stage: Stage) => {
     patchConversation(id, { pipeline: stage });
-  };
+  }, [patchConversation]);
+
+  // "Show more" handler for a specific stage
+  const handleShowMore = useCallback((stage: Stage) => {
+    setVisibleCounts(prev => ({
+      ...prev,
+      [stage]: prev[stage] + INITIAL_VISIBLE_COUNT,
+    }));
+  }, []);
 
   // Drag end — persist the new stage to DB & context
-  const handleDragEnd = (event: DragEndEvent) => {
+  const handleDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event;
     setActiveId(null);
     if (!over) return;
@@ -573,7 +645,7 @@ export default function PipelinePage() {
     if (targetStage) {
       patchConversation(activeLeadId, { pipeline: targetStage });
     }
-  };
+  }, [leads, patchConversation]);
 
 
   return (
@@ -656,6 +728,7 @@ export default function PipelinePage() {
             <span className="text-[10px] font-bold tracking-widest mr-2 uppercase shrink-0" style={{ color: 'var(--text-muted)' }}>STAGES</span>
             {STAGES.map(stage => {
               const isHidden = hiddenStages.has(stage);
+              const count = groupedLeads[stage].length;
               return (
                 <button
                   key={stage}
@@ -663,7 +736,7 @@ export default function PipelinePage() {
                   className={`text-[12px] font-medium px-2.5 py-0.5 rounded-full transition-colors shrink-0 cursor-pointer touch-manipulation ${isHidden ? 'line-through' : ''}`}
                   style={isHidden ? { background: 'var(--bg-pill)', color: 'var(--text-muted)' } : { background: 'var(--bg-selected)', color: '#0066FF' }}
                 >
-                  {stage} {countPerStage(stage)}
+                  {stage} {count}
                 </button>
               );
             })}
@@ -688,15 +761,23 @@ export default function PipelinePage() {
                     "px",
                 }}
               >
-                {visibleStages.map((stage) => (
-                  <MobileColumn
-                    key={stage}
-                    stage={stage}
-                    leads={leadsPerStage(stage)}
-                    onMove={moveLeadToStage}
-                    onSelectLead={setPanelLeadId}
-                  />
-                ))}
+                {visibleStages.map((stage) => {
+                  const allStageLeads = groupedLeads[stage];
+                  const limit = visibleCounts[stage];
+                  const visibleLeads = allStageLeads.slice(0, limit);
+                  return (
+                    <MobileColumn
+                      key={stage}
+                      stage={stage}
+                      leads={visibleLeads}
+                      totalCount={allStageLeads.length}
+                      onMove={moveLeadToStage}
+                      onSelectLead={setPanelLeadId}
+                      onShowMore={() => handleShowMore(stage)}
+                      hasMore={visibleLeads.length < allStageLeads.length}
+                    />
+                  );
+                })}
               </div>
             </div>
           ) : (
@@ -716,15 +797,23 @@ export default function PipelinePage() {
                 }}
               >
                 <div className="flex gap-4 h-full items-start" style={{ minWidth: visibleStages.length * 240 + ((visibleStages.length - 1) * 16) + "px" }}>
-                  {visibleStages.map(stage => (
-                    <Column
-                      key={stage}
-                      stage={stage}
-                      leads={leadsPerStage(stage)}
-                      onAdvance={advanceLead}
-                      onSelectLead={setPanelLeadId}
-                    />
-                  ))}
+                  {visibleStages.map(stage => {
+                    const allStageLeads = groupedLeads[stage];
+                    const limit = visibleCounts[stage];
+                    const visibleLeads = allStageLeads.slice(0, limit);
+                    return (
+                      <Column
+                        key={stage}
+                        stage={stage}
+                        leads={visibleLeads}
+                        totalCount={allStageLeads.length}
+                        onAdvance={advanceLead}
+                        onSelectLead={setPanelLeadId}
+                        onShowMore={() => handleShowMore(stage)}
+                        hasMore={visibleLeads.length < allStageLeads.length}
+                      />
+                    );
+                  })}
                 </div>
               </div>
 

@@ -114,17 +114,28 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
+  // Slim bulk fetch — excludes messages array for massive payload savings
   const fetchConversations = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/messages`);
+      const res = await fetch(`${API}/messages?slim=1`);
       const json = await res.json();
       if (json.success && Array.isArray(json.data)) {
-        const parsed = json.data.map(normalizeConversation);
-        setConversations(
-          activeChatId
-            ? parsed.map((c: Conversation) => (c.id === activeChatId ? { ...c, unreadCount: 0 } : c))
-            : parsed
-        );
+        const parsed = json.data.map((c: any): Conversation => ({
+          ...normalizeConversation(c),
+          messages: [], // slim mode — messages come from active chat fetch
+        }));
+        setConversations((prev) => {
+          // Preserve messages for the active chat from previous state
+          const prevActiveMessages = activeChatId
+            ? prev.find((c) => c.id === activeChatId)?.messages || []
+            : [];
+          return parsed.map((c: Conversation) => {
+            if (c.id === activeChatId) {
+              return { ...c, messages: prevActiveMessages, unreadCount: 0 };
+            }
+            return c;
+          });
+        });
       }
     } catch (err) {
       console.error("CRMContext: failed to fetch conversations", err);
@@ -133,12 +144,41 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     }
   }, [normalizeConversation, activeChatId]);
 
-  // Unified single polling loop
+  // Fetch full messages for the active chat only
+  const fetchActiveChat = useCallback(async () => {
+    if (!activeChatId) return;
+    try {
+      const res = await fetch(`${API}/messages/${activeChatId}`);
+      const json = await res.json();
+      if (json.success && json.data) {
+        const fullConv = normalizeConversation(json.data);
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === activeChatId
+              ? { ...c, messages: fullConv.messages, unreadCount: 0 }
+              : c
+          )
+        );
+      }
+    } catch (err) {
+      console.error("CRMContext: failed to fetch active chat", err);
+    }
+  }, [activeChatId, normalizeConversation]);
+
+  // Unified polling: slim bulk every 3s + active chat messages every 3s
   useEffect(() => {
     fetchConversations();
     const interval = setInterval(fetchConversations, 3000);
     return () => clearInterval(interval);
   }, [fetchConversations]);
+
+  // Active chat polling: fetch full messages for the open conversation
+  useEffect(() => {
+    if (!activeChatId) return;
+    fetchActiveChat();
+    const interval = setInterval(fetchActiveChat, 3000);
+    return () => clearInterval(interval);
+  }, [activeChatId, fetchActiveChat]);
 
   // Compute live badges across all pages
   const badgeCounts = useMemo<BadgeCounts>(() => {
