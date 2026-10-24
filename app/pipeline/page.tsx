@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { MessageSquare } from "lucide-react";
 import { useCRM } from "../context/CRMContext";
 
@@ -8,7 +8,6 @@ import {
   DndContext,
   DragOverlay,
   PointerSensor,
-  TouchSensor,
   useSensor,
   useSensors,
   closestCorners,
@@ -45,7 +44,6 @@ type Lead = {
   agent?: string;
 };
 
-
 const STAGES: Stage[] = [
   "New", "Contacted", "Audition Booked", "Attended", "Enrolled", "Unqualified", "Lost",
 ];
@@ -58,7 +56,331 @@ const NEXT_STAGE: Partial<Record<Stage, string>> = {
   "Attended": "→ Enrolled",
 };
 
-// ─── Sortable Lead Card ───────────────────────────────────────────────────────
+// Stage color map for the move-to menu
+const STAGE_COLORS: Record<Stage, string> = {
+  "New": "#007AFF",
+  "Contacted": "#5856D6",
+  "Audition Booked": "#FF9500",
+  "Attended": "#34C759",
+  "Enrolled": "#30D158",
+  "Unqualified": "#8E8E93",
+  "Lost": "#FF3B30",
+};
+
+// ─── useIsMobile hook ─────────────────────────────────────────────────────────
+
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    // Check for coarse pointer (touch devices) or narrow viewport
+    const checkMobile = () => {
+      const coarse = window.matchMedia("(pointer: coarse)").matches;
+      const narrow = window.innerWidth < 768;
+      setIsMobile(coarse || narrow);
+    };
+    checkMobile();
+    window.addEventListener("resize", checkMobile);
+    return () => window.removeEventListener("resize", checkMobile);
+  }, []);
+  return isMobile;
+}
+
+// ─── "Move to" Popover ────────────────────────────────────────────────────────
+
+function MoveToPopover({
+  currentStage,
+  onMove,
+  onClose,
+}: {
+  currentStage: Stage;
+  onMove: (stage: Stage) => void;
+  onClose: () => void;
+}) {
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent | TouchEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handler, true);
+    document.addEventListener("touchstart", handler, true);
+    return () => {
+      document.removeEventListener("mousedown", handler, true);
+      document.removeEventListener("touchstart", handler, true);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      ref={popoverRef}
+      style={{
+        position: "absolute",
+        top: "36px",
+        right: "0",
+        zIndex: 100,
+        minWidth: "180px",
+        background: "var(--bg-card)",
+        border: "1px solid var(--border-main)",
+        borderRadius: "12px",
+        boxShadow: "0 8px 30px rgba(0,0,0,0.15)",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          padding: "8px 12px",
+          borderBottom: "1px solid var(--border-main)",
+        }}
+      >
+        <span
+          style={{
+            fontSize: "10px",
+            fontWeight: 700,
+            letterSpacing: "0.08em",
+            textTransform: "uppercase",
+            color: "var(--text-muted)",
+          }}
+        >
+          Move to
+        </span>
+      </div>
+      {STAGES.map((stage) => {
+        const isCurrent = stage === currentStage;
+        return (
+          <button
+            key={stage}
+            type="button"
+            disabled={isCurrent}
+            onClick={(e) => {
+              e.stopPropagation();
+              onMove(stage);
+              onClose();
+            }}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              width: "100%",
+              padding: "10px 12px",
+              border: "none",
+              background: isCurrent ? "var(--bg-selected)" : "transparent",
+              cursor: isCurrent ? "default" : "pointer",
+              opacity: isCurrent ? 0.5 : 1,
+              fontSize: "13px",
+              fontWeight: isCurrent ? 600 : 400,
+              color: "var(--text-primary)",
+              textAlign: "left",
+              touchAction: "manipulation",
+              WebkitTapHighlightColor: "transparent",
+            }}
+          >
+            <span
+              style={{
+                width: "8px",
+                height: "8px",
+                borderRadius: "50%",
+                background: STAGE_COLORS[stage],
+                flexShrink: 0,
+              }}
+            />
+            {stage}
+            {isCurrent && (
+              <span
+                style={{
+                  marginLeft: "auto",
+                  fontSize: "10px",
+                  fontWeight: 600,
+                  color: "var(--text-muted)",
+                }}
+              >
+                Current
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Mobile Lead Card (no drag, with "Move to" button) ───────────────────────
+
+function MobileLeadCard({
+  lead,
+  onMove,
+  onClick,
+}: {
+  lead: Lead;
+  onMove: (stage: Stage) => void;
+  onClick?: () => void;
+}) {
+  const [showPopover, setShowPopover] = useState(false);
+
+  return (
+    <div
+      onClick={onClick}
+      className="rounded-xl px-4 py-3 transition-shadow hover:shadow-md cursor-pointer"
+      style={{
+        background: "var(--bg-card)",
+        border: "1px solid var(--border-main)",
+        boxShadow: "var(--shadow-card)",
+        position: "relative",
+      }}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <p
+          className="text-[15px] font-bold leading-tight flex-1"
+          style={{ color: "var(--text-primary)" }}
+        >
+          {lead.name}
+        </p>
+        {/* Move-to button — top right */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setShowPopover((prev) => !prev);
+          }}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "4px",
+            padding: "4px 8px",
+            borderRadius: "6px",
+            border: "1px solid var(--border-input)",
+            background: "var(--bg-pill)",
+            color: "#0066FF",
+            fontSize: "11px",
+            fontWeight: 600,
+            cursor: "pointer",
+            touchAction: "manipulation",
+            WebkitTapHighlightColor: "transparent",
+            flexShrink: 0,
+          }}
+        >
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{ pointerEvents: "none" }}
+          >
+            <path d="M5 12h14" />
+            <path d="m12 5 7 7-7 7" />
+          </svg>
+          Move
+        </button>
+      </div>
+      <p
+        className="text-[13px] mt-0.5 leading-snug"
+        style={{ color: "var(--text-secondary)" }}
+      >
+        {lead.campaign}
+      </p>
+      <div className="flex items-center justify-between mt-2.5">
+        <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>
+          {lead.date.split(",")[0]}
+        </span>
+        <span
+          className="text-[11px] font-medium px-2 py-0.5 rounded-full"
+          style={{
+            background: STAGE_COLORS[lead.stage] + "18",
+            color: STAGE_COLORS[lead.stage],
+          }}
+        >
+          {lead.stage}
+        </span>
+      </div>
+
+      {/* Popover */}
+      {showPopover && (
+        <MoveToPopover
+          currentStage={lead.stage}
+          onMove={onMove}
+          onClose={() => setShowPopover(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Mobile Column (no DnD) ─────────────────────────────────────────────────
+
+function MobileColumn({
+  stage,
+  leads,
+  onMove,
+  onSelectLead,
+}: {
+  stage: Stage;
+  leads: Lead[];
+  onMove: (id: string, stage: Stage) => void;
+  onSelectLead: (id: string) => void;
+}) {
+  return (
+    <div className="flex flex-col min-w-[260px] max-w-[260px] shrink-0 h-full">
+      <div
+        className="flex flex-col flex-1 rounded-2xl overflow-hidden h-full max-h-full"
+        style={{ background: "var(--bg-column)" }}
+      >
+        {/* Column header */}
+        <div className="flex items-center justify-between px-3 pt-4 pb-2 shrink-0">
+          <div className="flex items-center gap-2">
+            <span
+              style={{
+                width: "8px",
+                height: "8px",
+                borderRadius: "50%",
+                background: STAGE_COLORS[stage],
+              }}
+            />
+            <span
+              className="text-[15px] font-bold"
+              style={{ color: "var(--text-primary)" }}
+            >
+              {stage}
+            </span>
+          </div>
+          <span
+            className="text-[12px] font-bold px-2.5 py-0.5 rounded-full"
+            style={{
+              background: "var(--bg-card)",
+              color: "var(--text-secondary)",
+            }}
+          >
+            {leads.length}
+          </span>
+        </div>
+
+        {/* Card list — plain scroll, no drag */}
+        <div
+          className="flex flex-col gap-2 flex-1 min-h-[150px] px-2.5 pb-3 overflow-y-auto"
+          style={{
+            WebkitOverflowScrolling: "touch",
+            overscrollBehavior: "contain",
+          }}
+        >
+          {leads.map((lead) => (
+            <MobileLeadCard
+              key={lead.id}
+              lead={lead}
+              onMove={(targetStage) => onMove(lead.id, targetStage)}
+              onClick={() => onSelectLead(lead.id)}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Desktop Lead Card (with drag handle dots) ──────────────────────────────
 
 function LeadCard({ lead, onAdvance, isDragging, onClick }: { lead: Lead; onAdvance?: () => void; isDragging?: boolean; onClick?: () => void }) {
   const next = NEXT_STAGE[lead.stage];
@@ -69,10 +391,9 @@ function LeadCard({ lead, onAdvance, isDragging, onClick }: { lead: Lead; onAdva
         }`}
       style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)', boxShadow: 'var(--shadow-card)' }}
     >
-      {/* Drag handle — visible on touch devices as a hint */}
       <div className="flex items-start justify-between gap-2">
         <p className="text-[15px] font-bold leading-tight" style={{ color: 'var(--text-primary)' }}>{lead.name}</p>
-        <div className="shrink-0 mt-0.5 touch-hint" style={{ color: 'var(--text-muted)' }}>
+        <div className="shrink-0 mt-0.5" style={{ color: 'var(--text-muted)' }}>
           <svg width="12" height="16" viewBox="0 0 12 16" fill="currentColor" opacity={0.4}>
             <circle cx="3" cy="3" r="1.5" />
             <circle cx="9" cy="3" r="1.5" />
@@ -107,7 +428,6 @@ function SortableLeadCard({ lead, onAdvance, onClick }: { lead: Lead; onAdvance:
     transition,
     opacity: isDragging ? 0.3 : 1,
     cursor: isDragging ? 'grabbing' : 'grab',
-    // Allow touch scrolling in both directions unless actively dragging
     touchAction: isDragging ? 'none' : 'pan-x pan-y',
     WebkitUserSelect: 'none',
     userSelect: 'none',
@@ -124,7 +444,7 @@ function SortableLeadCard({ lead, onAdvance, onClick }: { lead: Lead; onAdvance:
   );
 }
 
-// ─── Column ──────────────────────────────────────────────────────────────────
+// ─── Desktop Column (with DnD) ──────────────────────────────────────────────
 
 function Column({ stage, leads, onAdvance, onSelectLead }: { stage: Stage; leads: Lead[]; onAdvance: (id: string) => void; onSelectLead: (id: string) => void }) {
   const { setNodeRef } = useDroppable({ id: stage });
@@ -132,15 +452,12 @@ function Column({ stage, leads, onAdvance, onSelectLead }: { stage: Stage; leads
 
   return (
     <div className="flex flex-col min-w-[240px] max-w-[240px] shrink-0 h-full">
-      {/* Rounded card container */}
       <div className="flex flex-col flex-1 rounded-2xl overflow-hidden h-full max-h-full" style={{ background: 'var(--bg-column)' }}>
-        {/* Column header */}
         <div className="flex items-center justify-between px-3 pt-4 pb-2 shrink-0">
           <span className="text-[15px] font-bold" style={{ color: 'var(--text-primary)' }}>{stage}</span>
           <span className="text-[12px] font-bold px-2.5 py-0.5 rounded-full" style={{ background: 'var(--bg-card)', color: 'var(--text-secondary)' }}>{leads.length}</span>
         </div>
 
-        {/* Drop zone */}
         <SortableContext id={stage} items={itemIds} strategy={verticalListSortingStrategy}>
           <div
             ref={setNodeRef}
@@ -161,6 +478,7 @@ function Column({ stage, leads, onAdvance, onSelectLead }: { stage: Stage; leads
 
 export default function PipelinePage() {
   const { conversations, patchConversation, openChat } = useCRM();
+  const isMobile = useIsMobile();
 
   const [view, setView] = useState<"pipeline" | "table">("pipeline");
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -194,11 +512,9 @@ export default function PipelinePage() {
     });
   }, [leads, filterCampaign]);
 
+  // Desktop-only sensors (pointer only, no touch sensor)
   const sensors = useSensors(
-    // Desktop/mouse: activate after moving 5px
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    // Touch/mobile: long-press 250ms, allow 8px finger movement during hold
-    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 8 } })
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
   );
 
   const activeLead = activeId ? leads.find(l => l.id === activeId) : null;
@@ -222,11 +538,11 @@ export default function PipelinePage() {
     setActiveId(event.active.id as string);
   };
 
-  const handleDragOver = (event: DragOverEvent) => {
+  const handleDragOver = (_event: DragOverEvent) => {
     // Handled on drop
   };
 
-  // Advance a lead to the next stage with the button
+  // Advance a lead to the next stage with the quick-advance button
   const advanceLead = (id: string) => {
     const lead = leads.find(l => l.id === id);
     if (!lead) return;
@@ -234,6 +550,11 @@ export default function PipelinePage() {
     const nextStage = STAGES[stageIdx + 1];
     if (!nextStage) return;
     patchConversation(id, { pipeline: nextStage });
+  };
+
+  // Move a lead to any stage (used by mobile "Move to" popover)
+  const moveLeadToStage = (id: string, stage: Stage) => {
+    patchConversation(id, { pipeline: stage });
   };
 
   // Drag end — persist the new stage to DB & context
@@ -348,39 +669,71 @@ export default function PipelinePage() {
             })}
           </div>
 
-          {/* Kanban board */}
-          <DndContext
-            sensors={sensors}
-            collisionDetection={closestCorners}
-            onDragStart={handleDragStart}
-            onDragOver={handleDragOver}
-            onDragEnd={handleDragEnd}
-          >
+          {/* Kanban board — mobile vs desktop rendering */}
+          {isMobile ? (
+            /* ── MOBILE: No drag-and-drop, cards have "Move" button ── */
             <div
-              className="flex-1 min-h-0 min-w-0 overflow-x-auto overflow-y-auto px-4 md:px-6 py-4 md:py-5"
+              className="flex-1 min-h-0 min-w-0 overflow-x-auto overflow-y-auto px-4 py-4"
               style={{
-                WebkitOverflowScrolling: 'touch',
-                touchAction: 'pan-x pan-y',
+                WebkitOverflowScrolling: "touch",
+                touchAction: "pan-x pan-y",
               }}
             >
-              <div className="flex gap-4 h-full items-start" style={{ minWidth: visibleStages.length * 240 + ((visibleStages.length - 1) * 16) + "px" }}>
-                {visibleStages.map(stage => (
-                  <Column
+              <div
+                className="flex gap-3 h-full items-start"
+                style={{
+                  minWidth:
+                    visibleStages.length * 268 +
+                    (visibleStages.length - 1) * 12 +
+                    "px",
+                }}
+              >
+                {visibleStages.map((stage) => (
+                  <MobileColumn
                     key={stage}
                     stage={stage}
                     leads={leadsPerStage(stage)}
-                    onAdvance={advanceLead}
+                    onMove={moveLeadToStage}
                     onSelectLead={setPanelLeadId}
                   />
                 ))}
               </div>
             </div>
+          ) : (
+            /* ── DESKTOP: Full drag-and-drop ── */
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCorners}
+              onDragStart={handleDragStart}
+              onDragOver={handleDragOver}
+              onDragEnd={handleDragEnd}
+            >
+              <div
+                className="flex-1 min-h-0 min-w-0 overflow-x-auto overflow-y-auto px-4 md:px-6 py-4 md:py-5"
+                style={{
+                  WebkitOverflowScrolling: 'touch',
+                  touchAction: 'pan-x pan-y',
+                }}
+              >
+                <div className="flex gap-4 h-full items-start" style={{ minWidth: visibleStages.length * 240 + ((visibleStages.length - 1) * 16) + "px" }}>
+                  {visibleStages.map(stage => (
+                    <Column
+                      key={stage}
+                      stage={stage}
+                      leads={leadsPerStage(stage)}
+                      onAdvance={advanceLead}
+                      onSelectLead={setPanelLeadId}
+                    />
+                  ))}
+                </div>
+              </div>
 
-            {/* Drag overlay – the floating "ghost" card */}
-            <DragOverlay dropAnimation={{ duration: 180, easing: "ease" }}>
-              {activeLead ? <LeadCard lead={activeLead} isDragging /> : null}
-            </DragOverlay>
-          </DndContext>
+              {/* Drag overlay – the floating "ghost" card */}
+              <DragOverlay dropAnimation={{ duration: 180, easing: "ease" }}>
+                {activeLead ? <LeadCard lead={activeLead} isDragging /> : null}
+              </DragOverlay>
+            </DndContext>
+          )}
         </>
       )}
 
