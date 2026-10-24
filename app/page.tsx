@@ -8,6 +8,7 @@ type Channel = "WA" | "IG" | "FB";
 type Message = {
   id: string;
   text: string;
+  attachments?: any[];
   time: string;
   isIncoming: boolean;
   isRead?: boolean;
@@ -42,60 +43,37 @@ type Conversation = {
 
 // Removed dummy data
 
+import { useCRM } from "./context/CRMContext";
+
 type MobileView = "list" | "chat" | "details";
 
 export default function InboxPage() {
   const [activeFilter, setActiveFilter] = useState("All");
-  const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [mobileView, setMobileView] = useState<MobileView>("list");
   const [showDetailsPanel, setShowDetailsPanel] = useState(false);
   const [replyText, setReplyText] = useState("");
   const [isSending, setIsSending] = useState(false);
-  
+
   const filters = ["All", "Mine", "Unassigned", "Open", "Resolved"];
 
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  
-  useEffect(() => {
-    // Poll the live webhook server every 3 seconds
-    const fetchMessages = async () => {
-      try {
-        const res = await fetch("/api/messages");
-        const json = await res.json();
-        
-        if (json.success && json.data) {
-          const liveConvs: Conversation[] = json.data.map((c: any) => ({
-            id: c.senderId,
-            name: c.name || (c.channel === 'FB' ? `Messenger User` : c.channel === 'IG' ? `Instagram User` : `WhatsApp User`),
-            phone: c.phone || `Live ${c.channel}`,
-            agent: c.agent || "Unassigned",
-            channel: c.channel,
-            status: c.status || "Open",
-            unreadCount: c.unreadCount,
-            windowLeft: "Active",
-            pipeline: c.pipeline || "New",
-            source: c.source || "direct",
-            formAnswers: c.formAnswers,
-            messages: c.messages.map((m: any) => ({
-              id: m.messageId,
-              text: m.text,
-              time: new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-              isIncoming: m.direction === 'incoming',
-            }))
-          }));
-          
-          // Set live conversations
-          setConversations(liveConvs);
-        }
-      } catch (err) {
-        console.error("Failed to fetch live messages:", err);
-      }
-    };
+  const {
+    conversations,
+    activeChatId,
+    setActiveChatId,
+    patchConversation,
+    markConversationAsRead,
+  } = useCRM();
 
-    fetchMessages();
-    const interval = setInterval(fetchMessages, 3000);
-    return () => clearInterval(interval);
-  }, []);
+  const [activeConvId, setActiveConvId] = useState<string | null>(activeChatId);
+
+  // Sync if navigated from another page (e.g. Pipeline, Leads, Follow-ups)
+  useEffect(() => {
+    if (activeChatId) {
+      setActiveConvId(activeChatId);
+      setMobileView("chat");
+      markConversationAsRead(activeChatId);
+    }
+  }, [activeChatId, markConversationAsRead]);
 
   // ── Filter logic ──────────────────────────────────────────────────
   const filteredConversations = conversations.filter((conv) => {
@@ -108,23 +86,6 @@ export default function InboxPage() {
   });
 
   const activeConv = conversations.find((c) => c.id === activeConvId);
-
-  // ── Generic PATCH helper ───────────────────────────────────────────
-  const patchConversation = async (senderId: string, updates: Record<string, any>) => {
-    // Optimistically update local state immediately
-    setConversations(prev =>
-      prev.map(c => c.id === senderId ? { ...c, ...updates } : c)
-    );
-    try {
-      await fetch(`/api/messages/${senderId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(updates),
-      });
-    } catch (err) {
-      console.error("Failed to patch conversation:", err);
-    }
-  };
 
   const handleSendReply = async () => {
     if (!replyText.trim() || !activeConv) return;
@@ -147,8 +108,10 @@ export default function InboxPage() {
 
   const handleSelectConv = (id: string) => {
     setActiveConvId(id);
+    setActiveChatId(id);
     setMobileView("chat");
     setShowDetailsPanel(false);
+    markConversationAsRead(id);
   };
 
   const handleBackToList = () => {
@@ -332,13 +295,40 @@ export default function InboxPage() {
                       boxShadow: "var(--shadow-card)",
                     }}
                   >
-                    <p
-                      className={`text-[14px] md:text-[15px] leading-relaxed ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
-                      style={{ color: msg.isIncoming ? "var(--text-chat-incoming)" : "var(--text-chat-outgoing)" }}
-                      dir={msg.dir}
-                    >
-                      {msg.text}
-                    </p>
+                    {msg.attachments && msg.attachments.length > 0 && (
+                      <div className="flex flex-col gap-2 mb-1.5">
+                        {msg.attachments.map((att: any, idx: number) => {
+                          const url = att.payload?.url || att.url;
+                          if (att.type === 'image' && url) {
+                            return (
+                              <img
+                                key={idx}
+                                src={url}
+                                alt="Attachment"
+                                className="max-w-full rounded-lg max-h-60 object-cover"
+                              />
+                            );
+                          }
+                          if (att.type === 'audio' && url) {
+                            return (
+                              <audio key={idx} controls className="max-w-full my-1">
+                                <source src={url} />
+                              </audio>
+                            );
+                          }
+                          return null;
+                        })}
+                      </div>
+                    )}
+                    {msg.text && (
+                      <p
+                        className={`text-[14px] md:text-[15px] leading-relaxed ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
+                        style={{ color: msg.isIncoming ? "var(--text-chat-incoming)" : "var(--text-chat-outgoing)" }}
+                        dir={msg.dir}
+                      >
+                        {msg.text}
+                      </p>
+                    )}
                     <div
                       className={`text-[10px] mt-1.5 ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
                       style={{ color: msg.isIncoming ? "var(--text-muted)" : "var(--text-chat-outgoing)", opacity: msg.isIncoming ? 1 : 0.6 }}
@@ -452,18 +442,18 @@ export default function InboxPage() {
 
             <div className="mb-5">
               <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Source</h3>
-              {activeConv.source === "direct" ? (
-                <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>Direct / unknown</p>
+              {typeof activeConv.source !== "object" || !activeConv.source ? (
+                <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>{String(activeConv.source || "Direct / unknown")}</p>
               ) : (
                 <div className="rounded-[6px] p-2.5" style={{ background: "var(--bg-input)" }}>
                   <p className="text-[11px] font-bold mb-0.5" style={{ color: "var(--text-primary)" }}>
-                    {activeConv.source.campaign}
+                    {activeConv.source.campaign || "Ad Campaign"}
                   </p>
                   <p className="text-[10px]" style={{ color: "var(--text-secondary)" }}>
-                    {activeConv.source.adset}
+                    {activeConv.source.adset || "—"}
                   </p>
                   <p className="text-[10px]" style={{ color: "var(--text-secondary)" }}>
-                    {activeConv.source.ad}
+                    {activeConv.source.ad || "—"}
                   </p>
                 </div>
               )}

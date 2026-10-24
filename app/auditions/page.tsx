@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
-
-const API = "/api";
+import React, { useState, useMemo } from 'react';
+import { useCRM } from '../context/CRMContext';
+import { MessageSquare, Calendar, ChevronLeft, ChevronRight } from 'lucide-react';
 
 type AuditionStatus = 'attended' | 'no-show' | 'free' | 'booked';
 
@@ -16,14 +16,6 @@ type Slot = {
 };
 
 type DaySlots = { [dateKey: string]: Slot[] };
-
-type LiveAudition = {
-  id: string;
-  name: string;
-  stage: string;
-  agent: string;
-  phone: string;
-};
 
 function addDays(date: Date, days: number) {
   const d = new Date(date);
@@ -47,31 +39,36 @@ function formatDayLabel(d: Date) {
   return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
 }
 
-const TODAY_ISO = isoDate(new Date());
 const DAYS = ['Sat', 'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
 
-const initialSlots: DaySlots = {
-  '2026-09-19': [{ id: 1, time: '05:00 PM', name: 'Salma', type: 'Child 8 · Piano', status: 'attended', agent: 'Salma' }],
-  '2026-09-20': [
+function createDefaultSlots(start: Date): DaySlots {
+  const result: DaySlots = {};
+  const day0 = isoDate(addDays(start, 0));
+  const day1 = isoDate(addDays(start, 1));
+  const day2 = isoDate(addDays(start, 2));
+  const day3 = isoDate(addDays(start, 3));
+
+  result[day0] = [{ id: 1, time: '05:00 PM', name: 'Salma', type: 'Child 8 · Piano', status: 'attended', agent: 'Salma' }];
+  result[day1] = [
     { id: 2, time: '05:00 PM', name: 'Huda', type: 'Child 11 · Violin', status: 'attended', agent: 'Huda' },
     { id: 3, time: '05:30 PM', status: 'free', agent: 'Jwana' },
-  ],
-  '2026-09-21': [
+  ];
+  result[day2] = [
     { id: 4, time: '04:00 PM', name: 'Tariq', type: 'Adult · Oud', status: 'no-show', agent: 'Tariq' },
     { id: 5, time: '04:30 PM', status: 'free', agent: 'Rokaia' },
-  ],
-  '2026-09-22': [{ id: 6, time: '05:00 PM', status: 'free', agent: 'Jwana' }],
-};
+  ];
+  result[day3] = [{ id: 6, time: '05:00 PM', status: 'free', agent: 'Jwana' }];
+
+  return result;
+}
 
 type BookingModal = { slotId: number; dateKey: string; time: string; dayLabel: string } | null;
 
 export default function AuditionsPage() {
+  const { conversations, patchConversation, openChat } = useCRM();
   const [weekStart, setWeekStart] = useState(() => getWeekStart(new Date()));
-  const [slots, setSlots] = useState<DaySlots>(initialSlots);
+  const [slots, setSlots] = useState<DaySlots>(() => createDefaultSlots(getWeekStart(new Date())));
   const [nextId, setNextId] = useState(100);
-
-  // Live Auditions state
-  const [liveAuditions, setLiveAuditions] = useState<LiveAudition[]>([]);
 
   // "+ slot" inline form state
   const [addingSlot, setAddingSlot] = useState<{ dateKey: string; time: string; agent: string } | null>(null);
@@ -80,45 +77,21 @@ export default function AuditionsPage() {
   const [bookingModal, setBookingModal] = useState<BookingModal>(null);
   const [bookForm, setBookForm] = useState({ name: '', type: 'Adult', age: '', instrument: '' });
 
-  const fetchLiveAuditions = async () => {
-    try {
-      const res = await fetch(`${API}/messages`);
-      const json = await res.json();
-      if (json.success && json.data) {
-        const booked = json.data
-          .filter((c: any) => c.pipeline === "Audition Booked")
-          .map((c: any) => ({
-            id: c.senderId,
-            name: c.name || `User ${c.senderId.slice(-4)}`,
-            stage: c.pipeline,
-            agent: c.agent || "Unassigned",
-            phone: c.phone || "—",
-          }));
-        setLiveAuditions(booked);
-      }
-    } catch (err) {
-      console.error("Failed to fetch live auditions:", err);
-    }
-  };
+  // Live Auditions derived from CRM state
+  const liveAuditions = useMemo(() => {
+    return conversations
+      .filter((c) => c.pipeline === "Audition Booked")
+      .map((c) => ({
+        id: c.id,
+        name: c.name || `User ${c.id.slice(-4)}`,
+        stage: c.pipeline,
+        agent: c.agent || "Unassigned",
+        phone: c.phone || "—",
+      }));
+  }, [conversations]);
 
-  useEffect(() => {
-    fetchLiveAuditions();
-    const interval = setInterval(fetchLiveAuditions, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const completeLiveAudition = async (id: string, status: "Attended" | "No-Show") => {
-    // Optimistic removal
-    setLiveAuditions(prev => prev.filter(a => a.id !== id));
-    try {
-      await fetch(`${API}/messages/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pipeline: status }),
-      });
-    } catch (err) {
-      console.error(err);
-    }
+  const completeLiveAudition = (id: string, status: "Attended" | "Lost") => {
+    patchConversation(id, { pipeline: status });
   };
 
   const weekDays = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
@@ -162,6 +135,8 @@ export default function AuditionsPage() {
     }));
   };
 
+  const todayIso = isoDate(new Date());
+
   return (
     <div className="flex flex-col h-full" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
       {/* Header */}
@@ -171,33 +146,65 @@ export default function AuditionsPage() {
           <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>{formatRangeLabel(weekStart, weekEnd)}</p>
         </div>
         <div className="flex items-center gap-2">
-          <select className="h-[26px] text-[11px] rounded-[6px] px-2 outline-none" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}>
+          <select className="h-[28px] text-[11px] rounded-[6px] px-2 outline-none" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}>
             <option>Jeddah Hub</option>
             <option>Riyadh Hub</option>
           </select>
-          <button onClick={prevWeek} className="h-[26px] w-[26px] flex items-center justify-center rounded-[6px] transition-colors text-[13px]" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}>‹</button>
-          <button onClick={goToday} className="h-[26px] px-3 text-[11px] font-medium rounded-[6px] transition-colors" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}>Today</button>
-          <button onClick={nextWeek} className="h-[26px] w-[26px] flex items-center justify-center rounded-[6px] transition-colors text-[13px]" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}>›</button>
+          <button onClick={prevWeek} className="h-[28px] w-[28px] flex items-center justify-center rounded-[6px] transition-colors" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}>
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+          <button onClick={goToday} className="h-[28px] px-3 text-[11px] font-medium rounded-[6px] transition-colors" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}>Today</button>
+          <button onClick={nextWeek} className="h-[28px] w-[28px] flex items-center justify-center rounded-[6px] transition-colors" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}>
+            <ChevronRight className="w-4 h-4" />
+          </button>
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto">
         {/* Live Auditions from CRM */}
         {liveAuditions.length > 0 && (
-          <div className="px-6 py-5 border-b" style={{ borderColor: 'var(--border-main)' }}>
-            <h2 className="text-[12px] font-bold uppercase tracking-widest text-[#0066FF] mb-3">Live CRM Pipeline: Audition Booked ({liveAuditions.length})</h2>
+          <div className="px-6 py-5 border-b" style={{ borderColor: 'var(--border-main)', background: 'var(--bg-card)' }}>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-[12px] font-bold uppercase tracking-widest text-[#0066FF] flex items-center gap-1.5">
+                <Calendar className="w-3.5 h-3.5" />
+                Live CRM Pipeline: Audition Booked ({liveAuditions.length})
+              </h2>
+              <span className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                Directly from Meta conversations
+              </span>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
               {liveAuditions.map(a => (
-                <div key={a.id} className="p-3 rounded-lg shadow-sm border" style={{ background: 'var(--bg-card)', borderColor: 'var(--border-main)' }}>
-                  <div className="flex justify-between items-start mb-2">
-                    <h3 className="font-semibold text-[14px]">{a.name}</h3>
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#0066FF] text-white">Booked</span>
+                <div key={a.id} className="p-3 rounded-xl shadow-sm border flex flex-col justify-between" style={{ background: 'var(--bg-page)', borderColor: 'var(--border-main)' }}>
+                  <div>
+                    <div className="flex justify-between items-start mb-2">
+                      <h3 className="font-semibold text-[13px]">{a.name}</h3>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#0066FF] text-white">Booked</span>
+                    </div>
+                    <p className="text-[12px] mb-1" style={{ color: 'var(--text-secondary)' }}>Phone: {a.phone}</p>
+                    <p className="text-[12px] mb-3" style={{ color: 'var(--text-secondary)' }}>Agent: {a.agent}</p>
                   </div>
-                  <p className="text-[12px] mb-1" style={{ color: 'var(--text-secondary)' }}>Phone: {a.phone}</p>
-                  <p className="text-[12px] mb-3" style={{ color: 'var(--text-secondary)' }}>Agent: {a.agent}</p>
-                  <div className="flex gap-2">
-                    <button onClick={() => completeLiveAudition(a.id, "Attended")} className="flex-1 py-1 text-[11px] font-semibold bg-[#34C759] text-white rounded hover:opacity-90">✓ Attended</button>
-                    <button onClick={() => completeLiveAudition(a.id, "No-Show")} className="flex-1 py-1 text-[11px] font-semibold border border-red-200 text-red-500 rounded hover:bg-red-50">✕ No-Show</button>
+                  <div className="flex gap-2 pt-2 border-t" style={{ borderColor: 'var(--border-main)' }}>
+                    <button
+                      onClick={() => openChat(a.id)}
+                      className="px-2.5 py-1 text-[11px] font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 transition flex items-center gap-1"
+                      title="Open Chat"
+                    >
+                      <MessageSquare className="w-3 h-3" />
+                      Chat
+                    </button>
+                    <button
+                      onClick={() => completeLiveAudition(a.id, "Attended")}
+                      className="flex-1 py-1 text-[11px] font-semibold bg-[#34C759] text-white rounded-lg hover:opacity-90 transition"
+                    >
+                      ✓ Attended
+                    </button>
+                    <button
+                      onClick={() => completeLiveAudition(a.id, "Lost")}
+                      className="px-2 py-1 text-[11px] font-semibold border border-red-200 text-red-500 rounded-lg hover:bg-red-500/10 transition"
+                    >
+                      ✕ No-Show
+                    </button>
                   </div>
                 </div>
               ))}
@@ -212,10 +219,10 @@ export default function AuditionsPage() {
             <div className="grid grid-cols-7" style={{ borderBottom: '1px solid var(--border-sidebar)' }}>
               {weekDays.map((day, i) => {
                 const key = isoDate(day);
-                const isToday = key === TODAY_ISO;
+                const isToday = key === todayIso;
                 return (
-                  <div key={key} className="py-2 px-2 text-center" style={{ borderRight: '1px solid var(--border-sidebar)', background: isToday ? 'var(--bg-today)' : 'var(--bg-card)' }}>
-                    <span className={`text-[12px] font-medium`} style={{ color: isToday ? '#0066FF' : 'var(--text-secondary)', fontWeight: isToday ? 'bold' : 'normal' }}>
+                  <div key={key} className="py-2.5 px-2 text-center" style={{ borderRight: '1px solid var(--border-sidebar)', background: isToday ? 'var(--bg-today)' : 'var(--bg-card)' }}>
+                    <span className="text-[12px] font-medium" style={{ color: isToday ? '#0066FF' : 'var(--text-secondary)', fontWeight: isToday ? 'bold' : 'normal' }}>
                       {day.getDate()} {DAYS[i]}
                     </span>
                   </div>
@@ -225,9 +232,9 @@ export default function AuditionsPage() {
 
             {/* Day cells */}
             <div className="grid grid-cols-7 flex-1 min-h-[500px]">
-              {weekDays.map((day, i) => {
+              {weekDays.map((day) => {
                 const key = isoDate(day);
-                const isToday = key === TODAY_ISO;
+                const isToday = key === todayIso;
                 const daySlots = slots[key] || [];
                 const isAddingHere = addingSlot?.dateKey === key;
 
@@ -245,7 +252,7 @@ export default function AuditionsPage() {
 
                       {/* Inline add slot form */}
                       {isAddingHere ? (
-                        <div className="rounded-md p-2 flex flex-col gap-1.5" style={{ border: '1px solid var(--border-input)', background: 'var(--bg-card)' }}>
+                        <div className="rounded-lg p-2 flex flex-col gap-1.5 shadow-sm" style={{ border: '1px solid var(--border-input)', background: 'var(--bg-card)' }}>
                           <input
                             type="time"
                             value={addingSlot.time}
@@ -269,10 +276,10 @@ export default function AuditionsPage() {
                       ) : (
                         <button
                           onClick={() => setAddingSlot({ dateKey: key, time: '17:00', agent: '' })}
-                          className="text-[10px] py-1 text-center w-full transition-colors hover:bg-gray-100/5 dark:hover:bg-gray-800/20 rounded"
-                          style={{ color: 'var(--text-muted)' }}
+                          className="text-[10px] py-1.5 text-center w-full transition-colors hover:bg-black/5 dark:hover:bg-white/5 rounded-lg border border-dashed"
+                          style={{ color: 'var(--text-muted)', borderColor: 'var(--border-main)' }}
                         >
-                          + slot
+                          + Add slot
                         </button>
                       )}
                     </div>
@@ -286,8 +293,8 @@ export default function AuditionsPage() {
 
       {/* Book slot modal */}
       {bookingModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setBookingModal(null)}>
-          <div className="rounded-2xl shadow-2xl w-[420px] p-6" style={{ background: 'var(--bg-card)', color: 'var(--text-primary)' }} onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setBookingModal(null)}>
+          <div className="rounded-2xl shadow-2xl w-full max-w-[420px] p-6" style={{ background: 'var(--bg-card)', color: 'var(--text-primary)' }} onClick={e => e.stopPropagation()}>
             <h2 className="text-[15px] font-bold mb-5" style={{ color: 'var(--text-primary)' }}>
               Book {bookingModal.dayLabel}, {bookingModal.time}
             </h2>
@@ -358,30 +365,30 @@ export default function AuditionsPage() {
 function SlotCard({ slot, onBook, onStatusChange }: { slot: Slot; onBook: () => void; onStatusChange: (s: AuditionStatus) => void }) {
   if (slot.status === 'free') {
     return (
-      <div onClick={onBook} className="rounded-md border border-dashed px-2 py-1.5 cursor-pointer transition-colors" style={{ borderColor: 'var(--border-main)', background: 'var(--bg-card)' }}>
+      <div onClick={onBook} className="rounded-lg border border-dashed px-2.5 py-2 cursor-pointer transition-colors hover:border-[#0066FF]" style={{ borderColor: 'var(--border-main)', background: 'var(--bg-card)' }}>
         <span className="text-[11px] font-medium" style={{ color: 'var(--text-secondary)' }}>{slot.time}</span>
         {slot.agent && <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}> · {slot.agent}</span>}
-        <p className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>Free — click to book</p>
+        <p className="text-[10px] mt-0.5 text-blue-500 font-medium">Free — click to book</p>
       </div>
     );
   }
 
   if (slot.status === 'booked') {
     return (
-      <div className="rounded-md px-2 py-1.5" style={{ background: 'var(--bg-selected)' }}>
+      <div className="rounded-lg px-2.5 py-2 shadow-sm" style={{ background: 'var(--bg-selected)', border: '1px solid var(--border-main)' }}>
         <p className="text-[10px] font-bold leading-none mb-0.5" style={{ color: 'var(--text-primary)' }}>{slot.time}</p>
         {slot.name && <p className="text-[11px] font-semibold leading-tight" style={{ color: 'var(--text-primary)' }}>{slot.name}</p>}
         {slot.type && <p className="text-[10px] leading-tight" style={{ color: 'var(--text-secondary)' }}>{slot.type}</p>}
         <div className="flex flex-wrap gap-1 mt-1.5">
           <button
             onClick={() => onStatusChange('attended')}
-            className="text-[8px] font-bold bg-[#34C759] text-white px-1.5 py-0.5 rounded-full hover:opacity-90"
+            className="text-[8px] font-bold bg-[#34C759] text-white px-2 py-0.5 rounded-full hover:opacity-90"
           >
             ✓ attended
           </button>
           <button
             onClick={() => onStatusChange('no-show')}
-            className="text-[8px] font-bold border px-1.5 py-0.5 rounded-full transition-colors"
+            className="text-[8px] font-bold border px-2 py-0.5 rounded-full transition-colors"
             style={{ color: '#FF3B30', borderColor: 'rgba(255, 59, 48, 0.3)', background: 'transparent' }}
           >
             no-show
@@ -393,24 +400,24 @@ function SlotCard({ slot, onBook, onStatusChange }: { slot: Slot; onBook: () => 
 
   if (slot.status === 'attended') {
     return (
-      <div className="rounded-md bg-[#34C759] px-2 py-1.5">
+      <div className="rounded-lg bg-[#34C759] px-2.5 py-2 shadow-sm">
         <p className="text-[10px] font-bold text-white leading-none mb-0.5">{slot.time}</p>
         {slot.name && <p className="text-[11px] font-semibold text-white leading-tight">{slot.name}</p>}
         {slot.type && <p className="text-[10px] text-white/80 leading-tight">{slot.type}</p>}
         <div className="flex flex-wrap gap-1 mt-1">
-          <span className="text-[8px] font-bold bg-white/30 text-white px-1 py-0.5 rounded-full">✓ attended</span>
+          <span className="text-[8px] font-bold bg-white/30 text-white px-2 py-0.5 rounded-full">✓ attended</span>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="rounded-md px-2 py-1.5" style={{ background: 'rgba(255, 59, 48, 0.1)' }}>
+    <div className="rounded-lg px-2.5 py-2" style={{ background: 'rgba(255, 59, 48, 0.1)', border: '1px solid rgba(255, 59, 48, 0.2)' }}>
       <p className="text-[10px] font-bold leading-none mb-0.5" style={{ color: 'var(--text-primary)' }}>{slot.time}</p>
       {slot.name && <p className="text-[11px] font-semibold leading-tight" style={{ color: 'var(--text-primary)' }}>{slot.name}</p>}
       {slot.type && <p className="text-[10px] leading-tight" style={{ color: '#FF3B30' }}>{slot.type}</p>}
       <div className="flex flex-wrap gap-1 mt-1">
-        <span className="text-[8px] font-bold bg-[#FF3B30]/15 text-[#FF3B30] px-1 py-0.5 rounded-full">no-show</span>
+        <span className="text-[8px] font-bold bg-[#FF3B30]/15 text-[#FF3B30] px-2 py-0.5 rounded-full">no-show</span>
       </div>
     </div>
   );

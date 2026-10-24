@@ -18,6 +18,8 @@ import {
   X
 } from 'lucide-react';
 
+import { useCRM } from '../context/CRMContext';
+
 interface SidebarProps {
   isMobileOpen?: boolean;
   onCloseMobile?: () => void;
@@ -27,6 +29,7 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
   const pathname = usePathname();
   const { theme, toggle } = useTheme();
   const { user, logout } = useAuth();
+  const { badgeCounts } = useCRM();
 
   return (
     <>
@@ -74,13 +77,63 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
 
         {/* Navigation */}
         <nav className="flex-1 px-3 space-y-1 overflow-y-auto mt-2">
-          <NavItem href="/" icon={<Inbox className="w-[17px] h-[17px]" />} label="Inbox" active={pathname === '/'} onClick={onCloseMobile} />
-          <NavItem href="/pipeline" icon={<FilterIcon />} label="Pipeline" active={pathname === '/pipeline'} onClick={onCloseMobile} />
-          <NavItem href="/leads" icon={<Download className="w-[17px] h-[17px]" />} label="Leads" active={pathname === '/leads'} onClick={onCloseMobile} />
-          <NavItem href="/auditions" icon={<Calendar className="w-[17px] h-[17px]" />} label="Auditions" active={pathname === '/auditions'} onClick={onCloseMobile} />
-          <NavItem href="/follow-ups" icon={<ListTodo className="w-[17px] h-[17px]" />} label="Follow-ups" badge="2" active={pathname === '/follow-ups'} onClick={onCloseMobile} />
-          <NavItem href="/reports" icon={<BarChart2 className="w-[17px] h-[17px]" />} label="Reports" active={pathname === '/reports'} onClick={onCloseMobile} />
-          <NavItem href="/settings" icon={<Settings className="w-[17px] h-[17px]" />} label="Settings" active={pathname === '/settings'} onClick={onCloseMobile} />
+          <NavItem
+            href="/"
+            icon={<Inbox className="w-[17px] h-[17px]" />}
+            label="Inbox"
+            badge={badgeCounts.inbox > 0 ? String(badgeCounts.inbox) : undefined}
+            badgeColor="#0066FF"
+            active={pathname === '/'}
+            onClick={onCloseMobile}
+          />
+          <NavItem
+            href="/pipeline"
+            icon={<FilterIcon />}
+            label="Pipeline"
+            active={pathname === '/pipeline'}
+            onClick={onCloseMobile}
+          />
+          <NavItem
+            href="/leads"
+            icon={<Download className="w-[17px] h-[17px]" />}
+            label="Leads"
+            badge={badgeCounts.leads > 0 ? String(badgeCounts.leads) : undefined}
+            badgeColor="#FF9500"
+            active={pathname === '/leads'}
+            onClick={onCloseMobile}
+          />
+          <NavItem
+            href="/auditions"
+            icon={<Calendar className="w-[17px] h-[17px]" />}
+            label="Auditions"
+            badge={badgeCounts.auditions > 0 ? String(badgeCounts.auditions) : undefined}
+            badgeColor="#34C759"
+            active={pathname === '/auditions'}
+            onClick={onCloseMobile}
+          />
+          <NavItem
+            href="/follow-ups"
+            icon={<ListTodo className="w-[17px] h-[17px]" />}
+            label="Follow-ups"
+            badge={badgeCounts.followUps > 0 ? String(badgeCounts.followUps) : undefined}
+            badgeColor="#FF3B30"
+            active={pathname === '/follow-ups'}
+            onClick={onCloseMobile}
+          />
+          <NavItem
+            href="/reports"
+            icon={<BarChart2 className="w-[17px] h-[17px]" />}
+            label="Reports"
+            active={pathname === '/reports'}
+            onClick={onCloseMobile}
+          />
+          <NavItem
+            href="/settings"
+            icon={<Settings className="w-[17px] h-[17px]" />}
+            label="Settings"
+            active={pathname === '/settings'}
+            onClick={onCloseMobile}
+          />
         </nav>
 
         {/* Footer */}
@@ -120,7 +173,23 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
   );
 }
 
-function NavItem({ icon, label, active, badge, href, onClick }: { icon: React.ReactNode; label: string; active?: boolean; badge?: string; href: string; onClick?: () => void }) {
+function NavItem({
+  icon,
+  label,
+  active,
+  badge,
+  badgeColor = '#FF3B30',
+  href,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  active?: boolean;
+  badge?: string;
+  badgeColor?: string;
+  href: string;
+  onClick?: () => void;
+}) {
   return (
     <Link
       href={href}
@@ -135,7 +204,10 @@ function NavItem({ icon, label, active, badge, href, onClick }: { icon: React.Re
         {label}
       </div>
       {badge && (
-        <span className="flex items-center justify-center min-w-[20px] h-4 px-1.5 text-[10px] font-bold text-white bg-[#FF3B30] rounded-full">
+        <span
+          className="flex items-center justify-center min-w-[20px] h-4 px-1.5 text-[10px] font-bold text-white rounded-full"
+          style={{ background: badgeColor }}
+        >
           {badge}
         </span>
       )}

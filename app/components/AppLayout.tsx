@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { Sidebar } from "./Sidebar";
 import { Menu } from "lucide-react";
 import { useAuth } from "./AuthProvider";
+import { CRMProvider } from "../context/CRMContext";
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -53,39 +54,36 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
 
   // Authenticated CRM layout
   return (
-    <div className="flex flex-col h-screen flex-1 overflow-hidden">
-      {/* Top Banner */}
-      <div className="bg-[#0066FF] text-white text-center py-0.5 text-[12px] font-bold flex items-center justify-center shrink-0">
-        Demo — sample data only, nothing connects to real WhatsApp or Meta.
-      </div>
-
-      <div className="flex flex-1 overflow-hidden relative flex-col md:flex-row">
-        {/* Mobile Header */}
-        <div
-          className="md:hidden flex items-center px-4 py-3 shrink-0"
-          style={{ background: "var(--bg-sidebar)", borderBottom: "1px solid var(--border-sidebar)" }}
-        >
-          <button
-            onClick={() => setIsMobileMenuOpen(true)}
-            className="p-1 -ml-1 mr-3 rounded-md"
-            style={{ color: "var(--text-primary)" }}
+    <CRMProvider>
+      <div className="flex flex-col h-screen flex-1 overflow-hidden">
+        <div className="flex flex-1 overflow-hidden relative flex-col md:flex-row">
+          {/* Mobile Header */}
+          <div
+            className="md:hidden flex items-center px-4 py-3 shrink-0"
+            style={{ background: "var(--bg-sidebar)", borderBottom: "1px solid var(--border-sidebar)" }}
           >
-            <Menu className="w-5 h-5" />
-          </button>
-          <h1 className="text-lg font-bold tracking-tight" style={{ color: "var(--text-primary)" }}>
-            CRM
-          </h1>
+            <button
+              onClick={() => setIsMobileMenuOpen(true)}
+              className="p-1 -ml-1 mr-3 rounded-md"
+              style={{ color: "var(--text-primary)" }}
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+            <h1 className="text-lg font-bold tracking-tight" style={{ color: "var(--text-primary)" }}>
+              CRM
+            </h1>
+          </div>
+
+          <Sidebar
+            isMobileOpen={isMobileMenuOpen}
+            onCloseMobile={() => setIsMobileMenuOpen(false)}
+          />
+
+          <main className="flex-1 overflow-y-auto" style={{ background: "var(--bg-page)" }}>
+            {children}
+          </main>
         </div>
-
-        <Sidebar
-          isMobileOpen={isMobileMenuOpen}
-          onCloseMobile={() => setIsMobileMenuOpen(false)}
-        />
-
-        <main className="flex-1 overflow-y-auto" style={{ background: "var(--bg-page)" }}>
-          {children}
-        </main>
       </div>
-    </div>
+    </CRMProvider>
   );
 }

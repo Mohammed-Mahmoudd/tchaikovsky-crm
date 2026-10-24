@@ -1,13 +1,14 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
-
-const API = "/api";
+import React, { useState, useMemo } from 'react';
+import { useCRM } from '../context/CRMContext';
+import { MessageSquare } from 'lucide-react';
 
 const STAGE_COLORS: Record<string, string> = {
   "New":            "#0066FF",
   "Contacted":      "#FF9500",
   "Audition Booked":"#34C759",
+  "Attended":       "#30B0C7",
   "Enrolled":       "#5856D6",
   "Lost":           "#FF3B30",
   "direct":         "#8E8E93",
@@ -26,42 +27,24 @@ type Lead = {
 };
 
 export default function LeadsPage() {
-  const [leads, setLeads] = useState<Lead[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { conversations, loading, openChat } = useCRM();
   const [filterStage, setFilterStage] = useState("All");
 
-  const fetchLeads = async () => {
-    try {
-      const res = await fetch(`${API}/messages`);
-      const json = await res.json();
-      if (json.success && json.data) {
-        const mapped: Lead[] = json.data.map((c: any) => ({
-          id: c.senderId,
-          received: c.createdAt
-            ? new Date(c.createdAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
-            : "—",
-          name: c.name || `User ${c.senderId.slice(-4)}`,
-          phone: c.phone || "—",
-          campaign: typeof c.source === "object" ? c.source?.campaign || "—" : "Direct",
-          ad: typeof c.source === "object" ? c.source?.ad || "—" : "—",
-          stage: c.pipeline || "New",
-          agent: c.agent || "Unassigned",
-          channel: c.channel || "—",
-        }));
-        setLeads(mapped);
-      }
-    } catch (err) {
-      console.error("Failed to fetch leads:", err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchLeads();
-    const interval = setInterval(fetchLeads, 5000);
-    return () => clearInterval(interval);
-  }, []);
+  const leads: Lead[] = useMemo(() => {
+    return conversations.map((c) => ({
+      id: c.id,
+      received: c.createdAt
+        ? new Date(c.createdAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+        : "—",
+      name: c.name,
+      phone: c.phone || "—",
+      campaign: typeof c.source === "object" ? c.source?.campaign || "Direct" : c.source || "Direct",
+      ad: typeof c.source === "object" ? c.source?.ad || "—" : "—",
+      stage: c.pipeline || "New",
+      agent: c.agent || "Unassigned",
+      channel: c.channel || "—",
+    }));
+  }, [conversations]);
 
   const stages = ["All", "New", "Contacted", "Audition Booked", "Enrolled", "Lost"];
   const filtered = filterStage === "All" ? leads : leads.filter(l => l.stage === filterStage);
@@ -74,7 +57,7 @@ export default function LeadsPage() {
           <div>
             <h1 className="text-[15px] font-bold mb-0.5" style={{ color: 'var(--text-primary)' }}>Leads</h1>
             <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-              Every live lead from Meta — newest first. Updates every 5 seconds.
+              Every live lead from Meta — newest first. Synchronized across CRM.
             </p>
           </div>
           <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full" style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}>
@@ -108,7 +91,7 @@ export default function LeadsPage() {
             </div>
           ) : filtered.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-20 gap-2">
-              <p className="text-[15px] font-semibold" style={{ color: 'var(--text-primary)' }}>No leads yet</p>
+              <p className="text-[15px] font-semibold" style={{ color: 'var(--text-primary)' }}>No leads found</p>
               <p className="text-[12px]" style={{ color: 'var(--text-secondary)' }}>
                 Leads will appear here automatically when someone messages you on Instagram or Facebook.
               </p>
@@ -124,6 +107,7 @@ export default function LeadsPage() {
                   <th className="py-2.5 px-4 font-bold">Campaign</th>
                   <th className="py-2.5 px-4 font-bold">Agent</th>
                   <th className="py-2.5 px-4 font-bold">Stage</th>
+                  <th className="py-2.5 px-4 font-bold text-right">Action</th>
                 </tr>
               </thead>
               <tbody className="text-[12px]" style={{ color: 'var(--text-primary)' }}>
@@ -146,6 +130,16 @@ export default function LeadsPage() {
                       >
                         {lead.stage}
                       </span>
+                    </td>
+                    <td className="py-3 px-4 text-right">
+                      <button
+                        onClick={() => openChat(lead.id)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 transition"
+                        title="Open in Inbox"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        Chat
+                      </button>
                     </td>
                   </tr>
                 ))}

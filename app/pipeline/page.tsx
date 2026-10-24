@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useState, useMemo, useEffect, useCallback } from "react";
-
-const API = "/api";
+import { MessageSquare } from "lucide-react";
+import { useCRM } from "../context/CRMContext";
 
 import {
   DndContext,
@@ -161,9 +161,9 @@ export default function PipelinePage() {
   const [isMounted, setIsMounted] = useState(false);
   useEffect(() => { setIsMounted(true); }, []);
 
+  const { conversations, patchConversation, openChat } = useCRM();
+
   const [view, setView] = useState<"pipeline" | "table">("pipeline");
-  const [leads, setLeads] = useState<Lead[]>([]);
-  const [loading, setLoading] = useState(true);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [panelLeadId, setPanelLeadId] = useState<string | null>(null);
   const [filterAgent, setFilterAgent] = useState("Everyone");
@@ -172,42 +172,28 @@ export default function PipelinePage() {
   const [filterSource, setFilterSource] = useState("All sources");
   const [hiddenStages, setHiddenStages] = useState<Set<Stage>>(new Set());
 
-  const fetchLeads = useCallback(async () => {
-    try {
-      const res = await fetch(`${API}/messages`);
-      const json = await res.json();
-      if (json.success && json.data) {
-        const mapped: Lead[] = json.data.map((c: any) => ({
-          id: c.senderId,
-          name: c.name || `User ${c.senderId.slice(-4)}`,
-          campaign: typeof c.source === "object" ? c.source?.campaign || "Direct" : "Direct",
-          date: c.createdAt
-            ? new Date(c.createdAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
-            : "—",
-          stage: (c.pipeline as Stage) || "New",
-          phone: c.phone,
-          agent: c.agent || "Unassigned",
-        }));
-        setLeads(mapped);
-      }
-    } catch (err) {
-      console.error("Failed to fetch leads:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchLeads();
-    const interval = setInterval(fetchLeads, 5000);
-    return () => clearInterval(interval);
-  }, [fetchLeads]);
+  // Derive leads dynamically from shared conversations
+  const leads: Lead[] = useMemo(() => {
+    return conversations.map((c) => ({
+      id: c.id,
+      name: c.name,
+      campaign: typeof c.source === "object" ? c.source?.campaign || "Direct" : c.source || "Direct",
+      date: c.createdAt
+        ? new Date(c.createdAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+        : "—",
+      stage: (c.pipeline as Stage) || "New",
+      phone: c.phone,
+      agent: c.agent || "Unassigned",
+    }));
+  }, [conversations]);
 
   // Apply filters
-  const filteredLeads = leads.filter(lead => {
-    if (filterCampaign !== "All campaigns" && lead.campaign !== filterCampaign) return false;
-    return true;
-  });
+  const filteredLeads = useMemo(() => {
+    return leads.filter(lead => {
+      if (filterCampaign !== "All campaigns" && lead.campaign !== filterCampaign) return false;
+      return true;
+    });
+  }, [leads, filterCampaign]);
 
   const sensors = useSensors(
     // Desktop/mouse: activate after moving 5px
@@ -238,25 +224,8 @@ export default function PipelinePage() {
   };
 
   const handleDragOver = (event: DragOverEvent) => {
-    const { active, over } = event;
-    if (!over) return;
-
-    const activeLeadId = active.id as string;
-    const overId = over.id as string;
-
-    // Check if we're dragging over a column (stage name) or another card
-    const overStage = STAGES.find(s => s === overId) as Stage | undefined;
-    const overLead = leads.find(l => l.id === overId);
-
-    if (!overStage && !overLead) return;
-
-    const targetStage: Stage = overStage ?? (overLead!.stage as Stage);
-
-    setLeads(prev =>
-      prev.map(l => l.id === activeLeadId ? { ...l, stage: targetStage } : l)
-    );
+    // Handled on drop
   };
-
 
   // Advance a lead to the next stage with the button
   const advanceLead = (id: string) => {
@@ -265,17 +234,10 @@ export default function PipelinePage() {
     const stageIdx = STAGES.indexOf(lead.stage);
     const nextStage = STAGES[stageIdx + 1];
     if (!nextStage) return;
-    // Optimistic update
-    setLeads(prev => prev.map(l => l.id === id ? { ...l, stage: nextStage } : l));
-    // Persist to DB
-    fetch(`${API}/messages/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pipeline: nextStage }),
-    }).catch(console.error);
+    patchConversation(id, { pipeline: nextStage });
   };
 
-  // Drag end — persist the new stage to DB
+  // Drag end — persist the new stage to DB & context
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     setActiveId(null);
@@ -283,32 +245,16 @@ export default function PipelinePage() {
 
     const activeLeadId = active.id as string;
     const overId = over.id as string;
-    const activeLead = leads.find(l => l.id === activeLeadId);
+
+    const overStage = STAGES.find(s => s === overId) as Stage | undefined;
     const overLead = leads.find(l => l.id === overId);
+    const targetStage: Stage | undefined = overStage ?? (overLead?.stage as Stage);
 
-    if (!activeLead || !overLead || activeLead.stage !== overLead.stage) {
-      // Cross-column drop: stage already changed in handleDragOver, persist it
-      const newStage = leads.find(l => l.id === activeLeadId)?.stage;
-      if (newStage) {
-        fetch(`${API}/messages/${activeLeadId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pipeline: newStage }),
-        }).catch(console.error);
-      }
-      return;
+    if (targetStage) {
+      patchConversation(activeLeadId, { pipeline: targetStage });
     }
-
-    // Reorder within the same column
-    setLeads(prev => {
-      const stageLeads = prev.filter(l => l.stage === activeLead.stage);
-      const others = prev.filter(l => l.stage !== activeLead.stage);
-      const oldIdx = stageLeads.findIndex(l => l.id === activeLeadId);
-      const newIdx = stageLeads.findIndex(l => l.id === overId);
-      const reordered = arrayMove(stageLeads, oldIdx, newIdx);
-      return prev.map(l => { const updated = reordered.find(r => r.id === l.id); return updated ?? l; });
-    });
   };
+
 
   return (
     <div className="flex flex-col h-full relative overflow-hidden" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
@@ -451,6 +397,14 @@ export default function PipelinePage() {
           <div className="p-6 flex-1">
             <button className="w-full bg-[#0066FF] text-white font-semibold py-2 rounded-lg mb-8 hover:bg-[#0055d4] transition-colors shadow-sm">
               Book audition
+            </button>
+
+            <button
+              onClick={() => openChat(panelLead.id)}
+              className="w-full flex items-center justify-center gap-2 py-2 px-3 mb-5 rounded-lg bg-[#0066FF] text-white text-[13px] font-semibold hover:bg-[#0055d4] transition-colors shadow-sm"
+            >
+              <MessageSquare className="w-4 h-4" />
+              Open Conversation in Inbox
             </button>
 
             <div className="mb-6">
