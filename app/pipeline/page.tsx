@@ -337,9 +337,9 @@ const MobileColumn = React.memo(function MobileColumn({
   hasMore: boolean;
 }) {
   return (
-    <div className="flex flex-col min-w-[260px] max-w-[260px] shrink-0 h-full">
+    <div className="flex flex-col min-w-[260px] max-w-[260px] shrink-0">
       <div
-        className="flex flex-col flex-1 rounded-2xl overflow-hidden h-full max-h-full"
+        className="flex flex-col rounded-2xl overflow-hidden"
         style={{ background: "var(--bg-column)" }}
       >
         {/* Column header */}
@@ -371,13 +371,9 @@ const MobileColumn = React.memo(function MobileColumn({
           </span>
         </div>
 
-        {/* Card list — plain scroll, no drag */}
+        {/* Card list — no inner scroll, grows to content for smooth outer scroll */}
         <div
-          className="flex flex-col gap-2 flex-1 min-h-[150px] px-2.5 pb-3 overflow-y-auto"
-          style={{
-            WebkitOverflowScrolling: "touch",
-            overscrollBehavior: "contain",
-          }}
+          className="flex flex-col gap-2 px-2.5 pb-3"
         >
           {leads.map((lead) => (
             <MobileLeadCard
@@ -746,14 +742,14 @@ export default function PipelinePage() {
           {isMobile ? (
             /* ── MOBILE: No drag-and-drop, cards have "Move" button ── */
             <div
-              className="flex-1 min-h-0 min-w-0 overflow-x-auto overflow-y-auto px-4 py-4"
+              className="flex-1 min-h-0 min-w-0 overflow-auto px-4 py-4"
               style={{
                 WebkitOverflowScrolling: "touch",
-                touchAction: "pan-x pan-y",
+                overscrollBehavior: "contain",
               }}
             >
               <div
-                className="flex gap-3 h-full items-start"
+                className="flex gap-3 items-start"
                 style={{
                   minWidth:
                     visibleStages.length * 268 +
