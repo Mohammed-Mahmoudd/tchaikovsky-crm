@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { ArrowLeft, Info, X } from "lucide-react";
 
 type Channel = "WA" | "IG" | "FB";
@@ -54,6 +54,8 @@ export default function InboxPage() {
   const [replyText, setReplyText] = useState("");
   const [isSending, setIsSending] = useState(false);
 
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
   const filters = ["All", "Mine", "Unassigned", "Open", "Resolved"];
 
   const {
@@ -86,6 +88,16 @@ export default function InboxPage() {
   });
 
   const activeConv = conversations.find((c) => c.id === activeConvId);
+
+  const scrollToBottom = (behavior: ScrollBehavior = "auto") => {
+    messagesEndRef.current?.scrollIntoView({ behavior });
+  };
+
+  useEffect(() => {
+    if (activeConvId && activeConv?.messages) {
+      scrollToBottom("auto");
+    }
+  }, [activeConvId, activeConv?.messages?.length]);
 
   const handleSendReply = async () => {
     if (!replyText.trim() || !activeConv) return;
@@ -339,6 +351,7 @@ export default function InboxPage() {
                   </div>
                 </div>
               ))}
+              <div ref={messagesEndRef} />
             </div>
 
             {/* Chat Input */}

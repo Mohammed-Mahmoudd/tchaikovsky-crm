@@ -120,14 +120,18 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       const json = await res.json();
       if (json.success && Array.isArray(json.data)) {
         const parsed = json.data.map(normalizeConversation);
-        setConversations(parsed);
+        setConversations(
+          activeChatId
+            ? parsed.map((c: Conversation) => (c.id === activeChatId ? { ...c, unreadCount: 0 } : c))
+            : parsed
+        );
       }
     } catch (err) {
       console.error("CRMContext: failed to fetch conversations", err);
     } finally {
       setLoading(false);
     }
-  }, [normalizeConversation]);
+  }, [normalizeConversation, activeChatId]);
 
   // Unified single polling loop
   useEffect(() => {
