@@ -1,6 +1,6 @@
 "use client";
 
-import React from 'react';
+import React, { useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useTheme } from './ThemeProvider';
@@ -30,14 +30,33 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
   const { theme, toggle } = useTheme();
   const { user, logout } = useAuth();
   const { badgeCounts } = useCRM();
+  const closeTouchedRef = useRef(false);
+
+  const handleCloseTouchEnd = useCallback((e: React.TouchEvent) => {
+    e.preventDefault();
+    closeTouchedRef.current = true;
+    onCloseMobile?.();
+    setTimeout(() => { closeTouchedRef.current = false; }, 400);
+  }, [onCloseMobile]);
+
+  const handleCloseClick = useCallback(() => {
+    if (closeTouchedRef.current) return;
+    onCloseMobile?.();
+  }, [onCloseMobile]);
 
   return (
     <>
       {/* Mobile Backdrop */}
       {isMobileOpen && (
         <div
-          className="fixed inset-0 z-40 bg-black/50 md:hidden"
-          onClick={onCloseMobile}
+          className="fixed inset-0 z-40 md:hidden"
+          style={{
+            background: 'rgba(0,0,0,0.5)',
+            touchAction: 'manipulation',
+            WebkitTapHighlightColor: 'transparent',
+          }}
+          onTouchEnd={handleCloseTouchEnd}
+          onClick={handleCloseClick}
         />
       )}
 
@@ -61,12 +80,31 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
           </div>
           <button
             type="button"
-            onClick={onCloseMobile}
-            className="md:hidden flex items-center justify-center min-w-[40px] min-h-[40px] rounded-md transition-colors cursor-pointer touch-manipulation active:opacity-70"
-            style={{ color: 'var(--text-secondary)' }}
+            onTouchEnd={handleCloseTouchEnd}
+            onClick={handleCloseClick}
             aria-label="Close menu"
+            className="md:hidden"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              minWidth: '48px',
+              minHeight: '48px',
+              padding: '0',
+              border: 'none',
+              borderRadius: '8px',
+              background: 'transparent',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+              touchAction: 'manipulation',
+              WebkitTapHighlightColor: 'transparent',
+              WebkitTouchCallout: 'none',
+              userSelect: 'none',
+              WebkitUserSelect: 'none',
+              outline: 'none',
+            }}
           >
-            <X className="w-5 h-5 pointer-events-none" />
+            <X className="w-5 h-5" style={{ pointerEvents: 'none' }} />
           </button>
         </div>
 

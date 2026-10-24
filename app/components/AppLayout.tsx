@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { Sidebar } from "./Sidebar";
 import { Menu } from "lucide-react";
@@ -12,6 +12,8 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { user, loading } = useAuth();
+  // Track whether a touch event already fired to prevent duplicate onClick
+  const touchedRef = useRef(false);
 
   const isLoginPage = pathname === "/login";
 
@@ -21,6 +23,24 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
       router.replace("/login");
     }
   }, [loading, user, isLoginPage, router]);
+
+  const openMenu = useCallback(() => {
+    setIsMobileMenuOpen(true);
+  }, []);
+
+  const handleTouchEnd = useCallback((e: React.TouchEvent) => {
+    e.preventDefault(); // Prevent the delayed click / ghost click
+    touchedRef.current = true;
+    openMenu();
+    // Reset after a tick so future click events on non-touch devices still work
+    setTimeout(() => { touchedRef.current = false; }, 400);
+  }, [openMenu]);
+
+  const handleClick = useCallback(() => {
+    // If a touch already opened the menu, skip the synthetic click
+    if (touchedRef.current) return;
+    openMenu();
+  }, [openMenu]);
 
   // Login page: standalone clean layout
   if (isLoginPage) {
@@ -57,23 +77,65 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     <CRMProvider>
       <div className="flex flex-col h-[100dvh] flex-1 overflow-hidden">
         <div className="flex flex-1 overflow-hidden relative flex-col md:flex-row min-h-0">
-          {/* Mobile Header with Safe Area & 44px touch target */}
+          {/* Mobile Header — high z-index so nothing can cover the burger button */}
           <div
-            className="md:hidden flex items-center px-4 py-2 shrink-0 z-20"
+            className="md:hidden flex items-center shrink-0"
             style={{
+              position: "relative",
+              zIndex: 30,
               background: "var(--bg-sidebar)",
               borderBottom: "1px solid var(--border-sidebar)",
               paddingTop: "calc(env(safe-area-inset-top, 0px) + 0.5rem)",
+              paddingBottom: "0.5rem",
+              paddingLeft: "1rem",
+              paddingRight: "1rem",
             }}
           >
+            {/* Burger button — dual event handling for universal device support */}
             <button
               type="button"
-              onClick={() => setIsMobileMenuOpen(true)}
-              className="flex items-center justify-center min-w-[44px] min-h-[44px] -ml-2 mr-2 rounded-md cursor-pointer touch-manipulation active:opacity-70 transition-opacity"
-              style={{ color: "var(--text-primary)" }}
+              onTouchEnd={handleTouchEnd}
+              onClick={handleClick}
               aria-label="Open navigation menu"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                minWidth: "48px",
+                minHeight: "48px",
+                marginLeft: "-8px",
+                marginRight: "8px",
+                padding: "0",
+                border: "none",
+                borderRadius: "8px",
+                background: "transparent",
+                color: "var(--text-primary)",
+                cursor: "pointer",
+                touchAction: "manipulation",
+                WebkitTapHighlightColor: "transparent",
+                WebkitTouchCallout: "none",
+                userSelect: "none",
+                WebkitUserSelect: "none",
+                position: "relative",
+                zIndex: 31,
+                outline: "none",
+              }}
             >
-              <Menu className="w-5 h-5 pointer-events-none" />
+              <svg
+                width="22"
+                height="22"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                style={{ pointerEvents: "none" }}
+              >
+                <line x1="3" y1="6" x2="21" y2="6" />
+                <line x1="3" y1="12" x2="21" y2="12" />
+                <line x1="3" y1="18" x2="21" y2="18" />
+              </svg>
             </button>
             <h1 className="text-lg font-bold tracking-tight" style={{ color: "var(--text-primary)" }}>
               CRM
@@ -93,3 +155,4 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     </CRMProvider>
   );
 }
+

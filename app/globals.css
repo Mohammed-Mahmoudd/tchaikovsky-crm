@@ -95,6 +95,19 @@ button {
   touch-action: manipulation;
 }
 
+/* Ensure all interactive elements respond instantly on mobile (no 300ms delay) */
+a, button, [role="button"], input, select, textarea, label {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Prevent text selection on interactive elements — prevents accidental select-instead-of-tap */
+button, [role="button"] {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
 /* Smooth scrolling for all scrollable areas */
 * {
   -webkit-overflow-scrolling: touch;
