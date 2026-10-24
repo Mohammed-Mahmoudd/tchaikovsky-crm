@@ -41,6 +41,7 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
+  viewportFit: "cover",
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#f2f2f7" },
     { media: "(prefers-color-scheme: dark)", color: "#000000" },
@@ -54,7 +55,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${geistSans.variable} ${geistMono.variable} font-sans antialiased h-screen flex flex-col overflow-hidden`}>
+      <body className={`${geistSans.variable} ${geistMono.variable} font-sans antialiased h-[100dvh] flex flex-col overflow-hidden`}>
         <ThemeProvider>
           <AuthProvider>
             <AppLayout>

@@ -55,9 +55,9 @@ export default function FollowUpsPage() {
   const openCount = items.length;
 
   return (
-    <div className="flex flex-col h-full" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
+    <div className="flex flex-col h-full min-h-0" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
       {/* Header */}
-      <div className="px-6 py-4 flex items-center justify-between" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
+      <div className="px-4 md:px-6 py-4 flex items-center justify-between shrink-0" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
         <div>
           <h1 className="text-[15px] font-bold mb-0.5" style={{ color: 'var(--text-primary)' }}>Follow-ups</h1>
           <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
@@ -79,7 +79,7 @@ export default function FollowUpsPage() {
       </div>
 
       {/* Sections */}
-      <div className="flex-1 overflow-y-auto px-6 py-4 space-y-6">
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 md:px-6 py-4 space-y-6" style={{ WebkitOverflowScrolling: 'touch' }}>
         {items.length === 0 && !loading && (
           <div className="flex flex-col items-center justify-center py-20 gap-3">
             <div className="w-12 h-12 rounded-full flex items-center justify-center bg-blue-500/10 text-blue-500">

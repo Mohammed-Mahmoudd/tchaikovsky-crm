@@ -90,6 +90,11 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
+button {
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
 /* Smooth scrolling for all scrollable areas */
 * {
   -webkit-overflow-scrolling: touch;

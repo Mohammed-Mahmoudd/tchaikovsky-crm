@@ -200,10 +200,11 @@ export default function SettingsPage() {
   const roleLabel = user?.role ? user.role.charAt(0).toUpperCase() + user.role.slice(1) : "Agent";
 
   return (
-    <div className="p-4 md:p-6 max-w-4xl mx-auto pb-10" style={{ background: "var(--bg-page)", color: "var(--text-primary)" }}>
-      <h1 className="text-[15px] font-bold mb-5" style={{ color: "var(--text-primary)" }}>
-        Settings
-      </h1>
+    <div className="flex-1 min-h-0 overflow-y-auto p-4 md:p-6 pb-12 w-full" style={{ background: "var(--bg-page)", color: "var(--text-primary)", WebkitOverflowScrolling: "touch" }}>
+      <div className="max-w-4xl mx-auto">
+        <h1 className="text-[15px] font-bold mb-5" style={{ color: "var(--text-primary)" }}>
+          Settings
+        </h1>
 
       {/* Your account Card */}
       <div
@@ -515,6 +516,7 @@ export default function SettingsPage() {
             <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Analyst</span> — read-only pipeline and reports; no conversations.
           </li>
         </ul>
+      </div>
       </div>
     </div>
   );

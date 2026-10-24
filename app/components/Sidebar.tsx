@@ -43,19 +43,30 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
 
       {/* Sidebar Panel */}
       <div
-        className={`flex flex-col h-full w-[250px] md:w-[220px] fixed md:relative inset-y-0 left-0 z-50 transform transition-transform duration-200 ease-in-out ${
+        className={`flex flex-col h-full w-[260px] md:w-[220px] fixed md:relative inset-y-0 left-0 z-50 transform transition-transform duration-200 ease-in-out ${
           isMobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
         }`}
-        style={{ background: 'var(--bg-sidebar)', borderRight: '1px solid var(--border-sidebar)' }}
+        style={{
+          background: 'var(--bg-sidebar)',
+          borderRight: '1px solid var(--border-sidebar)',
+          paddingTop: 'env(safe-area-inset-top, 0px)',
+          paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 0.5rem)',
+        }}
       >
         {/* Header */}
-        <div className="px-4 py-4 mb-3 flex justify-between items-center" style={{ borderBottom: '1px solid var(--border-sidebar)' }}>
+        <div className="px-4 py-3 mb-2 flex justify-between items-center" style={{ borderBottom: '1px solid var(--border-sidebar)' }}>
           <div>
             <h2 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase">Tchaikovsky School</h2>
             <p className="text-lg font-bold tracking-tight" style={{ color: 'var(--text-primary)' }}>CRM</p>
           </div>
-          <button onClick={onCloseMobile} className="md:hidden p-1.5 rounded-md transition-colors" style={{ color: 'var(--text-secondary)' }}>
-            <X className="w-5 h-5" />
+          <button
+            type="button"
+            onClick={onCloseMobile}
+            className="md:hidden flex items-center justify-center min-w-[40px] min-h-[40px] rounded-md transition-colors cursor-pointer touch-manipulation active:opacity-70"
+            style={{ color: 'var(--text-secondary)' }}
+            aria-label="Close menu"
+          >
+            <X className="w-5 h-5 pointer-events-none" />
           </button>
         </div>
 

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo, useEffect, useCallback } from "react";
+import React, { useState, useMemo } from "react";
 import { MessageSquare } from "lucide-react";
 import { useCRM } from "../context/CRMContext";
 
@@ -21,7 +21,6 @@ import {
   SortableContext,
   verticalListSortingStrategy,
   useSortable,
-  arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
@@ -66,7 +65,7 @@ function LeadCard({ lead, onAdvance, isDragging, onClick }: { lead: Lead; onAdva
   return (
     <div
       onClick={onClick}
-      className={`rounded-xl px-4 py-3 transition-shadow ${isDragging ? "shadow-xl opacity-90 rotate-1 scale-[1.02] cursor-grabbing" : "hover:shadow-md"
+      className={`rounded-xl px-4 py-3 transition-shadow ${isDragging ? "shadow-xl opacity-90 rotate-1 scale-[1.02] cursor-grabbing" : "hover:shadow-md cursor-pointer"
         }`}
       style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)', boxShadow: 'var(--shadow-card)' }}
     >
@@ -90,7 +89,7 @@ function LeadCard({ lead, onAdvance, isDragging, onClick }: { lead: Lead; onAdva
         {next && (
           <button
             onClick={(e) => { e.stopPropagation(); onAdvance?.(); }}
-            className="text-[12px] font-semibold px-2.5 py-1 rounded-full transition-colors"
+            className="text-[12px] font-semibold px-2.5 py-1 rounded-full transition-colors cursor-pointer touch-manipulation"
             style={{ background: 'var(--bg-pill)', color: '#0066FF' }}
           >
             {next}
@@ -108,9 +107,8 @@ function SortableLeadCard({ lead, onAdvance, onClick }: { lead: Lead; onAdvance:
     transition,
     opacity: isDragging ? 0.3 : 1,
     cursor: isDragging ? 'grabbing' : 'grab',
-    // CRITICAL for mobile: tell the browser NOT to handle this touch event
-    // so dnd-kit's TouchSensor can intercept it for drag.
-    touchAction: 'none',
+    // Allow touch scrolling in both directions unless actively dragging
+    touchAction: isDragging ? 'none' : 'pan-x pan-y',
     WebkitUserSelect: 'none',
     userSelect: 'none',
   };
@@ -133,18 +131,22 @@ function Column({ stage, leads, onAdvance, onSelectLead }: { stage: Stage; leads
   const itemIds = useMemo(() => leads.map(l => l.id), [leads]);
 
   return (
-    <div className="flex flex-col min-w-[220px] max-w-[220px]">
+    <div className="flex flex-col min-w-[240px] max-w-[240px] shrink-0 h-full">
       {/* Rounded card container */}
-      <div className="flex flex-col flex-1 rounded-2xl overflow-hidden h-full" style={{ background: 'var(--bg-column)' }}>
+      <div className="flex flex-col flex-1 rounded-2xl overflow-hidden h-full max-h-full" style={{ background: 'var(--bg-column)' }}>
         {/* Column header */}
-        <div className="flex items-center justify-between px-3 pt-4 pb-2">
+        <div className="flex items-center justify-between px-3 pt-4 pb-2 shrink-0">
           <span className="text-[15px] font-bold" style={{ color: 'var(--text-primary)' }}>{stage}</span>
           <span className="text-[12px] font-bold px-2.5 py-0.5 rounded-full" style={{ background: 'var(--bg-card)', color: 'var(--text-secondary)' }}>{leads.length}</span>
         </div>
 
         {/* Drop zone */}
         <SortableContext id={stage} items={itemIds} strategy={verticalListSortingStrategy}>
-          <div ref={setNodeRef} className="flex flex-col gap-2 flex-1 min-h-[150px] px-2.5 pb-3 transition-colors">
+          <div
+            ref={setNodeRef}
+            className="flex flex-col gap-2 flex-1 min-h-[150px] px-2.5 pb-3 overflow-y-auto transition-colors"
+            style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
+          >
             {leads.map(lead => (
               <SortableLeadCard key={lead.id} lead={lead} onAdvance={() => onAdvance(lead.id)} onClick={() => onSelectLead(lead.id)} />
             ))}
@@ -158,9 +160,6 @@ function Column({ stage, leads, onAdvance, onSelectLead }: { stage: Stage; leads
 // ─── Main Page ───────────────────────────────────────────────────────────────
 
 export default function PipelinePage() {
-  const [isMounted, setIsMounted] = useState(false);
-  useEffect(() => { setIsMounted(true); }, []);
-
   const { conversations, patchConversation, openChat } = useCRM();
 
   const [view, setView] = useState<"pipeline" | "table">("pipeline");
@@ -198,8 +197,8 @@ export default function PipelinePage() {
   const sensors = useSensors(
     // Desktop/mouse: activate after moving 5px
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    // Touch/mobile: long-press 200ms, allow 5px of finger wobble during hold
-    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 5 } })
+    // Touch/mobile: long-press 250ms, allow 8px finger movement during hold
+    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 8 } })
   );
 
   const activeLead = activeId ? leads.find(l => l.id === activeId) : null;
@@ -257,20 +256,20 @@ export default function PipelinePage() {
 
 
   return (
-    <div className="flex flex-col h-full relative overflow-hidden" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
+    <div className="flex flex-col h-full min-h-0 min-w-0 relative overflow-hidden" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
 
       {/* Top bar: view switcher + lead count */}
-      <div className="px-4 md:px-6 py-2.5 flex items-center gap-2 flex-wrap" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
+      <div className="px-4 md:px-6 py-2.5 flex items-center gap-2 flex-wrap shrink-0" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
         <button
           onClick={() => setView("pipeline")}
-          className={`text-[12px] font-semibold px-3 py-1.5 rounded-[8px] transition-colors`}
+          className={`text-[12px] font-semibold px-3 py-1.5 rounded-[8px] transition-colors cursor-pointer touch-manipulation`}
           style={view === "pipeline" ? { background: 'var(--bg-selected)', color: '#0066FF' } : { color: 'var(--text-secondary)' }}
         >
           Pipeline
         </button>
         <button
           onClick={() => setView("table")}
-          className={`text-[12px] font-semibold px-3 py-1.5 rounded-[8px] transition-colors`}
+          className={`text-[12px] font-semibold px-3 py-1.5 rounded-[8px] transition-colors cursor-pointer touch-manipulation`}
           style={view === "table" ? { background: 'var(--bg-selected)', color: '#0066FF' } : { color: 'var(--text-secondary)' }}
         >
           Table
@@ -278,14 +277,14 @@ export default function PipelinePage() {
         <span className="text-[12px] ml-1" style={{ color: 'var(--text-muted)' }}>{filteredLeads.length} leads</span>
 
         <div className="ml-auto flex items-center gap-2">
-          <button className="text-[11px] rounded-[6px] px-2.5 py-1 transition-colors" style={{ border: '1px solid var(--border-main)', color: 'var(--text-secondary)', background: 'var(--bg-card)' }}>
+          <button className="text-[11px] rounded-[6px] px-2.5 py-1 transition-colors cursor-pointer" style={{ border: '1px solid var(--border-main)', color: 'var(--text-secondary)', background: 'var(--bg-card)' }}>
             Clear
           </button>
         </div>
       </div>
 
       {/* Filter row */}
-      <div className="px-4 md:px-6 py-2.5 flex items-center gap-3 flex-wrap overflow-x-auto" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
+      <div className="px-4 md:px-6 py-2 flex items-center gap-3 overflow-x-auto flex-nowrap shrink-0" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)', WebkitOverflowScrolling: 'touch' }}>
         <FilterPill label="RECEIVED" value={filterReceived} options={["Any time", "Today", "This week", "This month"]} onChange={setFilterReceived} />
         <FilterPill label="AGENT" value={filterAgent} options={["Everyone", "Jwana", "Rokaia", "Mona"]} onChange={setFilterAgent} />
         <FilterPill label="CAMPAIGN" value={filterCampaign} options={["All campaigns", "KSA – Adult Music Classes", "Jeddah – Piano & Violin Leads (Aug)", "IG Click-to-WhatsApp – Auditions"]} onChange={setFilterCampaign} />
@@ -294,7 +293,7 @@ export default function PipelinePage() {
 
       {/* Main Content Area */}
       {view === "table" ? (
-        <div className="flex-1 overflow-x-auto overflow-y-auto" style={{ background: 'var(--bg-card)' }}>
+        <div className="flex-1 min-h-0 min-w-0 overflow-x-auto overflow-y-auto" style={{ background: 'var(--bg-card)', WebkitOverflowScrolling: 'touch' }}>
           <table className="w-full text-left border-collapse min-w-[800px]">
             <thead className="text-[10px] uppercase font-bold tracking-widest sticky top-0 z-10" style={{ background: 'var(--bg-table-header)', color: 'var(--text-secondary)' }}>
               <tr>
@@ -332,15 +331,15 @@ export default function PipelinePage() {
       ) : (
         <>
           {/* Stage summary pills */}
-          <div className="px-6 py-2.5 flex items-center gap-2 flex-wrap" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
-            <span className="text-[10px] font-bold tracking-widest mr-2 uppercase" style={{ color: 'var(--text-muted)' }}>STAGES</span>
+          <div className="px-4 md:px-6 py-2 flex items-center gap-2 overflow-x-auto flex-nowrap shrink-0" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)', WebkitOverflowScrolling: 'touch' }}>
+            <span className="text-[10px] font-bold tracking-widest mr-2 uppercase shrink-0" style={{ color: 'var(--text-muted)' }}>STAGES</span>
             {STAGES.map(stage => {
               const isHidden = hiddenStages.has(stage);
               return (
                 <button
                   key={stage}
                   onClick={() => toggleStage(stage)}
-                  className={`text-[12px] font-medium px-2.5 py-0.5 rounded-full transition-colors ${isHidden ? 'line-through' : ''}`}
+                  className={`text-[12px] font-medium px-2.5 py-0.5 rounded-full transition-colors shrink-0 cursor-pointer touch-manipulation ${isHidden ? 'line-through' : ''}`}
                   style={isHidden ? { background: 'var(--bg-pill)', color: 'var(--text-muted)' } : { background: 'var(--bg-selected)', color: '#0066FF' }}
                 >
                   {stage} {countPerStage(stage)}
@@ -357,8 +356,14 @@ export default function PipelinePage() {
             onDragOver={handleDragOver}
             onDragEnd={handleDragEnd}
           >
-            <div className="flex-1 overflow-x-auto overflow-y-auto px-6 py-5">
-              <div className="flex gap-4 h-full" style={{ minWidth: visibleStages.length * 226 + "px" }}>
+            <div
+              className="flex-1 min-h-0 min-w-0 overflow-x-auto overflow-y-auto px-4 md:px-6 py-4 md:py-5"
+              style={{
+                WebkitOverflowScrolling: 'touch',
+                touchAction: 'pan-x pan-y',
+              }}
+            >
+              <div className="flex gap-4 h-full items-start" style={{ minWidth: visibleStages.length * 240 + ((visibleStages.length - 1) * 16) + "px" }}>
                 {visibleStages.map(stage => (
                   <Column
                     key={stage}

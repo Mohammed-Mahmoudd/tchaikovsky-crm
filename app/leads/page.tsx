@@ -50,9 +50,9 @@ export default function LeadsPage() {
   const filtered = filterStage === "All" ? leads : leads.filter(l => l.stage === filterStage);
 
   return (
-    <div className="flex flex-col h-full" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
+    <div className="flex flex-col h-full min-h-0" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
       {/* Header */}
-      <div className="px-4 md:px-6 py-4" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
+      <div className="px-4 md:px-6 py-4 shrink-0" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
         <div className="flex items-center justify-between mb-3">
           <div>
             <h1 className="text-[15px] font-bold mb-0.5" style={{ color: 'var(--text-primary)' }}>Leads</h1>
@@ -65,12 +65,12 @@ export default function LeadsPage() {
           </span>
         </div>
         {/* Stage filter pills */}
-        <div className="flex flex-wrap gap-2">
+        <div className="flex gap-2 overflow-x-auto flex-nowrap shrink-0" style={{ WebkitOverflowScrolling: 'touch' }}>
           {stages.map(s => (
             <button
               key={s}
               onClick={() => setFilterStage(s)}
-              className="text-[11px] font-semibold px-2.5 py-1 rounded-full transition-colors"
+              className="text-[11px] font-semibold px-2.5 py-1 rounded-full transition-colors shrink-0 cursor-pointer touch-manipulation"
               style={filterStage === s
                 ? { background: '#0066FF', color: '#fff' }
                 : { background: 'var(--bg-pill)', color: 'var(--text-secondary)' }
@@ -83,7 +83,7 @@ export default function LeadsPage() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 overflow-x-auto">
+      <div className="flex-1 min-h-0 min-w-0 overflow-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
         <div className="min-w-[800px] p-4 md:p-6">
           {loading ? (
             <div className="flex items-center justify-center py-20">

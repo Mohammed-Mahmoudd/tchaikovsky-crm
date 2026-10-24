@@ -138,9 +138,9 @@ export default function AuditionsPage() {
   const todayIso = isoDate(new Date());
 
   return (
-    <div className="flex flex-col h-full" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
+    <div className="flex flex-col h-full min-h-0" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
       {/* Header */}
-      <div className="px-6 py-4 flex items-center justify-between" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
+      <div className="px-4 md:px-6 py-4 flex items-center justify-between shrink-0" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
         <div>
           <h1 className="text-[15px] font-bold leading-none mb-0.5" style={{ color: 'var(--text-primary)' }}>Auditions Calendar</h1>
           <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>{formatRangeLabel(weekStart, weekEnd)}</p>
@@ -160,7 +160,7 @@ export default function AuditionsPage() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 min-h-0 overflow-y-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
         {/* Live Auditions from CRM */}
         {liveAuditions.length > 0 && (
           <div className="px-6 py-5 border-b" style={{ borderColor: 'var(--border-main)', background: 'var(--bg-card)' }}>

@@ -2,7 +2,7 @@
 
 import React, { useMemo } from 'react';
 import { useCRM } from '../context/CRMContext';
-import { TrendingUp, Users, CalendarCheck, Award, AlertCircle } from 'lucide-react';
+import { TrendingUp, Users, CalendarCheck, Award } from 'lucide-react';
 
 type CampaignStats = {
   campaign: string;
@@ -71,9 +71,9 @@ export default function ReportsPage() {
   }, [conversations]);
 
   return (
-    <div className="flex flex-col h-full" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
+    <div className="flex flex-col h-full min-h-0" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
       {/* Header */}
-      <div className="px-6 py-4" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
+      <div className="px-4 md:px-6 py-4 shrink-0" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
         <h1 className="text-[15px] font-bold mb-0.5" style={{ color: 'var(--text-primary)' }}>Reports & Analytics</h1>
         <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
           Real-time conversion metrics calculated from active Meta leads & conversations.
@@ -81,7 +81,14 @@ export default function ReportsPage() {
       </div>
 
       {/* Main Content */}
-      <div className="p-6 flex-1 overflow-y-auto" style={{ color: 'var(--text-primary)' }}>
+      <div
+        className="p-4 md:p-6 flex-1 min-h-0 overflow-y-auto"
+        style={{
+          color: 'var(--text-primary)',
+          WebkitOverflowScrolling: 'touch',
+          overscrollBehavior: 'contain',
+        }}
+      >
         {/* KPI Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           <KpiCard
@@ -113,13 +120,13 @@ export default function ReportsPage() {
         </div>
 
         {/* Campaign Breakdown Table */}
-        <div className="rounded-xl overflow-hidden shadow-sm" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}>
+        <div className="rounded-xl overflow-hidden shadow-sm mb-6" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}>
           <div className="px-4 py-3 border-b flex items-center justify-between" style={{ borderColor: 'var(--border-main)' }}>
             <h2 className="text-[13px] font-bold" style={{ color: 'var(--text-primary)' }}>Campaign Performance Breakdown</h2>
             <span className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>{campaignRows.length} Campaign{campaignRows.length !== 1 ? 's' : ''}</span>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto w-full" style={{ WebkitOverflowScrolling: 'touch' }}>
             {campaignRows.length === 0 ? (
               <div className="p-8 text-center">
                 <p className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>
@@ -127,7 +134,7 @@ export default function ReportsPage() {
                 </p>
               </div>
             ) : (
-              <table className="w-full text-left">
+              <table className="w-full text-left min-w-[640px]">
                 <thead>
                   <tr className="text-[10px] uppercase tracking-widest font-bold" style={{ background: 'var(--bg-table-header)', color: 'var(--text-secondary)' }}>
                     <th className="py-2.5 px-4">Campaign</th>
