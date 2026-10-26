@@ -39,6 +39,7 @@ type Conversation = {
     followUpNote?: string;
     notes?: string;
   };
+  lastMessageAt?: number;
   messages: Message[];
 };
 
@@ -46,6 +47,7 @@ type Conversation = {
 
 import { useCRM } from "./context/CRMContext";
 import { useAuth } from "./components/AuthProvider";
+import { formatLastMessageTime } from "./utils/time";
 
 type MobileView = "list" | "chat" | "details";
 
@@ -67,7 +69,15 @@ export default function InboxPage() {
     setActiveChatId,
     patchConversation,
     markConversationAsRead,
+    refresh,
   } = useCRM();
+
+  // Periodic refresh every 30s to keep relative timestamps (e.g. "23m", "1 day ago") live
+  const [, setTimeTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setTimeTick((t) => t + 1), 30000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Sync mobileView when navigated from another page (e.g. Pipeline, Leads, Follow-ups)
   const prevActiveChatId = useRef<string | null>(null);
@@ -155,6 +165,7 @@ export default function InboxPage() {
       });
       if (res.ok) {
         setReplyText("");
+        refresh();
       }
     } catch (err) {
       console.error("Failed to send reply:", err);
@@ -213,6 +224,7 @@ export default function InboxPage() {
         <div className="flex-1 overflow-y-auto">
           {filteredConversations.map((conv) => {
             const isActive = conv.id === activeChatId;
+            const timeStr = formatLastMessageTime(conv.lastMessageAt);
             return (
               <div
                 key={conv.id}
@@ -223,15 +235,15 @@ export default function InboxPage() {
                   background: isActive ? "var(--bg-selected)" : undefined,
                 }}
               >
-                <div>
-                  <h3 className="text-[13px] font-semibold leading-tight mb-0.5" style={{ color: "var(--text-primary)" }}>
+                <div className="min-w-0 pr-2 flex-1">
+                  <h3 className="text-[13px] font-semibold leading-tight mb-0.5 truncate" style={{ color: "var(--text-primary)" }}>
                     {conv.name}
                   </h3>
-                  <p className="text-[11px]" style={{ color: isActive ? "#0066FF" : "var(--text-secondary)" }}>
+                  <p className="text-[11px] truncate" style={{ color: isActive ? "#0066FF" : "var(--text-secondary)" }}>
                     {conv.agent}
                   </p>
                 </div>
-                <div className="flex flex-col items-end gap-1.5">
+                <div className="flex flex-col items-end justify-between shrink-0 self-stretch gap-1">
                   <span
                     className="text-[9px] font-bold tracking-wide px-1.5 py-0.5 rounded"
                     style={{
@@ -241,11 +253,24 @@ export default function InboxPage() {
                   >
                     {conv.channel}
                   </span>
-                  {Boolean(conv.unreadCount && conv.unreadCount > 0) && (
-                    <span className="flex items-center justify-center w-[16px] h-[16px] bg-[#0066FF] text-white text-[9px] font-bold rounded-full">
-                      {conv.unreadCount}
-                    </span>
-                  )}
+                  <div className="flex items-center gap-1.5 mt-auto">
+                    {timeStr && (
+                      <span
+                        className="text-[10px] font-medium"
+                        style={{
+                          color: isActive ? "#0066FF" : "var(--text-muted)",
+                          opacity: isActive ? 0.9 : 0.85,
+                        }}
+                      >
+                        {timeStr}
+                      </span>
+                    )}
+                    {Boolean(conv.unreadCount && conv.unreadCount > 0) && (
+                      <span className="flex items-center justify-center min-w-[16px] h-[16px] px-1 bg-[#0066FF] text-white text-[9px] font-bold rounded-full">
+                        {conv.unreadCount}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
             );

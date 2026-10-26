@@ -179,7 +179,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       })(),
       createdAt: c.createdAt,
       updatedAt: c.updatedAt,
-      lastMessageAt: c.lastMessageAt,
+      lastMessageAt: c.lastMessageAt || (c.updatedAt ? new Date(c.updatedAt).getTime() : undefined) || (c.createdAt ? new Date(c.createdAt).getTime() : undefined),
     };
   }, []);
 
@@ -263,7 +263,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         setConversations((prev) =>
           prev.map((c) =>
             c.id === chatId
-              ? { ...c, messages: newMessages, unreadCount: 0 }
+              ? {
+                  ...c,
+                  messages: newMessages,
+                  unreadCount: 0,
+                  lastMessageAt: json.data?.lastMessageAt || c.lastMessageAt,
+                }
               : c
           )
         );

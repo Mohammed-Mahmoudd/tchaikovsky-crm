@@ -5,6 +5,7 @@ import Link from "next/link";
 import { MessageSquare, Trash2, AlertTriangle, Calendar, CheckCircle2, Clock, X } from "lucide-react";
 import { useCRM } from "../context/CRMContext";
 import { useAuth } from "../components/AuthProvider";
+import { formatLastMessageTime } from "../utils/time";
 
 import {
   DndContext,
@@ -49,6 +50,7 @@ type Lead = {
   agent?: string;
   channel?: string;
   rawCreatedAt?: number;
+  lastMessageAt?: number;
 };
 
 const STAGES: Stage[] = [
@@ -300,15 +302,22 @@ const MobileLeadCard = React.memo(function MobileLeadCard({
         <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>
           {lead.date.split(",")[0]}
         </span>
-        <span
-          className="text-[11px] font-medium px-2 py-0.5 rounded-full"
-          style={{
-            background: STAGE_COLORS[lead.stage] + "18",
-            color: STAGE_COLORS[lead.stage],
-          }}
-        >
-          {lead.stage}
-        </span>
+        <div className="flex items-center gap-2">
+          {lead.lastMessageAt && (
+            <span className="text-[11px] font-medium" style={{ color: "var(--text-muted)" }} title="Last message sent">
+              {formatLastMessageTime(lead.lastMessageAt)}
+            </span>
+          )}
+          <span
+            className="text-[11px] font-medium px-2 py-0.5 rounded-full"
+            style={{
+              background: STAGE_COLORS[lead.stage] + "18",
+              color: STAGE_COLORS[lead.stage],
+            }}
+          >
+            {lead.stage}
+          </span>
+        </div>
       </div>
 
       {/* Popover */}
@@ -486,6 +495,15 @@ const LeadCard = React.memo(function LeadCard({
         >
           {lead.date.split(",")[0]}
         </span>
+        {lead.lastMessageAt && (
+          <span
+            className="text-[10px] xl:text-[11px] shrink-0 font-medium"
+            style={{ color: "var(--text-muted)" }}
+            title="Last message sent"
+          >
+            {formatLastMessageTime(lead.lastMessageAt)}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -662,6 +680,13 @@ export default function PipelinePage() {
   const [auditionTime, setAuditionTime] = useState("05:00 PM");
   const [auditionNotes, setAuditionNotes] = useState("");
   const [isBookingAudition, setIsBookingAudition] = useState(false);
+
+  // Periodic refresh every 30s to keep relative timestamps live
+  const [, setTimeTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setTimeTick((t) => t + 1), 30000);
+    return () => clearInterval(timer);
+  }, []);
   // Instant synchronous stage overrides for immediate 0ms UI drop feedback
   const [stageOverrides, setStageOverrides] = useState<Record<string, Stage | "direct">>({});
   const [filterAgent, setFilterAgent] = useState("Everyone");
@@ -713,6 +738,7 @@ export default function PipelinePage() {
         phone: c.phone,
         agent: c.agent || "Unassigned",
         channel: c.channel || (typeof c.source === "object" ? "Meta" : "Direct"),
+        lastMessageAt: c.lastMessageAt || (c.updatedAt ? new Date(c.updatedAt).getTime() : undefined) || (c.createdAt ? new Date(c.createdAt).getTime() : undefined),
       }));
   }, [conversations, stageOverrides]);
 
