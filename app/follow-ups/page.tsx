@@ -2,6 +2,7 @@
 
 import React, { useMemo } from 'react';
 import { useCRM } from '../context/CRMContext';
+import { useAuth } from '../components/AuthProvider';
 import { MessageSquare, Calendar, CheckSquare } from 'lucide-react';
 
 type Item = {
@@ -28,6 +29,7 @@ function getSection(isoDate: string, today: string): 'overdue' | 'today' | 'upco
 
 export default function FollowUpsPage() {
   const { conversations, loading, patchConversation, openChat } = useCRM();
+  const { isReadOnly } = useAuth();
 
   const today = useMemo(() => new Date().toISOString().split('T')[0], []);
 
@@ -45,6 +47,7 @@ export default function FollowUpsPage() {
   }, [conversations]);
 
   const completeFollowUp = (id: string) => {
+    if (isReadOnly) return;
     patchConversation(id, { followUpDate: "", followUpNote: "" });
   };
 
@@ -100,6 +103,7 @@ export default function FollowUpsPage() {
             items={overdueItems}
             onToggle={completeFollowUp}
             onChat={openChat}
+            isReadOnly={isReadOnly}
           />
         )}
 
@@ -111,6 +115,7 @@ export default function FollowUpsPage() {
             items={todayItems}
             onToggle={completeFollowUp}
             onChat={openChat}
+            isReadOnly={isReadOnly}
           />
         )}
 
@@ -122,6 +127,7 @@ export default function FollowUpsPage() {
             items={upcomingItems}
             onToggle={completeFollowUp}
             onChat={openChat}
+            isReadOnly={isReadOnly}
           />
         )}
       </div>
@@ -130,11 +136,12 @@ export default function FollowUpsPage() {
 }
 
 function Section({
-  label, count, labelColor, items, onToggle, onChat
+  label, count, labelColor, items, onToggle, onChat, isReadOnly
 }: {
   label: string; count: number; labelColor: string; items: Item[];
   onToggle: (id: string) => void;
   onChat: (id: string) => void;
+  isReadOnly?: boolean;
 }) {
   return (
     <div>
@@ -149,8 +156,9 @@ function Section({
               <input
                 type="checkbox"
                 checked={item.completed}
+                disabled={isReadOnly}
                 onChange={() => onToggle(item.id)}
-                className="mt-0.5 w-[15px] h-[15px] accent-[#0071e3] rounded cursor-pointer shrink-0"
+                className="mt-0.5 w-[15px] h-[15px] accent-[#0071e3] rounded cursor-pointer shrink-0 disabled:opacity-50"
                 title="Mark as completed"
               />
               <div>

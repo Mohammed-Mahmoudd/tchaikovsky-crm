@@ -29,6 +29,7 @@ type Lead = {
 export default function LeadsPage() {
   const { conversations, loading, openChat } = useCRM();
   const [filterStage, setFilterStage] = useState("All");
+  const [filterCampaign, setFilterCampaign] = useState("All campaigns");
 
   const leads: Lead[] = useMemo(() => {
     return conversations.map((c) => ({
@@ -38,7 +39,7 @@ export default function LeadsPage() {
         : "—",
       name: c.name,
       phone: c.phone || "—",
-      campaign: typeof c.source === "object" ? c.source?.campaign || "Direct" : c.source || "Direct",
+      campaign: typeof c.source === "object" ? c.source?.campaign || "Direct" : (c.source && c.source !== "direct" ? c.source : "Direct"),
       ad: typeof c.source === "object" ? c.source?.ad || "—" : "—",
       stage: c.pipeline || "New",
       agent: c.agent || "Unassigned",
@@ -46,8 +47,43 @@ export default function LeadsPage() {
     }));
   }, [conversations]);
 
+  const campaignOptions = useMemo(() => {
+    const counts: Record<string, number> = {};
+    leads.forEach((l) => {
+      const camp = l.campaign || "Direct";
+      counts[camp] = (counts[camp] || 0) + 1;
+    });
+
+    const nonDirect = Object.keys(counts)
+      .filter((c) => c !== "Direct")
+      .sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
+
+    const options: { label: string; value: string }[] = [
+      { label: `All campaigns (${leads.length})`, value: "All campaigns" },
+    ];
+
+    if (counts["Direct"]) {
+      options.push({ label: `Direct (${counts["Direct"]})`, value: "Direct" });
+    }
+
+    nonDirect.forEach((c) => {
+      const display = /^\d+$/.test(c) ? `Campaign #${c}` : c;
+      options.push({ label: `${display} (${counts[c]})`, value: c });
+    });
+
+    return options;
+  }, [leads]);
+
   const stages = ["All", "New", "Contacted", "Audition Booked", "Enrolled", "Lost"];
-  const filtered = filterStage === "All" ? leads : leads.filter(l => l.stage === filterStage);
+  const filtered = useMemo(() => {
+    return leads.filter((l) => {
+      if (filterStage !== "All" && l.stage !== filterStage) return false;
+      if (filterCampaign !== "All campaigns" && l.campaign !== filterCampaign) return false;
+      return true;
+    });
+  }, [leads, filterStage, filterCampaign]);
+
+  const hasActiveFilters = filterStage !== "All" || filterCampaign !== "All campaigns";
 
   return (
     <div className="flex flex-col h-full min-h-0" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
@@ -60,25 +96,61 @@ export default function LeadsPage() {
               Every live lead from Meta — newest first. Synchronized across CRM.
             </p>
           </div>
-          <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full" style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}>
-            {filtered.length} leads
-          </span>
+          <div className="flex items-center gap-2">
+            {hasActiveFilters && (
+              <button
+                onClick={() => {
+                  setFilterStage("All");
+                  setFilterCampaign("All campaigns");
+                }}
+                className="text-[11px] font-semibold px-2 py-0.5 rounded-[6px] text-[#FF3B30] hover:bg-[rgba(255,59,48,0.1)] transition cursor-pointer"
+                style={{ border: '1px solid rgba(255, 59, 48, 0.3)' }}
+              >
+                Clear filters
+              </button>
+            )}
+            <span className="text-[11px] font-semibold px-2.5 py-1 rounded-full" style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}>
+              {filtered.length} leads
+            </span>
+          </div>
         </div>
-        {/* Stage filter pills */}
-        <div className="flex gap-2 overflow-x-auto flex-nowrap shrink-0" style={{ WebkitOverflowScrolling: 'touch' }}>
-          {stages.map(s => (
-            <button
-              key={s}
-              onClick={() => setFilterStage(s)}
-              className="text-[11px] font-semibold px-2.5 py-1 rounded-full transition-colors shrink-0 cursor-pointer touch-manipulation"
-              style={filterStage === s
-                ? { background: '#0066FF', color: '#fff' }
-                : { background: 'var(--bg-pill)', color: 'var(--text-secondary)' }
-              }
+        {/* Filters row */}
+        <div className="flex items-center gap-3 overflow-x-auto flex-nowrap shrink-0" style={{ WebkitOverflowScrolling: 'touch' }}>
+          {/* Stage filter pills */}
+          <div className="flex gap-1.5 shrink-0">
+            {stages.map(s => (
+              <button
+                key={s}
+                onClick={() => setFilterStage(s)}
+                className="text-[11px] font-semibold px-2.5 py-1 rounded-full transition-colors shrink-0 cursor-pointer touch-manipulation"
+                style={filterStage === s
+                  ? { background: '#0066FF', color: '#fff' }
+                  : { background: 'var(--bg-pill)', color: 'var(--text-secondary)' }
+                }
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+
+          <div className="h-4 w-[1px] shrink-0" style={{ background: 'var(--border-main)' }} />
+
+          {/* Campaign Filter */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>CAMPAIGN</span>
+            <select
+              value={filterCampaign}
+              onChange={e => setFilterCampaign(e.target.value)}
+              className="h-[26px] text-[11px] rounded-[6px] px-2 outline-none cursor-pointer font-medium"
+              style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
             >
-              {s}
-            </button>
-          ))}
+              {campaignOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
 

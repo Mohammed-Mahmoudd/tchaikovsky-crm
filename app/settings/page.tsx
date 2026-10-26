@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { useAuth, Role } from "../components/AuthProvider";
+import { useAuth, Role, getRoleDisplayName, normalizeRole, canManageTeamRole } from "../components/AuthProvider";
 
 interface TeamMember {
   id: string;
@@ -12,7 +12,7 @@ interface TeamMember {
 }
 
 export default function SettingsPage() {
-  const { user, updateCurrentUser, authFetch } = useAuth();
+  const { user, updateCurrentUser, authFetch, canManageTeam: authCanManageTeam, roleDisplayName } = useAuth();
 
   // Profile state
   const [nameSaving, setNameSaving] = useState(false);
@@ -31,14 +31,14 @@ export default function SettingsPage() {
   const [newName, setNewName] = useState("");
   const [newEmail, setNewEmail] = useState("");
   const [newMemberPw, setNewMemberPw] = useState("");
-  const [newRole, setNewRole] = useState<Role>("agent");
+  const [newRole, setNewRole] = useState<Role>("admission_officer");
   const [addingUser, setAddingUser] = useState(false);
   const [addStatus, setAddStatus] = useState<{ ok: boolean; msg: string } | null>(null);
 
   const [nameInput, setNameInput] = useState<string | null>(null);
   const displayName = nameInput ?? (user?.name || "");
 
-  const canManageTeam = user?.role === "owner" || user?.role === "manager";
+  const canManageTeam = authCanManageTeam || canManageTeamRole(user?.role);
 
   // Fetch team
   useEffect(() => {
@@ -197,7 +197,7 @@ export default function SettingsPage() {
     }
   };
 
-  const roleLabel = user?.role ? user.role.charAt(0).toUpperCase() + user.role.slice(1) : "Agent";
+  const roleLabel = roleDisplayName || getRoleDisplayName(user?.role);
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto p-4 md:p-6 pb-12 w-full" style={{ background: "var(--bg-page)", color: "var(--text-primary)", WebkitOverflowScrolling: "touch" }}>
@@ -319,7 +319,10 @@ export default function SettingsPage() {
         ) : (
           team.map((member) => {
             const isSelf = member.id === user?.id || member.email === user?.email;
-            const isOwner = member.role === "owner";
+            const normMemberRole = normalizeRole(member.role);
+            const isChairmanMember = normMemberRole === "chairman";
+            const userIsChairman = normalizeRole(user?.role) === "chairman";
+            const canEditThisMember = canManageTeam && (!isChairmanMember || userIsChairman);
             return (
               <div
                 key={member.id}
@@ -337,29 +340,30 @@ export default function SettingsPage() {
 
                 {/* Role select */}
                 <select
-                  disabled={!canManageTeam || (isOwner && user?.role !== "owner")}
-                  value={member.role}
+                  disabled={!canEditThisMember}
+                  value={normMemberRole}
                   onChange={(e) => handleUpdateMember(member.id, { role: e.target.value as Role })}
-                  className="h-[26px] text-[11px] rounded-[6px] px-1.5 outline-none shrink-0 w-[84px] capitalize"
+                  className="h-[26px] text-[11px] rounded-[6px] px-1.5 outline-none shrink-0 w-[140px]"
                   style={{
                     background: "var(--bg-input)",
                     border: "1px solid var(--border-input)",
                     color: "var(--text-primary)",
                   }}
                 >
-                  <option value="owner">Owner</option>
-                  <option value="manager">Manager</option>
-                  <option value="agent">Agent</option>
-                  <option value="analyst">Analyst</option>
+                  <option value="chairman">Chairman</option>
+                  <option value="admission_officer">Admission Officer</option>
+                  <option value="enrollment_director">Enrollment Director</option>
+                  <option value="finance">Finance</option>
+                  <option value="marketing">Marketing</option>
                 </select>
 
                 {/* Actions */}
                 <div className="flex gap-1.5 shrink-0">
                   <button
-                    disabled={!canManageTeam || isOwner || isSelf}
+                    disabled={!canManageTeam || (isChairmanMember && !userIsChairman) || isSelf}
                     onClick={() => handleUpdateMember(member.id, { active: !member.active })}
                     className={`h-[26px] px-2 text-[10px] font-medium rounded-[6px] transition-colors whitespace-nowrap ${
-                      isOwner || isSelf || !canManageTeam ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+                      (isChairmanMember && !userIsChairman) || isSelf || !canManageTeam ? "cursor-not-allowed opacity-50" : "cursor-pointer"
                     }`}
                     style={{
                       background: member.active ? "var(--bg-pill)" : "rgba(255,59,48,0.1)",
@@ -444,13 +448,16 @@ export default function SettingsPage() {
                 <select
                   value={newRole}
                   onChange={(e) => setNewRole(e.target.value as Role)}
-                  className="h-[28px] text-[11px] rounded-[6px] px-2 outline-none w-[100px] capitalize"
+                  className="h-[28px] text-[11px] rounded-[6px] px-2 outline-none w-[140px]"
                   style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)", color: "var(--text-primary)" }}
                 >
-                  {user?.role === "owner" && <option value="owner">Owner</option>}
-                  <option value="manager">Manager</option>
-                  <option value="agent">Agent</option>
-                  <option value="analyst">Analyst</option>
+                  <option value="admission_officer">Admission Officer</option>
+                  <option value="enrollment_director">Enrollment Director</option>
+                  <option value="finance">Finance</option>
+                  <option value="marketing">Marketing</option>
+                  {normalizeRole(user?.role) === "chairman" && (
+                    <option value="chairman">Chairman</option>
+                  )}
                 </select>
                 <button
                   type="submit"
@@ -470,7 +477,7 @@ export default function SettingsPage() {
           </form>
         ) : (
           <p className="pt-4 text-[11px]" style={{ color: "var(--text-muted)" }}>
-            Team member management is restricted to owners and managers.
+            Team member management is restricted to the Chairman.
           </p>
         )}
       </div>
@@ -504,16 +511,19 @@ export default function SettingsPage() {
         </h2>
         <ul className="space-y-2.5 text-[12px]" style={{ color: "var(--text-secondary)" }}>
           <li>
-            <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Owner</span> — everything, plus team, settings and exports.
+            <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Chairman</span> — full access to everything, team management, permissions, and system settings.
           </li>
           <li>
-            <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Manager</span> — full inbox, pipeline, scheduling, reports.
+            <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Admission Officer</span> — agent features: live chat inbox, pipeline management, leads, bookings, and follow-ups.
           </li>
           <li>
-            <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Agent</span> — reply, manage leads and bookings.
+            <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Enrollment Director</span> — access to auditions only: schedule auditions, manage applicants, and track attendance.
           </li>
           <li>
-            <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Analyst</span> — read-only pipeline and reports; no conversations.
+            <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Finance</span> — access to pipeline and reports: financial tracking, campaign analytics, and conversion metrics.
+          </li>
+          <li>
+            <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Marketing</span> — view-only access across the entire CRM (all sections visible in read-only mode).
           </li>
         </ul>
       </div>

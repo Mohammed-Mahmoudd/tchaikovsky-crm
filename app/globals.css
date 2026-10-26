@@ -7,6 +7,7 @@
   --bg-panel: #fafafa;
   --bg-input: #f2f2f7;
   --bg-column: #e8e8ed;
+  --bg-column-hover: #dfdfe5;
   --bg-sidebar: #f2f2f7;
   --bg-hover: rgba(0, 0, 0, 0.04);
   --bg-selected: #E5F0FF;
@@ -48,6 +49,7 @@
   --bg-panel: #0a0a0a;
   --bg-input: #1e1e1e;
   --bg-column: #0a0a0a;
+  --bg-column-hover: #141414;
   --bg-sidebar: #050505;
   --bg-hover: rgba(255, 255, 255, 0.05);
   --bg-selected: #1e1e1e;
@@ -155,3 +157,4 @@ button, [role="button"] {
   40%  { transform: scale(0.98); }
   100% { transform: scale(1); box-shadow: 0 0 0 6px rgba(0, 102, 255, 0); }
 }
+

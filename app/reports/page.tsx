@@ -1,8 +1,17 @@
 "use client";
 
-import React, { useMemo } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useCRM } from '../context/CRMContext';
-import { TrendingUp, Users, CalendarCheck, Award } from 'lucide-react';
+import {
+  TrendingUp,
+  Users,
+  CalendarCheck,
+  Award,
+  Banknote,
+  ChevronLeft,
+  ChevronRight,
+  Calendar,
+} from 'lucide-react';
 
 type CampaignStats = {
   campaign: string;
@@ -10,26 +19,129 @@ type CampaignStats = {
   booked: number;
   attended: number;
   enrolled: number;
+  cashIn: number;
   unqualified: number;
 };
+
+function addDays(date: Date, days: number) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function isoDate(d: Date) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function formatRangeLabel(start: Date, end: Date) {
+  const opts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
+  const yr = start.getFullYear() !== end.getFullYear() ? `, ${start.getFullYear()}` : '';
+  const endYr = `, ${end.getFullYear()}`;
+  return `${start.toLocaleDateString('en-US', opts)}${yr} – ${end.toLocaleDateString('en-US', opts)}${endYr}`;
+}
+
+function getWeekStart(from: Date) {
+  const d = new Date(from);
+  const day = d.getDay();
+  // Saturday start (Saudi week: Sat-Fri)
+  const diff = day === 6 ? 0 : day + 1;
+  d.setDate(d.getDate() - diff);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function getWeekEnd(start: Date) {
+  const d = new Date(start);
+  d.setDate(d.getDate() + 6);
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
 
 export default function ReportsPage() {
   const { conversations, loading } = useCRM();
 
-  const { totalLeads, auditionsBooked, attended, enrolled, bookedPct, attendedPct, enrolledPct, campaignRows } = useMemo(() => {
-    const total = conversations.length;
-    const booked = conversations.filter(c => ['Audition Booked', 'Attended', 'Enrolled'].includes(c.pipeline)).length;
-    const att = conversations.filter(c => ['Attended', 'Enrolled'].includes(c.pipeline)).length;
-    const enr = conversations.filter(c => c.pipeline === 'Enrolled').length;
+  // Filter state
+  const [filterMode, setFilterMode] = useState<'week' | 'all'>('all');
+  const [currentDate, setCurrentDate] = useState<Date>(() => getWeekStart(new Date()));
+
+  const weekStart = useMemo(() => getWeekStart(currentDate), [currentDate]);
+  const weekEnd = useMemo(() => getWeekEnd(weekStart), [weekStart]);
+
+  const thisWeekStart = useMemo(() => getWeekStart(new Date()), []);
+  const lastWeekStart = useMemo(() => addDays(thisWeekStart, -7), [thisWeekStart]);
+
+  const isThisWeek = weekStart.getTime() === thisWeekStart.getTime();
+  const isLastWeek = weekStart.getTime() === lastWeekStart.getTime();
+
+  const prevWeek = () => {
+    setCurrentDate(d => addDays(d, -7));
+    setFilterMode('week');
+  };
+
+  const nextWeek = () => {
+    setCurrentDate(d => addDays(d, 7));
+    setFilterMode('week');
+  };
+
+  const goThisWeek = () => {
+    setCurrentDate(thisWeekStart);
+    setFilterMode('week');
+  };
+
+  const goLastWeek = () => {
+    setCurrentDate(lastWeekStart);
+    setFilterMode('week');
+  };
+
+  const goAllTime = () => {
+    setFilterMode('all');
+  };
+
+  // Filter conversations by selected period
+  const filteredConversations = useMemo(() => {
+    if (filterMode === 'all') return conversations;
+
+    const startMs = weekStart.getTime();
+    const endMs = weekEnd.getTime();
+
+    return conversations.filter((c) => {
+      const time = c.createdAt
+        ? new Date(c.createdAt).getTime()
+        : (c.lastMessageAt || (c.updatedAt ? new Date(c.updatedAt).getTime() : 0));
+      return time >= startMs && time <= endMs;
+    });
+  }, [conversations, filterMode, weekStart, weekEnd]);
+
+  const {
+    totalLeads,
+    auditionsBooked,
+    attended,
+    enrolled,
+    totalCashIn,
+    avgCashPerEnrolled,
+    bookedPct,
+    attendedPct,
+    enrolledPct,
+    campaignRows,
+  } = useMemo(() => {
+    const total = filteredConversations.length;
+    const booked = filteredConversations.filter(c => ['Audition Booked', 'Attended', 'Enrolled'].includes(c.pipeline)).length;
+    const att = filteredConversations.filter(c => ['Attended', 'Enrolled'].includes(c.pipeline)).length;
+    const enr = filteredConversations.filter(c => c.pipeline === 'Enrolled').length;
+    const totalCash = filteredConversations.reduce((acc, c) => acc + (Number(c.cashIn) || 0), 0);
 
     const bPct = total > 0 ? `${Math.round((booked / total) * 100)}%` : '0%';
     const aPct = booked > 0 ? `${Math.round((att / booked) * 100)}%` : '0%';
     const ePct = total > 0 ? `${Math.round((enr / total) * 100)}%` : '0%';
+    const avgCash = enr > 0 ? Math.round(totalCash / enr) : 0;
 
     // Aggregate by campaign
     const campaignMap: Record<string, CampaignStats> = {};
 
-    conversations.forEach((c) => {
+    filteredConversations.forEach((c) => {
       let campName = "Organic / Direct";
       if (typeof c.source === "object" && c.source?.campaign) {
         campName = c.source.campaign;
@@ -44,6 +156,7 @@ export default function ReportsPage() {
           booked: 0,
           attended: 0,
           enrolled: 0,
+          cashIn: 0,
           unqualified: 0,
         };
       }
@@ -54,6 +167,7 @@ export default function ReportsPage() {
       if (['Attended', 'Enrolled'].includes(c.pipeline)) entry.attended += 1;
       if (c.pipeline === 'Enrolled') entry.enrolled += 1;
       if (c.pipeline === 'Lost') entry.unqualified += 1;
+      entry.cashIn += Number(c.cashIn) || 0;
     });
 
     const rows = Object.values(campaignMap).sort((a, b) => b.leads - a.leads);
@@ -63,21 +177,140 @@ export default function ReportsPage() {
       auditionsBooked: booked,
       attended: att,
       enrolled: enr,
+      totalCashIn: totalCash,
+      avgCashPerEnrolled: avgCash,
       bookedPct: bPct,
       attendedPct: aPct,
       enrolledPct: ePct,
       campaignRows: rows,
     };
-  }, [conversations]);
+  }, [filteredConversations]);
 
   return (
     <div className="flex flex-col h-full min-h-0" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
       {/* Header */}
-      <div className="px-4 md:px-6 py-4 shrink-0" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
-        <h1 className="text-[15px] font-bold mb-0.5" style={{ color: 'var(--text-primary)' }}>Reports & Analytics</h1>
-        <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-          Real-time conversion metrics calculated from active Meta leads & conversations.
-        </p>
+      <div
+        className="px-4 md:px-6 py-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3 shrink-0"
+        style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}
+      >
+        <div>
+          <div className="flex items-center gap-2">
+            <h1 className="text-[15px] font-bold leading-none mb-0.5" style={{ color: 'var(--text-primary)' }}>
+              Reports & Analytics
+            </h1>
+            {filterMode === 'week' && (
+              <span
+                className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full"
+                style={{ background: 'var(--bg-selected)', color: '#0066FF' }}
+              >
+                {isThisWeek ? 'This Week' : isLastWeek ? 'Last Week' : 'Weekly View'}
+              </span>
+            )}
+          </div>
+          <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+            {filterMode === 'week' ? (
+              <>
+                Conversion metrics for <strong style={{ color: 'var(--text-primary)' }}>{formatRangeLabel(weekStart, weekEnd)}</strong> ({filteredConversations.length} of {conversations.length} leads)
+              </>
+            ) : (
+              <>
+                All-time conversion metrics ({conversations.length} total leads)
+              </>
+            )}
+          </p>
+        </div>
+
+        {/* Filter Controls */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Quick Presets */}
+          <div className="flex items-center gap-1 p-0.5 rounded-[8px]" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
+            <button
+              onClick={goAllTime}
+              className="h-[24px] px-2.5 text-[11px] font-semibold rounded-[6px] transition-colors cursor-pointer"
+              style={filterMode === 'all'
+                ? { background: '#0066FF', color: '#fff' }
+                : { background: 'transparent', color: 'var(--text-secondary)' }
+              }
+            >
+              All Time
+            </button>
+            <button
+              onClick={goThisWeek}
+              className="h-[24px] px-2.5 text-[11px] font-semibold rounded-[6px] transition-colors cursor-pointer"
+              style={filterMode === 'week' && isThisWeek
+                ? { background: '#0066FF', color: '#fff' }
+                : { background: 'transparent', color: 'var(--text-secondary)' }
+              }
+            >
+              This Week
+            </button>
+            <button
+              onClick={goLastWeek}
+              className="h-[24px] px-2.5 text-[11px] font-semibold rounded-[6px] transition-colors cursor-pointer"
+              style={filterMode === 'week' && isLastWeek
+                ? { background: '#0066FF', color: '#fff' }
+                : { background: 'transparent', color: 'var(--text-secondary)' }
+              }
+            >
+              Last Week
+            </button>
+          </div>
+
+          {/* Week Stepper / Date Picker */}
+          {filterMode === 'week' && (
+            <div className="flex items-center gap-1">
+              <button
+                onClick={prevWeek}
+                className="h-[28px] w-[28px] flex items-center justify-center rounded-[6px] transition-colors cursor-pointer hover:opacity-80"
+                style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}
+                title="Previous Week"
+                aria-label="Previous Week"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+
+              <div
+                className="h-[28px] px-2.5 flex items-center gap-1.5 text-[11px] font-medium rounded-[6px]"
+                style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                title={`Week: ${formatRangeLabel(weekStart, weekEnd)}`}
+              >
+                <Calendar className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                <span className="whitespace-nowrap">{formatRangeLabel(weekStart, weekEnd)}</span>
+              </div>
+
+              <button
+                onClick={nextWeek}
+                className="h-[28px] w-[28px] flex items-center justify-center rounded-[6px] transition-colors cursor-pointer hover:opacity-80"
+                style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}
+                title="Next Week"
+                aria-label="Next Week"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+
+              <input
+                type="date"
+                value={isoDate(currentDate)}
+                onChange={(e) => {
+                  if (e.target.value) {
+                    const [y, m, d] = e.target.value.split('-').map(Number);
+                    const picked = new Date(y, m - 1, d);
+                    picked.setHours(0, 0, 0, 0);
+                    setCurrentDate(picked);
+                    setFilterMode('week');
+                  }
+                }}
+                className="h-[28px] text-[11px] font-medium rounded-[6px] px-2 outline-none cursor-pointer transition-colors"
+                style={{
+                  background: 'var(--bg-pill)',
+                  border: '1px solid var(--border-input)',
+                  color: 'var(--text-primary)',
+                }}
+                title="Select date to jump to week"
+              />
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Main Content */}
@@ -90,7 +323,7 @@ export default function ReportsPage() {
         }}
       >
         {/* KPI Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4 mb-6">
           <KpiCard
             title="Total Leads"
             value={totalLeads.toString()}
@@ -117,6 +350,13 @@ export default function ReportsPage() {
             subLabel="conversion"
             icon={<Award className="w-4 h-4 text-purple-500" />}
           />
+          <KpiCard
+            title="Total Cash In"
+            value={totalCashIn.toLocaleString()}
+            subValue={avgCashPerEnrolled > 0 ? avgCashPerEnrolled.toLocaleString() : undefined}
+            subLabel={avgCashPerEnrolled > 0 ? "avg / enrolled" : undefined}
+            icon={<Banknote className="w-4 h-4 text-emerald-500" />}
+          />
         </div>
 
         {/* Campaign Breakdown Table */}
@@ -129,12 +369,25 @@ export default function ReportsPage() {
           <div className="overflow-x-auto w-full" style={{ WebkitOverflowScrolling: 'touch' }}>
             {campaignRows.length === 0 ? (
               <div className="p-8 text-center">
-                <p className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>
-                  {loading ? "Calculating metrics..." : "No conversation campaign data recorded yet."}
+                <p className="text-[13px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                  {loading
+                    ? "Calculating metrics..."
+                    : filterMode === 'week'
+                      ? `No conversation campaign data recorded for ${formatRangeLabel(weekStart, weekEnd)}.`
+                      : "No conversation campaign data recorded yet."}
                 </p>
+                {!loading && filterMode === 'week' && (
+                  <button
+                    onClick={goAllTime}
+                    className="mt-3 text-[11px] font-semibold px-3 py-1.5 rounded-[6px] transition-colors cursor-pointer"
+                    style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: '#0066FF' }}
+                  >
+                    View All Time Data
+                  </button>
+                )}
               </div>
             ) : (
-              <table className="w-full text-left min-w-[640px]">
+              <table className="w-full text-left min-w-[720px]">
                 <thead>
                   <tr className="text-[10px] uppercase tracking-widest font-bold" style={{ background: 'var(--bg-table-header)', color: 'var(--text-secondary)' }}>
                     <th className="py-2.5 px-4">Campaign</th>
@@ -142,6 +395,7 @@ export default function ReportsPage() {
                     <th className="py-2.5 px-4 text-right">Booked</th>
                     <th className="py-2.5 px-4 text-right">Attended</th>
                     <th className="py-2.5 px-4 text-right">Enrolled</th>
+                    <th className="py-2.5 px-4 text-right">Cash In</th>
                     <th className="py-2.5 px-4 text-right">Lead → Enrol</th>
                     <th className="py-2.5 px-4 text-right">Lost / Unqualified</th>
                   </tr>
@@ -156,6 +410,7 @@ export default function ReportsPage() {
                         <td className="py-3 px-4 text-right" style={{ color: 'var(--text-secondary)' }}>{c.booked}</td>
                         <td className="py-3 px-4 text-right" style={{ color: 'var(--text-secondary)' }}>{c.attended}</td>
                         <td className="py-3 px-4 text-right font-bold text-emerald-500">{c.enrolled}</td>
+                        <td className="py-3 px-4 text-right font-semibold text-emerald-600 dark:text-emerald-400">{c.cashIn.toLocaleString()}</td>
                         <td className="py-3 px-4 text-right font-medium text-blue-500">{convPct}</td>
                         <td className="py-3 px-4 text-right" style={{ color: 'var(--text-muted)' }}>{c.unqualified}</td>
                       </tr>

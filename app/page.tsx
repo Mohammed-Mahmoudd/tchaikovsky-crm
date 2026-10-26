@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
-import { ArrowLeft, Info, X } from "lucide-react";
+import Link from "next/link";
+import { ArrowLeft, Info, X, Calendar, CheckCircle2 } from "lucide-react";
 
 type Channel = "WA" | "IG" | "FB";
 
@@ -26,12 +27,12 @@ type Conversation = {
   windowLeft: string;
   pipeline: string | "direct";
   source:
-    | {
-        campaign: string;
-        adset: string;
-        ad: string;
-      }
-    | "direct";
+  | {
+    campaign: string;
+    adset: string;
+    ad: string;
+  }
+  | "direct";
   formAnswers?: {
     instrument?: string;
     studentAge?: string;
@@ -44,6 +45,7 @@ type Conversation = {
 // Removed dummy data
 
 import { useCRM } from "./context/CRMContext";
+import { useAuth } from "./components/AuthProvider";
 
 type MobileView = "list" | "chat" | "details";
 
@@ -53,6 +55,7 @@ export default function InboxPage() {
   const [showDetailsPanel, setShowDetailsPanel] = useState(false);
   const [replyText, setReplyText] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const { isReadOnly } = useAuth();
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -66,12 +69,11 @@ export default function InboxPage() {
     markConversationAsRead,
   } = useCRM();
 
-  const [activeConvId, setActiveConvId] = useState<string | null>(activeChatId);
-
-  // Sync if navigated from another page (e.g. Pipeline, Leads, Follow-ups)
+  // Sync mobileView when navigated from another page (e.g. Pipeline, Leads, Follow-ups)
+  const prevActiveChatId = useRef<string | null>(null);
   useEffect(() => {
-    if (activeChatId) {
-      setActiveConvId(activeChatId);
+    if (activeChatId && activeChatId !== prevActiveChatId.current) {
+      prevActiveChatId.current = activeChatId;
       setMobileView("chat");
       markConversationAsRead(activeChatId);
     }
@@ -87,20 +89,63 @@ export default function InboxPage() {
     return true;
   });
 
-  const activeConv = conversations.find((c) => c.id === activeConvId);
+  // Use activeChatId directly — no duplicate local state
+  const activeConv = conversations.find((c) => c.id === activeChatId);
+
+  // Audition booking modal state
+  const [showAuditionModal, setShowAuditionModal] = useState(false);
+  const [auditionDate, setAuditionDate] = useState("");
+  const [auditionTime, setAuditionTime] = useState("05:00 PM");
+  const [auditionNotes, setAuditionNotes] = useState("");
+  const [isBookingAudition, setIsBookingAudition] = useState(false);
+
+  const handleOpenBookingModal = () => {
+    if (!activeConv) return;
+    const defaultDate = activeConv.followUpDate || new Date().toISOString().split("T")[0];
+    const defaultNote = activeConv.followUpNote || "";
+    const timeMatch = defaultNote.match(/\b(0?[1-9]|1[0-2]):[0-5][0-9]\s*(?:AM|PM|am|pm)\b/i);
+    setAuditionDate(defaultDate);
+    setAuditionTime(timeMatch ? timeMatch[0].toUpperCase() : "05:00 PM");
+    setAuditionNotes(activeConv.formAnswers?.instrument || "");
+    setShowAuditionModal(true);
+  };
+
+  const handleConfirmBooking = async () => {
+    if (!activeConv || isReadOnly || isBookingAudition) return;
+    setIsBookingAudition(true);
+    try {
+      const formattedNote = `${auditionTime}${auditionNotes ? ` · ${auditionNotes}` : ""}`;
+      await patchConversation(activeConv.id, {
+        pipeline: "Audition Booked",
+        followUpDate: auditionDate,
+        followUpNote: formattedNote,
+      });
+      setShowAuditionModal(false);
+    } catch (err) {
+      console.error("Failed to book audition:", err);
+    } finally {
+      setIsBookingAudition(false);
+    }
+  };
 
   const scrollToBottom = (behavior: ScrollBehavior = "auto") => {
     messagesEndRef.current?.scrollIntoView({ behavior });
   };
 
+  // Track previous message count to avoid unnecessary scroll-to-bottom on re-renders
+  const prevMsgCountRef = useRef(0);
   useEffect(() => {
-    if (activeConvId && activeConv?.messages) {
-      scrollToBottom("auto");
+    if (activeChatId && activeConv?.messages) {
+      const currentCount = activeConv.messages.length;
+      if (currentCount !== prevMsgCountRef.current) {
+        prevMsgCountRef.current = currentCount;
+        scrollToBottom("auto");
+      }
     }
-  }, [activeConvId, activeConv?.messages?.length]);
+  }, [activeChatId, activeConv?.messages?.length]);
 
   const handleSendReply = async () => {
-    if (!replyText.trim() || !activeConv) return;
+    if (isReadOnly || !replyText.trim() || !activeConv) return;
     setIsSending(true);
     try {
       const res = await fetch(`/api/messages/${activeConv.id}/reply`, {
@@ -119,7 +164,6 @@ export default function InboxPage() {
   };
 
   const handleSelectConv = (id: string) => {
-    setActiveConvId(id);
     setActiveChatId(id);
     setMobileView("chat");
     setShowDetailsPanel(false);
@@ -156,9 +200,8 @@ export default function InboxPage() {
               <button
                 key={filter}
                 onClick={() => setActiveFilter(filter)}
-                className={`text-[11px] font-semibold px-2.5 py-1 rounded-full transition-colors ${
-                  activeFilter === filter ? "bg-[#0066FF] text-white" : ""
-                }`}
+                className={`text-[11px] font-semibold px-2.5 py-1 rounded-full transition-colors ${activeFilter === filter ? "bg-[#0066FF] text-white" : ""
+                  }`}
                 style={activeFilter !== filter ? { background: "var(--bg-pill)", color: "var(--text-secondary)" } : undefined}
               >
                 {filter}
@@ -169,7 +212,7 @@ export default function InboxPage() {
 
         <div className="flex-1 overflow-y-auto">
           {filteredConversations.map((conv) => {
-            const isActive = conv.id === activeConvId;
+            const isActive = conv.id === activeChatId;
             return (
               <div
                 key={conv.id}
@@ -298,9 +341,8 @@ export default function InboxPage() {
               {activeConv.messages.map((msg) => (
                 <div key={msg.id} className={`flex ${msg.isIncoming ? "justify-start" : "justify-end"}`}>
                   <div
-                    className={`max-w-[85%] md:max-w-[70%] rounded-2xl px-4 py-3 ${
-                      msg.isIncoming ? "rounded-tl-sm" : "rounded-tr-sm"
-                    }`}
+                    className={`max-w-[85%] md:max-w-[70%] rounded-2xl px-4 py-3 ${msg.isIncoming ? "rounded-tl-sm" : "rounded-tr-sm"
+                      }`}
                     style={{
                       background: msg.isIncoming ? "var(--bg-chat-incoming)" : "var(--bg-chat-outgoing)",
                       border: msg.isIncoming ? "1px solid var(--border-main)" : "none",
@@ -375,14 +417,14 @@ export default function InboxPage() {
                     value={replyText}
                     onChange={(e) => setReplyText(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && handleSendReply()}
-                    placeholder="Type a reply..."
-                    className="flex-1 rounded-[8px] px-3 py-2 text-[13px] outline-none placeholder-gray-400 transition-colors focus:border-[#0066FF]"
+                    placeholder={isReadOnly ? "View-only mode (Marketing role)" : "Type a reply..."}
+                    className="flex-1 rounded-[8px] px-3 py-2 text-[13px] outline-none placeholder-gray-400 transition-colors focus:border-[#0066FF] disabled:opacity-60"
                     style={{ border: "1px solid var(--border-main)", background: "var(--bg-input)", color: "var(--text-primary)" }}
-                    disabled={isSending}
+                    disabled={isSending || isReadOnly}
                   />
-                  <button 
+                  <button
                     onClick={handleSendReply}
-                    disabled={isSending || !replyText.trim()}
+                    disabled={isSending || isReadOnly || !replyText.trim()}
                     className="bg-[#0066FF] disabled:bg-[#78B4F9] text-white font-semibold text-[13px] px-4 rounded-[8px] shrink-0 transition-colors"
                   >
                     {isSending ? "Sending..." : "Send"}
@@ -431,9 +473,11 @@ export default function InboxPage() {
                   type="text"
                   defaultValue={activeConv.name}
                   placeholder="Enter customer name..."
-                  className="w-full text-[16px] font-bold bg-transparent outline-none border-b border-transparent focus:border-[#0066FF] transition-colors pb-0.5 truncate"
+                  disabled={isReadOnly}
+                  className="w-full text-[16px] font-bold bg-transparent outline-none border-b border-transparent focus:border-[#0066FF] transition-colors pb-0.5 truncate disabled:opacity-80"
                   style={{ color: "var(--text-primary)" }}
                   onBlur={(e) => {
+                    if (isReadOnly) return;
                     const newName = e.target.value.trim();
                     if (newName && newName !== activeConv.name) {
                       patchConversation(activeConv.id, { name: newName });
@@ -479,10 +523,11 @@ export default function InboxPage() {
                   No lead record — this contact messaged directly.
                 </p>
               ) : (
-              <select
+                <select
+                  disabled={isReadOnly}
                   value={activeConv.pipeline}
                   onChange={(e) => patchConversation(activeConv.id, { pipeline: e.target.value })}
-                  className="w-full rounded-[6px] text-[12px] py-1.5 px-2 outline-none"
+                  className="w-full rounded-[6px] text-[12px] py-1.5 px-2 outline-none disabled:opacity-60"
                   style={{ border: "1px solid var(--border-input)", background: "var(--bg-input)", color: "var(--text-primary)" }}
                 >
                   <option value="New">New</option>
@@ -496,10 +541,54 @@ export default function InboxPage() {
 
             <div className="mb-5">
               <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Audition</h3>
-              <p className="text-[11px] mb-2" style={{ color: "var(--text-secondary)" }}>No booking yet.</p>
-              <button className="w-full bg-[#0066FF] text-white font-semibold text-[12px] py-2 rounded-[6px] hover:bg-[#0055d4] transition-colors">
-                Book audition
-              </button>
+              {activeConv.pipeline === "Audition Booked" ? (
+                <div
+                  className="p-3 rounded-lg border mb-2"
+                  style={{
+                    background: 'rgba(52, 199, 89, 0.08)',
+                    borderColor: 'rgba(52, 199, 89, 0.25)',
+                  }}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] font-bold flex items-center gap-1" style={{ color: '#34C759' }}>
+                      <CheckCircle2 className="w-3.5 h-3.5" /> Booked
+                    </span>
+                    <Link
+                      href="/auditions"
+                      className="text-[10px] font-semibold text-[#0066FF] hover:underline flex items-center gap-0.5"
+                    >
+                      <Calendar className="w-3 h-3" /> Calendar →
+                    </Link>
+                  </div>
+                  {activeConv.followUpDate && (
+                    <p className="text-[11px] font-medium" style={{ color: 'var(--text-primary)' }}>
+                      📅 {activeConv.followUpDate} {activeConv.followUpNote ? `· ${activeConv.followUpNote}` : ''}
+                    </p>
+                  )}
+                  {!isReadOnly && (
+                    <button
+                      type="button"
+                      onClick={handleOpenBookingModal}
+                      className="mt-1.5 text-[10px] font-semibold text-[#0066FF] hover:underline cursor-pointer block text-left"
+                    >
+                      Reschedule
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <p className="text-[11px] mb-2" style={{ color: "var(--text-secondary)" }}>No booking yet.</p>
+                  <button
+                    type="button"
+                    disabled={isReadOnly}
+                    onClick={handleOpenBookingModal}
+                    className="w-full bg-[#0066FF] text-white font-semibold text-[12px] py-2 rounded-[6px] hover:bg-[#0055d4] transition-colors cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
+                  >
+                    <Calendar className="w-3.5 h-3.5" />
+                    Book audition
+                  </button>
+                </>
+              )}
             </div>
 
             <div className="mb-5">
@@ -560,6 +649,113 @@ export default function InboxPage() {
             </div>
           </div>
         </>
+      )}
+
+      {/* Book Audition Modal */}
+      {showAuditionModal && activeConv && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs transition-opacity animate-in fade-in duration-150"
+          onClick={() => !isBookingAudition && setShowAuditionModal(false)}
+        >
+          <div
+            className="w-full max-w-[420px] rounded-2xl p-6 shadow-2xl relative border animate-in fade-in zoom-in-95 duration-150 flex flex-col gap-4"
+            style={{
+              background: 'var(--bg-card)',
+              borderColor: 'var(--border-main)',
+              color: 'var(--text-primary)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-[#0066FF]">
+                  Auditions Calendar
+                </p>
+                <h3 className="text-[16px] font-bold mt-0.5" style={{ color: 'var(--text-primary)' }}>
+                  Book Audition for {activeConv.name}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAuditionModal(false)}
+                className="p-1.5 rounded-lg transition-colors hover:opacity-70 cursor-pointer"
+                style={{ color: 'var(--text-secondary)' }}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex flex-col gap-3.5">
+              <div>
+                <label className="text-[12px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>
+                  Audition Date *
+                </label>
+                <input
+                  type="date"
+                  value={auditionDate}
+                  onChange={(e) => setAuditionDate(e.target.value)}
+                  className="w-full h-[38px] px-3 text-[13px] rounded-xl outline-none cursor-pointer"
+                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                />
+              </div>
+
+              <div>
+                <label className="text-[12px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>
+                  Audition Time *
+                </label>
+                <select
+                  value={auditionTime}
+                  onChange={(e) => setAuditionTime(e.target.value)}
+                  className="w-full h-[38px] px-3 text-[13px] rounded-xl outline-none cursor-pointer"
+                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                >
+                  {[
+                    "02:00 PM", "02:30 PM", "03:00 PM", "03:30 PM",
+                    "04:00 PM", "04:30 PM", "05:00 PM", "05:30 PM",
+                    "06:00 PM", "06:30 PM", "07:00 PM", "07:30 PM",
+                    "08:00 PM", "08:30 PM", "09:00 PM"
+                  ].map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-[12px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>
+                  Instrument / Notes (Optional)
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Piano, Violin, Vocal"
+                  value={auditionNotes}
+                  onChange={(e) => setAuditionNotes(e.target.value)}
+                  className="w-full h-[38px] px-3 text-[13px] rounded-xl outline-none"
+                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isBookingAudition || !auditionDate}
+                onClick={handleConfirmBooking}
+                className="flex-1 h-[40px] text-[13px] font-semibold text-white rounded-xl cursor-pointer hover:bg-[#0055d4] transition-colors disabled:opacity-50"
+                style={{ background: '#0066FF' }}
+              >
+                {isBookingAudition ? "Booking..." : "Confirm Audition Booking"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAuditionModal(false)}
+                className="h-[40px] px-5 text-[13px] font-medium rounded-xl cursor-pointer hover:opacity-80 transition-colors"
+                style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

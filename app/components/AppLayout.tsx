@@ -3,26 +3,33 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { Sidebar } from "./Sidebar";
-import { Menu } from "lucide-react";
-import { useAuth } from "./AuthProvider";
+import { useAuth, canAccessRoute, getDefaultRouteForRole } from "./AuthProvider";
 import { CRMProvider } from "../context/CRMContext";
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const pathname = usePathname();
   const router = useRouter();
-  const { user, loading } = useAuth();
+  const { user, loading, isReadOnly } = useAuth();
   // Track whether a touch event already fired to prevent duplicate onClick
   const touchedRef = useRef(false);
 
   const isLoginPage = pathname === "/login";
 
-  // Redirect unauthenticated users away from protected pages
+  // Redirect unauthenticated users away from protected pages, and enforce RBAC
   useEffect(() => {
     if (!loading && !user && !isLoginPage) {
       router.replace("/login");
+      return;
     }
-  }, [loading, user, isLoginPage, router]);
+
+    if (!loading && user && !isLoginPage) {
+      if (!canAccessRoute(user.role, pathname)) {
+        const target = getDefaultRouteForRole(user.role);
+        router.replace(target);
+      }
+    }
+  }, [loading, user, isLoginPage, pathname, router]);
 
   const openMenu = useCallback(() => {
     setIsMobileMenuOpen(true);
@@ -140,6 +147,11 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
             <h1 className="text-lg font-bold tracking-tight" style={{ color: "var(--text-primary)" }}>
               CRM
             </h1>
+            {isReadOnly && (
+              <span className="ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full text-[#FF9500] bg-[rgba(255,149,0,0.12)] border border-[rgba(255,149,0,0.25)]">
+                View Only
+              </span>
+            )}
           </div>
 
           <Sidebar

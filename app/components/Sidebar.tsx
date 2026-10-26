@@ -4,7 +4,7 @@ import React, { useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useTheme } from './ThemeProvider';
-import { useAuth } from './AuthProvider';
+import { useAuth, canAccessRoute } from './AuthProvider';
 import {
   Search,
   Inbox,
@@ -28,7 +28,7 @@ interface SidebarProps {
 export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
   const pathname = usePathname();
   const { theme, toggle } = useTheme();
-  const { user, logout } = useAuth();
+  const { user, logout, roleDisplayName, isReadOnly } = useAuth();
   const { badgeCounts } = useCRM();
   const closeTouchedRef = useRef(false);
 
@@ -126,63 +126,77 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
 
         {/* Navigation */}
         <nav className="flex-1 px-3 space-y-1 overflow-y-auto mt-2">
-          <NavItem
-            href="/"
-            icon={<Inbox className="w-[17px] h-[17px]" />}
-            label="Inbox"
-            badge={badgeCounts.inbox > 0 ? String(badgeCounts.inbox) : undefined}
-            badgeColor="#0066FF"
-            active={pathname === '/'}
-            onClick={onCloseMobile}
-          />
-          <NavItem
-            href="/pipeline"
-            icon={<FilterIcon />}
-            label="Pipeline"
-            active={pathname === '/pipeline'}
-            onClick={onCloseMobile}
-          />
-          <NavItem
-            href="/leads"
-            icon={<Download className="w-[17px] h-[17px]" />}
-            label="Leads"
-            badge={badgeCounts.leads > 0 ? String(badgeCounts.leads) : undefined}
-            badgeColor="#FF9500"
-            active={pathname === '/leads'}
-            onClick={onCloseMobile}
-          />
-          <NavItem
-            href="/auditions"
-            icon={<Calendar className="w-[17px] h-[17px]" />}
-            label="Auditions"
-            badge={badgeCounts.auditions > 0 ? String(badgeCounts.auditions) : undefined}
-            badgeColor="#34C759"
-            active={pathname === '/auditions'}
-            onClick={onCloseMobile}
-          />
-          <NavItem
-            href="/follow-ups"
-            icon={<ListTodo className="w-[17px] h-[17px]" />}
-            label="Follow-ups"
-            badge={badgeCounts.followUps > 0 ? String(badgeCounts.followUps) : undefined}
-            badgeColor="#FF3B30"
-            active={pathname === '/follow-ups'}
-            onClick={onCloseMobile}
-          />
-          <NavItem
-            href="/reports"
-            icon={<BarChart2 className="w-[17px] h-[17px]" />}
-            label="Reports"
-            active={pathname === '/reports'}
-            onClick={onCloseMobile}
-          />
-          <NavItem
-            href="/settings"
-            icon={<Settings className="w-[17px] h-[17px]" />}
-            label="Settings"
-            active={pathname === '/settings'}
-            onClick={onCloseMobile}
-          />
+          {canAccessRoute(user?.role, '/') && (
+            <NavItem
+              href="/"
+              icon={<Inbox className="w-[17px] h-[17px]" />}
+              label="Inbox"
+              badge={badgeCounts.inbox > 0 ? String(badgeCounts.inbox) : undefined}
+              badgeColor="#0066FF"
+              active={pathname === '/'}
+              onClick={onCloseMobile}
+            />
+          )}
+          {canAccessRoute(user?.role, '/pipeline') && (
+            <NavItem
+              href="/pipeline"
+              icon={<FilterIcon />}
+              label="Pipeline"
+              active={pathname === '/pipeline'}
+              onClick={onCloseMobile}
+            />
+          )}
+          {canAccessRoute(user?.role, '/leads') && (
+            <NavItem
+              href="/leads"
+              icon={<Download className="w-[17px] h-[17px]" />}
+              label="Leads"
+              badge={badgeCounts.leads > 0 ? String(badgeCounts.leads) : undefined}
+              badgeColor="#FF9500"
+              active={pathname === '/leads'}
+              onClick={onCloseMobile}
+            />
+          )}
+          {canAccessRoute(user?.role, '/auditions') && (
+            <NavItem
+              href="/auditions"
+              icon={<Calendar className="w-[17px] h-[17px]" />}
+              label="Auditions"
+              badge={badgeCounts.auditions > 0 ? String(badgeCounts.auditions) : undefined}
+              badgeColor="#34C759"
+              active={pathname === '/auditions'}
+              onClick={onCloseMobile}
+            />
+          )}
+          {canAccessRoute(user?.role, '/follow-ups') && (
+            <NavItem
+              href="/follow-ups"
+              icon={<ListTodo className="w-[17px] h-[17px]" />}
+              label="Follow-ups"
+              badge={badgeCounts.followUps > 0 ? String(badgeCounts.followUps) : undefined}
+              badgeColor="#FF3B30"
+              active={pathname === '/follow-ups'}
+              onClick={onCloseMobile}
+            />
+          )}
+          {canAccessRoute(user?.role, '/reports') && (
+            <NavItem
+              href="/reports"
+              icon={<BarChart2 className="w-[17px] h-[17px]" />}
+              label="Reports"
+              active={pathname === '/reports'}
+              onClick={onCloseMobile}
+            />
+          )}
+          {canAccessRoute(user?.role, '/settings') && (
+            <NavItem
+              href="/settings"
+              icon={<Settings className="w-[17px] h-[17px]" />}
+              label="Settings"
+              active={pathname === '/settings'}
+              onClick={onCloseMobile}
+            />
+          )}
         </nav>
 
         {/* Footer */}
@@ -204,9 +218,16 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
             <p className="text-[13px] font-medium leading-snug truncate" style={{ color: 'var(--text-primary)' }}>
               {user?.name || 'User'}
             </p>
-            <p className="text-[11px] capitalize truncate" style={{ color: 'var(--text-secondary)' }}>
-              {user?.role || 'Agent'}
-            </p>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <p className="text-[11px] truncate font-medium" style={{ color: 'var(--text-secondary)' }}>
+                {roleDisplayName}
+              </p>
+              {isReadOnly && (
+                <span className="text-[9px] font-bold px-1.5 py-0.2 rounded text-[#FF9500] bg-[rgba(255,149,0,0.12)] shrink-0">
+                  View Only
+                </span>
+              )}
+            </div>
           </div>
 
           <button
