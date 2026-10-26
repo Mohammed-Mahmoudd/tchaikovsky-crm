@@ -75,11 +75,46 @@ type CRMContextType = {
 const CRMContext = createContext<CRMContextType | undefined>(undefined);
 
 const API = "/api";
+const CACHE_KEY = "crm_conversations_cache";
+
+function getCachedConversations(): Conversation[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (e) {
+    console.warn("Failed to read CRM conversations cache:", e);
+  }
+  return [];
+}
+
+function persistConversationsCache(convs: Conversation[]) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify(convs));
+  } catch {}
+}
 
 export function CRMProvider({ children }: { children: React.ReactNode }) {
   const { isReadOnly, token } = useAuth();
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Hydrate instantly from cache so dashboard/reports/pipeline appear in 0ms (no loading spinner)
+  const [conversations, setConversations] = useState<Conversation[]>(getCachedConversations);
+  const [loading, setLoading] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) return false;
+      }
+    } catch {}
+    return true;
+  });
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
 
   // ── Refs for stable closures (never cause re-creation of callbacks) ──
@@ -90,6 +125,13 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     activeChatIdRef.current = activeChatId;
   }, [activeChatId]);
+
+  // If cached data was loaded, mark initial load as completed immediately
+  useEffect(() => {
+    if (conversations.length > 0) {
+      initialLoadDone.current = true;
+    }
+  }, [conversations.length]);
 
   // Fix B: when true the 3s poll is silently skipped (set during drag + 3s after drop)
   const pollPausedRef = useRef(false);
@@ -191,6 +233,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         });
 
         setConversations(parsed);
+        persistConversationsCache(parsed);
       }
     } catch (err) {
       console.error("CRMContext: failed to fetch conversations", err);
@@ -230,27 +273,107 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     }
   }, [normalizeMessages]);
 
-  // ── Stable polling: slim bulk every 3s (interval never restarts) ──
+  // ── Reset state when auth token changes (e.g. after sign-out → sign-in) ──
+  // Without this, remounting after login can leave stale empty data if the
+  // initial fetch raced with navigation.
+  const prevTokenRef = useRef<string | null | undefined>(undefined);
   useEffect(() => {
-    fetchConversations();
-    const interval = setInterval(fetchConversations, 3000);
-    return () => clearInterval(interval);
+    // Skip the very first render (initial mount)
+    if (prevTokenRef.current === undefined) {
+      prevTokenRef.current = token;
+      return;
+    }
+    // Token changed (null → string means re-login)
+    if (token !== prevTokenRef.current) {
+      prevTokenRef.current = token;
+      if (token) {
+        // Re-login happened: force a fresh fetch
+        initialLoadDone.current = false;
+        if (conversations.length === 0) {
+          setLoading(true);
+        }
+        messagesCacheRef.current.clear();
+        pendingPatchesRef.current.clear();
+        fetchConversations();
+      } else {
+        // Logged out: clear data and cache
+        setConversations([]);
+        setActiveChatId(null);
+        messagesCacheRef.current.clear();
+        pendingPatchesRef.current.clear();
+        initialLoadDone.current = false;
+        setLoading(true);
+        try {
+          localStorage.removeItem(CACHE_KEY);
+        } catch {}
+      }
+    }
+  }, [token, fetchConversations, conversations.length]);
+
+  // ── Non-overlapping background polling (3s delay after completion) ──
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    let active = true;
+
+    async function loop() {
+      if (!active) return;
+      // Skip polling if document is hidden to conserve bandwidth and CPU
+      if (typeof document !== "undefined" && document.hidden) {
+        timer = setTimeout(loop, 3000);
+        return;
+      }
+      try {
+        await fetchConversations();
+      } catch (e) {
+        // Ignored, handled in fetchConversations
+      } finally {
+        if (active) {
+          timer = setTimeout(loop, 3000);
+        }
+      }
+    }
+
+    loop();
+
+    // Trigger immediate fetch when returning to the tab
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        fetchConversations();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
   }, [fetchConversations]);
 
-  // ── Active chat polling: fetch full messages for the open conversation ──
+  // ── Active chat polling: fetch full messages for open conversation ──
   useEffect(() => {
     if (!activeChatId) return;
 
-    // Immediate fetch when chat is selected
-    fetchActiveChat(activeChatId);
+    let timer: NodeJS.Timeout;
+    let active = true;
 
-    const interval = setInterval(() => {
-      // Re-read from ref in case activeChatId changed (shouldn't, but defensive)
+    async function pollChat() {
+      if (!active) return;
       const currentId = activeChatIdRef.current;
-      if (currentId) fetchActiveChat(currentId);
-    }, 3000);
+      if (currentId && (!document.hidden)) {
+        await fetchActiveChat(currentId);
+      }
+      if (active) {
+        timer = setTimeout(pollChat, 3000);
+      }
+    }
 
-    return () => clearInterval(interval);
+    pollChat();
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
   }, [activeChatId, fetchActiveChat]);
 
   // Compute live badges across all pages
@@ -316,13 +439,17 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             ? { ...currentSource, cashIn: numCash }
             : { campaign: currentSource && currentSource !== "direct" ? currentSource : "Direct", cashIn: numCash };
           patchPayload.source = sourceObj;
-          return prev.map((c) => (c.id === id ? { ...c, ...updates, source: sourceObj } : c));
+          const next = prev.map((c) => (c.id === id ? { ...c, ...updates, source: sourceObj } : c));
+          persistConversationsCache(next);
+          return next;
         });
       } else {
         // 2. Instant optimistic update
-        setConversations((prev) =>
-          prev.map((c) => (c.id === id ? { ...c, ...updates } : c))
-        );
+        setConversations((prev) => {
+          const next = prev.map((c) => (c.id === id ? { ...c, ...updates } : c));
+          persistConversationsCache(next);
+          return next;
+        });
       }
 
       // Fix A: raise TTL to 30s
@@ -347,13 +474,15 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           // the server response, not the optimistic guess).
           if (json.data) {
             const confirmed = normalizeConversationMeta(json.data);
-            setConversations((prev) =>
-              prev.map((c) =>
+            setConversations((prev) => {
+              const next = prev.map((c) =>
                 c.id === id
-                  ? { ...confirmed, messages: c.messages } as Conversation // keep loaded messages
+                  ? ({ ...confirmed, messages: c.messages } as Conversation) // keep loaded messages
                   : c
-              )
-            );
+              );
+              persistConversationsCache(next);
+              return next;
+            });
           }
           // Safe to clear the pending guard now — server confirmed the write
           pendingPatchesRef.current.delete(id);

@@ -15,7 +15,6 @@ import {
   Settings,
   Sun,
   Moon,
-  X
 } from 'lucide-react';
 
 import { useCRM } from '../context/CRMContext';
@@ -73,39 +72,11 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
         }}
       >
         {/* Header */}
-        <div className="px-4 py-3 mb-2 flex justify-between items-center" style={{ borderBottom: '1px solid var(--border-sidebar)' }}>
+        <div className="px-4 py-3 mb-2 flex items-center" style={{ borderBottom: '1px solid var(--border-sidebar)' }}>
           <div>
             <h2 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase">Tchaikovsky School</h2>
             <p className="text-lg font-bold tracking-tight" style={{ color: 'var(--text-primary)' }}>CRM</p>
           </div>
-          <button
-            type="button"
-            onTouchEnd={handleCloseTouchEnd}
-            onClick={handleCloseClick}
-            aria-label="Close menu"
-            className="md:hidden"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              minWidth: '48px',
-              minHeight: '48px',
-              padding: '0',
-              border: 'none',
-              borderRadius: '8px',
-              background: 'transparent',
-              color: 'var(--text-secondary)',
-              cursor: 'pointer',
-              touchAction: 'manipulation',
-              WebkitTapHighlightColor: 'transparent',
-              WebkitTouchCallout: 'none',
-              userSelect: 'none',
-              WebkitUserSelect: 'none',
-              outline: 'none',
-            }}
-          >
-            <X className="w-5 h-5" style={{ pointerEvents: 'none' }} />
-          </button>
         </div>
 
         {/* Search */}

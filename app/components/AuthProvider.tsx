@@ -127,6 +127,7 @@ export function useAuth() {
 }
 
 const TOKEN_KEY = "tchaikovsky-token";
+const USER_KEY = "tchaikovsky-user";
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -134,10 +135,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const router = useRouter();
 
-  // On mount: restore session from localStorage and strictly verify with server
+  // On client mount: restore session from cache instantly, then verify in background
   useEffect(() => {
     let ignore = false;
     const stored = typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
+    const storedUser = typeof window !== "undefined" ? localStorage.getItem(USER_KEY) : null;
+
     if (!stored) {
       queueMicrotask(() => {
         if (!ignore) setLoading(false);
@@ -147,6 +150,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       };
     }
 
+    // Instantly hydrate cached session (0ms delay) without SSR hydration mismatch
+    if (storedUser) {
+      try {
+        const parsed = JSON.parse(storedUser);
+        if (parsed && !ignore) {
+          setToken(stored);
+          setUser(parsed);
+          setLoading(false);
+        }
+      } catch {}
+    }
+
+    // Verify token validity in background
     fetch("/crm-api/auth/me", {
       headers: { Authorization: `Bearer ${stored}` },
     })
@@ -156,19 +172,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (data.success && data.user) {
             setToken(stored);
             setUser(data.user);
+            try {
+              localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+            } catch {}
           } else {
             localStorage.removeItem(TOKEN_KEY);
+            localStorage.removeItem(USER_KEY);
             setToken(null);
             setUser(null);
           }
         }
       })
       .catch(() => {
-        if (!ignore) {
-          localStorage.removeItem(TOKEN_KEY);
-          setToken(null);
-          setUser(null);
-        }
+        // Only wipe session if explicitly 401/invalid, network failure should keep cached session
       })
       .finally(() => {
         if (!ignore) setLoading(false);
@@ -192,6 +208,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return data.error || "Invalid email or password";
       }
       localStorage.setItem(TOKEN_KEY, data.token);
+      localStorage.setItem(USER_KEY, JSON.stringify(data.user));
       setToken(data.token);
       setUser(data.user);
       return null;
@@ -202,13 +219,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const logout = useCallback(() => {
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
     setToken(null);
     setUser(null);
     router.push("/login");
   }, [router]);
 
   const updateCurrentUser = useCallback((updates: Partial<AuthUser>) => {
-    setUser((prev) => (prev ? { ...prev, ...updates } : null));
+    setUser((prev) => {
+      if (!prev) return null;
+      const updated = { ...prev, ...updates };
+      try {
+        localStorage.setItem(USER_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
   }, []);
 
   const authFetch = useCallback(
