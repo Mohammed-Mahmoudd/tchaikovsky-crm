@@ -1328,13 +1328,13 @@ export default function PipelinePage() {
               <div
                 className="mb-5 p-3.5 rounded-xl border"
                 style={{
-                  background: panelConv?.auditionOutcome ? 'var(--bg-pill)' : 'rgba(52, 199, 89, 0.08)',
-                  borderColor: panelConv?.auditionOutcome ? 'var(--border-input)' : 'rgba(52, 199, 89, 0.25)',
+                  background: 'var(--bg-pill)',
+                  borderColor: 'var(--border-input)',
                 }}
               >
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-[12px] font-bold flex items-center gap-1.5" style={{ color: panelConv?.auditionOutcome ? '#0066FF' : '#34C759' }}>
-                    <CheckCircle2 className="w-4 h-4" />
+                  <span className="text-[12px] font-bold flex items-center gap-1.5" style={{ color: 'var(--text-primary)' }}>
+                    <CheckCircle2 className="w-4 h-4" style={{ color: '#0066FF' }} />
                     {panelConv?.auditionOutcome === 'registered' && 'Registered'}
                     {panelConv?.auditionOutcome === 'schedule-followup' && 'Schedule Follow up'}
                     {panelConv?.auditionOutcome === 'paid-trial' && 'Paid Trial'}
@@ -1343,25 +1343,25 @@ export default function PipelinePage() {
                     {!panelConv?.auditionOutcome && 'Audition Booked'}
                   </span>
                   <Link
-                    href="/auditions"
+                    href={`/auditions?date=${panelConv?.auditionDate || panelConv?.followUpDate || ''}&id=${panelLead.id}`}
                     className="text-[11px] font-semibold text-[#0066FF] hover:underline flex items-center gap-1"
                   >
                     <Calendar className="w-3.5 h-3.5" />
                     Calendar →
                   </Link>
                 </div>
-                {(panelConv?.auditionDate || followUpDate || panelConv?.followUpDate) && (
-                  <p className="text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>
-                    📅 {panelConv?.auditionDate || followUpDate || panelConv?.followUpDate}
-                  </p>
-                )}
-                {panelConv?.branch && (
-                  <div className="mt-1.5 flex items-center">
-                    <span className="text-[11px] font-bold px-2 py-0.5 rounded-md" style={{ color: '#0066FF', background: 'rgba(0, 102, 255, 0.1)', border: '1px solid rgba(0, 102, 255, 0.25)' }}>
-                      📍 {panelConv.branch}
+                <div className="flex items-center gap-2 flex-wrap">
+                  {(panelConv?.auditionDate || followUpDate || panelConv?.followUpDate) && (
+                    <span className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                      {panelConv?.auditionDate || followUpDate || panelConv?.followUpDate}
                     </span>
-                  </div>
-                )}
+                  )}
+                  {panelConv?.branch && (
+                    <span className="text-[11px] font-medium" style={{ color: 'var(--text-muted)' }}>
+                      · {panelConv.branch}
+                    </span>
+                  )}
+                </div>
                 {!isReadOnly && (
                   <button
                     type="button"
@@ -1477,21 +1477,100 @@ export default function PipelinePage() {
             </div>
 
             <div className="mb-6">
-              <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Follow-up</h3>
-              <input
-                type="text"
-                placeholder="e.g. Call back about Sunday"
-                value={followUpNote}
-                onChange={(e) => setFollowUpNote(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    handleSaveFollowUp();
-                  }
-                }}
-                className="w-full rounded-[6px] text-[13px] py-1.5 px-3 mb-2 outline-none placeholder-gray-400"
-                style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
-              />
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase">Follow-up</h3>
+                  {panelConv?.auditionOutcome === 'joining-later' && (
+                    <span
+                      className="text-[9px] font-medium px-1.5 py-0.5 rounded-full"
+                      style={{
+                        background: 'var(--bg-pill)',
+                        color: 'var(--text-secondary)',
+                        border: '1px solid var(--border-main)',
+                      }}
+                    >
+                      Joining Later
+                    </span>
+                  )}
+                </div>
+                <Link
+                  href="/follow-ups"
+                  className="text-[11px] font-semibold text-[#0066FF] hover:underline flex items-center gap-0.5"
+                >
+                  Follow-ups →
+                </Link>
+              </div>
+
+              <div className="flex items-center gap-2 mb-2">
+                <input
+                  type="text"
+                  placeholder={panelConv?.auditionOutcome === 'joining-later' ? "e.g. Joining in summer" : "e.g. Call back about Sunday"}
+                  value={followUpNote}
+                  onChange={(e) => setFollowUpNote(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      handleSaveFollowUp();
+                    }
+                  }}
+                  className="flex-1 min-w-0 rounded-[6px] text-[13px] py-1.5 px-3 outline-none placeholder-gray-400"
+                  style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
+                />
+                <label
+                  className="flex items-center gap-1.5 shrink-0 cursor-pointer select-none py-1.5 px-2.5 rounded-[6px] border transition-colors h-[32px]"
+                  style={{
+                    background: panelConv?.auditionOutcome === 'joining-later' ? 'var(--bg-pill)' : 'var(--bg-input)',
+                    borderColor: 'var(--border-input)',
+                  }}
+                  title="Mark as joining later"
+                >
+                  <input
+                    type="checkbox"
+                    checked={panelConv?.auditionOutcome === 'joining-later'}
+                    disabled={isReadOnly}
+                    onChange={async () => {
+                      if (isReadOnly || !panelLead) return;
+                      const isJL = panelConv?.auditionOutcome === 'joining-later';
+                      if (isJL) {
+                        await patchConversation(panelLead.id, { auditionOutcome: '' });
+                      } else {
+                        const d = new Date();
+                        d.setDate(d.getDate() + 14);
+                        const y = d.getFullYear();
+                        const m = String(d.getMonth() + 1).padStart(2, '0');
+                        const day = String(d.getDate()).padStart(2, '0');
+                        const defaultDate = `${y}-${m}-${day}`;
+
+                        const updates: Record<string, any> = {
+                          auditionOutcome: 'joining-later',
+                          followUpCompleted: false,
+                        };
+                        if (!followUpDate) {
+                          updates.followUpDate = defaultDate;
+                          setFollowUpDate(defaultDate);
+                        }
+                        if (!followUpNote || !followUpNote.trim()) {
+                          updates.followUpNote = 'Joining Later - Follow up';
+                          setFollowUpNote('Joining Later - Follow up');
+                        }
+                        if (panelLead.stage === 'Audition Booked') {
+                          moveLeadToStage(panelLead.id, 'Contacted');
+                        }
+                        await patchConversation(panelLead.id, updates);
+                      }
+                    }}
+                    className="w-3.5 h-3.5 rounded cursor-pointer accent-[#0066FF]"
+                  />
+                  <span
+                    className="text-[12px] font-medium whitespace-nowrap"
+                    style={{
+                      color: panelConv?.auditionOutcome === 'joining-later' ? 'var(--text-primary)' : 'var(--text-secondary)',
+                    }}
+                  >
+                    Joining later
+                  </span>
+                </label>
+              </div>
               <div className="flex gap-2">
                 <input
                   type="date"

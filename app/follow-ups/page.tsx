@@ -18,7 +18,7 @@ type Item = {
   dateValue: string;
 };
 
-type FilterMode = 'all' | 'pending' | 'completed';
+type FilterMode = 'all' | 'pending' | 'completed' | 'joining-later';
 
 function getLocalIsoToday(): string {
   const d = new Date();
@@ -50,10 +50,13 @@ export default function FollowUpsPage() {
 
   const items: Item[] = useMemo(() => {
     return conversations
-      .filter((c) => (c.pipeline !== 'Audition Booked' && Boolean(c.followUpDate || c.followUpNote)))
+      .filter((c) => (
+        (c.pipeline !== 'Audition Booked' || c.auditionOutcome === 'joining-later') &&
+        Boolean(c.followUpDate || c.followUpNote || c.auditionOutcome === 'joining-later')
+      ))
       .map((c) => ({
         id: c.id,
-        text: c.followUpNote || 'Follow up with customer',
+        text: c.followUpNote || (c.auditionOutcome === 'joining-later' ? 'Joining Later - Follow up' : 'Follow up with customer'),
         date: formatDisplayDate(c.followUpDate || ''),
         people: `${c.name || 'Student'} · ${c.agent || 'Unassigned'}`,
         branch: c.branch || '',
@@ -75,7 +78,7 @@ export default function FollowUpsPage() {
     });
   }, [isReadOnly, patchConversation]);
 
-  // Permanently clear follow-up note and date
+  // Permanently clear follow-up note, date and outcome
   const deleteFollowUp = useCallback((id: string) => {
     if (isReadOnly) return;
     patchConversation(id, {
@@ -83,15 +86,18 @@ export default function FollowUpsPage() {
       followUpNote: "",
       followUpCompleted: false,
       followUpCompletedAt: null,
+      auditionOutcome: "",
     });
   }, [isReadOnly, patchConversation]);
 
   const pendingCount = useMemo(() => items.filter(i => !i.completed).length, [items]);
   const completedCount = useMemo(() => items.filter(i => i.completed).length, [items]);
+  const joiningLaterCount = useMemo(() => items.filter(i => i.auditionOutcome === 'joining-later').length, [items]);
 
   const filterItem = useCallback((i: Item) => {
     if (filter === 'pending') return !i.completed;
     if (filter === 'completed') return i.completed;
+    if (filter === 'joining-later') return i.auditionOutcome === 'joining-later';
     return true;
   }, [filter]);
 
@@ -186,6 +192,18 @@ export default function FollowUpsPage() {
             >
               Ended ({completedCount})
             </button>
+            {joiningLaterCount > 0 && (
+              <button
+                onClick={() => setFilter('joining-later')}
+                className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition ${filter === 'joining-later' ? 'shadow-xs font-semibold' : ''}`}
+                style={{
+                  background: filter === 'joining-later' ? 'var(--bg-card)' : 'transparent',
+                  color: filter === 'joining-later' ? 'var(--text-primary)' : 'var(--text-secondary)',
+                }}
+              >
+                Joining Later ({joiningLaterCount})
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -207,7 +225,7 @@ export default function FollowUpsPage() {
         {items.length > 0 && visibleTotal === 0 && !loading && (
           <div className="flex flex-col items-center justify-center py-16 gap-2">
             <p className="text-[13px] font-medium" style={{ color: 'var(--text-secondary)' }}>
-              No {filter === 'completed' ? 'ended' : 'active'} follow-ups found.
+              No {filter === 'completed' ? 'ended' : filter === 'joining-later' ? 'joining later' : 'active'} follow-ups found.
             </p>
           </div>
         )}

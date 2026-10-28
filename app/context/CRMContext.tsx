@@ -466,12 +466,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       }
 
       // 4. Follow-ups badge: due today or overdue (excluding booked auditions which are tracked under Auditions and completed follow-ups)
-      if (c.pipeline !== "Audition Booked" && !c.followUpCompleted) {
+      if ((c.pipeline !== "Audition Booked" || c.auditionOutcome === "joining-later") && !c.followUpCompleted) {
         if (c.followUpDate) {
           if (c.followUpDate <= today) {
             followUps += 1;
           }
         } else if (c.followUpNote && c.followUpNote.trim()) {
+          followUps += 1;
+        } else if (c.auditionOutcome === "joining-later") {
           followUps += 1;
         }
       }

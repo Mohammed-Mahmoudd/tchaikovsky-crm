@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useCRM } from '../context/CRMContext';
 import { useAuth } from '../components/AuthProvider';
 import { MessageSquare, Calendar, ChevronLeft, ChevronRight, X, MapPin, ChevronDown, Search } from 'lucide-react';
@@ -566,11 +567,27 @@ function BranchFilterPopover({
   );
 }
 
-export default function AuditionsPage() {
+function AuditionsPageInner() {
   const { conversations, patchConversation, openChat } = useCRM();
   const { isReadOnly } = useAuth();
   const { branchGroups, legacyBranchGroups } = useBranches();
+  const searchParams = useSearchParams();
+  const urlDate = searchParams.get('date');
+  const urlHighlightId = searchParams.get('id');
+  const [highlightConvId, setHighlightConvId] = useState<string | null>(urlHighlightId);
+
+  // Auto-clear the glow after 3 seconds
+  useEffect(() => {
+    if (!highlightConvId) return;
+    const t = setTimeout(() => setHighlightConvId(null), 3000);
+    return () => clearTimeout(t);
+  }, [highlightConvId]);
+
   const [currentDate, setCurrentDate] = useState(() => {
+    // If a date param is provided, jump to that week
+    if (urlDate && /^\d{4}-\d{2}-\d{2}$/.test(urlDate)) {
+      return getWeekStart(new Date(urlDate + 'T12:00:00'));
+    }
     return getWeekStart(new Date());
   });
   const [selectedBranch, setSelectedBranch] = useState<string>(() => {
@@ -888,6 +905,8 @@ export default function AuditionsPage() {
     }
   }, [slots]);
 
+
+
   const saveSlotPanel = useCallback(() => {
     if (!slotPanel) return;
     const currentSlot = (slots[slotPanel.dateKey] || []).find(s => s.id === slotPanel.slotId);
@@ -1176,6 +1195,7 @@ export default function AuditionsPage() {
                           onOpenChat={slot.conversationId ? () => openChat(slot.conversationId!) : undefined}
                           onDelete={slot.status === 'free' ? () => deleteCustomSlot(key, slot.id) : undefined}
                           isReadOnly={isReadOnly}
+                          isHighlighted={!!highlightConvId && slot.conversationId === highlightConvId}
                         />
                       ))}
                       {isAddingHere ? (
@@ -1444,6 +1464,7 @@ function SlotCard({
   onOpenChat,
   onDelete,
   isReadOnly,
+  isHighlighted,
 }: {
   slot: Slot;
   onBook: () => void;
@@ -1452,7 +1473,15 @@ function SlotCard({
   onOpenChat?: () => void;
   onDelete?: () => void;
   isReadOnly?: boolean;
+  isHighlighted?: boolean;
 }) {
+  const highlightRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (isHighlighted && highlightRef.current) {
+      highlightRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [isHighlighted]);
   if (slot.status === 'free') {
     return (
       <div
@@ -1502,10 +1531,15 @@ function SlotCard({
   if (slot.status === 'booked') {
     return (
       <div
+        ref={isHighlighted ? highlightRef : undefined}
         className={`rounded-lg px-2.5 py-2 shadow-sm ${!isReadOnly ? "cursor-pointer hover:opacity-90 transition-opacity" : ""}`}
         style={{
           background: 'var(--bg-selected)',
           border: '1px solid var(--border-main)',
+          ...(isHighlighted ? {
+            boxShadow: '0 0 0 2px rgba(0, 102, 255, 0.4), 0 0 12px rgba(0, 102, 255, 0.25)',
+            animation: 'audition-glow 1.5s ease-in-out 2',
+          } : {}),
         }}
         onClick={!isReadOnly ? onOpenPanel : undefined}
       >
@@ -1571,8 +1605,15 @@ function SlotCard({
   if (slot.status === 'registered') {
     return (
       <div
+        ref={isHighlighted ? highlightRef : undefined}
         className={`rounded-lg px-2.5 py-2 shadow-sm ${!isReadOnly ? "cursor-pointer hover:opacity-95 transition-opacity" : ""}`}
-        style={{ background: cfg.color }}
+        style={{
+          background: cfg.color,
+          ...(isHighlighted ? {
+            boxShadow: '0 0 0 2px rgba(0, 102, 255, 0.4), 0 0 12px rgba(0, 102, 255, 0.25)',
+            animation: 'audition-glow 1.5s ease-in-out 2',
+          } : {}),
+        }}
         onClick={!isReadOnly ? onOpenPanel : undefined}
       >
         <div className="flex items-start justify-between gap-1">
@@ -1609,8 +1650,16 @@ function SlotCard({
   // All other outcomes: bordered card with outcome color accent
   return (
     <div
+      ref={isHighlighted ? highlightRef : undefined}
       className={`rounded-lg px-2.5 py-2 shadow-sm ${!isReadOnly ? "cursor-pointer hover:opacity-90 transition-opacity" : ""}`}
-      style={{ background: cfg.bg, border: `1px solid ${cfg.border}` }}
+      style={{
+        background: cfg.bg,
+        border: `1px solid ${cfg.border}`,
+        ...(isHighlighted ? {
+          boxShadow: '0 0 0 2px rgba(0, 102, 255, 0.4), 0 0 12px rgba(0, 102, 255, 0.25)',
+          animation: 'audition-glow 1.5s ease-in-out 2',
+        } : {}),
+      }}
       onClick={!isReadOnly ? onOpenPanel : undefined}
     >
       <div className="flex items-start justify-between gap-1">
@@ -1647,5 +1696,13 @@ function SlotCard({
         )}
       </div>
     </div>
+  );
+}
+
+export default function AuditionsPage() {
+  return (
+    <Suspense fallback={null}>
+      <AuditionsPageInner />
+    </Suspense>
   );
 }

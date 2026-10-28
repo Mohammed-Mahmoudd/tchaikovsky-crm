@@ -158,6 +158,12 @@ button, [role="button"] {
   100% { transform: scale(1); box-shadow: 0 0 0 6px rgba(0, 102, 255, 0); }
 }
 
+@keyframes audition-glow {
+  0%   { box-shadow: 0 0 0 2px rgba(0, 102, 255, 0.4), 0 0 12px rgba(0, 102, 255, 0.25); }
+  50%  { box-shadow: 0 0 0 4px rgba(0, 102, 255, 0.3), 0 0 20px rgba(0, 102, 255, 0.35); }
+  100% { box-shadow: 0 0 0 2px rgba(0, 102, 255, 0.4), 0 0 12px rgba(0, 102, 255, 0.25); }
+}
+
 /* Ensure select dropdown options and optgroups styling */
 select optgroup {
   font-weight: 500;

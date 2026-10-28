@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import Link from "next/link";
-import { ArrowLeft, Info, X, Calendar, CheckCircle2 } from "lucide-react";
+import { ArrowLeft, Info, X, Calendar, CheckCircle2, Trash2 } from "lucide-react";
 import { useBranches } from "./lib/branches";
 import { BranchSelect } from "./components/BranchSelect";
 
@@ -850,13 +850,13 @@ export default function InboxPage() {
                 <div
                   className="p-3 rounded-lg border mb-2"
                   style={{
-                    background: activeConv.auditionOutcome ? 'var(--bg-pill)' : 'rgba(52, 199, 89, 0.08)',
-                    borderColor: activeConv.auditionOutcome ? 'var(--border-input)' : 'rgba(52, 199, 89, 0.25)',
+                    background: 'var(--bg-pill)',
+                    borderColor: 'var(--border-input)',
                   }}
                 >
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-[11px] font-bold flex items-center gap-1" style={{ color: activeConv.auditionOutcome ? '#0066FF' : '#34C759' }}>
-                      <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span className="text-[11px] font-bold flex items-center gap-1" style={{ color: 'var(--text-primary)' }}>
+                      <CheckCircle2 className="w-3.5 h-3.5" style={{ color: '#0066FF' }} />
                       {activeConv.auditionOutcome === 'registered' && 'Registered'}
                       {activeConv.auditionOutcome === 'schedule-followup' && 'Schedule Follow up'}
                       {activeConv.auditionOutcome === 'paid-trial' && 'Paid Trial'}
@@ -865,31 +865,31 @@ export default function InboxPage() {
                       {!activeConv.auditionOutcome && 'Audition Booked'}
                     </span>
                     <Link
-                      href="/auditions"
+                      href={`/auditions?date=${activeConv.auditionDate || activeConv.followUpDate || ''}&id=${activeConv.id}`}
                       className="text-[10px] font-semibold text-[#0066FF] hover:underline flex items-center gap-0.5"
                     >
                       <Calendar className="w-3 h-3" /> Calendar →
                     </Link>
                   </div>
-                  {(activeConv.auditionDate || activeConv.followUpDate) && (
-                    <p className="text-[11px] font-medium" style={{ color: 'var(--text-primary)' }}>
-                      📅 {activeConv.auditionDate || activeConv.followUpDate}
-                    </p>
-                  )}
-                  {activeConv.branch && (
-                    <div className="mt-1.5 flex items-center">
-                      <span className="text-[11px] font-bold px-2 py-0.5 rounded-md" style={{ color: '#0066FF', background: 'rgba(0, 102, 255, 0.1)', border: '1px solid rgba(0, 102, 255, 0.25)' }}>
-                        📍 {activeConv.branch}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {(activeConv.auditionDate || activeConv.followUpDate) && (
+                      <span className="text-[11px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                        {activeConv.auditionDate || activeConv.followUpDate}
                       </span>
-                    </div>
-                  )}
+                    )}
+                    {activeConv.branch && (
+                      <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>
+                        · {activeConv.branch}
+                      </span>
+                    )}
+                  </div>
                   {!isReadOnly && (
                     <button
                       type="button"
                       onClick={handleOpenBookingModal}
                       className="mt-1.5 text-[10px] font-semibold text-[#0066FF] hover:underline cursor-pointer block text-left"
                     >
-                      Reschedule
+                      {activeConv.auditionDate ? "Reschedule" : "Book audition"}
                     </button>
                   )}
                 </div>
@@ -929,60 +929,169 @@ export default function InboxPage() {
               )}
             </div>
 
-            <div className="mb-5">
-              <div className="flex items-center justify-between mb-2">
-                <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase">Follow-up</h3>
-                {activeConv.followUpCompleted && (
-                  <span
-                    className="text-[9px] font-medium px-2 py-0.5 rounded-full"
-                    style={{ background: 'var(--bg-pill)', color: 'var(--text-muted)', border: '1px solid var(--border-main)' }}
-                  >
-                    Ended
-                  </span>
-                )}
-              </div>
-              <input
-                key={`fn-${activeConv.id}-${activeConv.followUpNote || ''}`}
-                type="text"
-                defaultValue={activeConv.followUpNote || ""}
-                placeholder="e.g. Call back about Sunday"
-                className={`w-full rounded-[6px] text-[11px] py-1.5 px-2 mb-2 outline-none placeholder-gray-400 transition-colors ${
-                  activeConv.followUpCompleted ? 'line-through' : ''
-                }`}
-                style={{
-                  border: "1px solid var(--border-input)",
-                  background: "var(--bg-input)",
-                  color: activeConv.followUpCompleted ? "var(--text-muted)" : "var(--text-primary)"
-                }}
-                onBlur={(e) => {
-                  const val = e.target.value.trim();
-                  if (val !== (activeConv.followUpNote || '')) {
-                    patchConversation(activeConv.id, { followUpNote: val, followUpCompleted: false });
+            {/* Follow-up */}
+            {(() => {
+              const isJoiningLater = activeConv.auditionOutcome === 'joining-later';
+              const hasFollowUp = Boolean(activeConv.followUpDate || activeConv.followUpNote || isJoiningLater);
+
+              const handleToggleJoiningLater = () => {
+                if (isReadOnly) return;
+                if (isJoiningLater) {
+                  // Revert Joining Later outcome back to regular follow-up
+                  patchConversation(activeConv.id, { auditionOutcome: '' });
+                } else {
+                  // Turn ON Joining Later with smart defaults (+14 days)
+                  const d = new Date();
+                  d.setDate(d.getDate() + 14);
+                  const y = d.getFullYear();
+                  const m = String(d.getMonth() + 1).padStart(2, '0');
+                  const day = String(d.getDate()).padStart(2, '0');
+                  const defaultDate = `${y}-${m}-${day}`;
+
+                  const updates: Record<string, any> = {
+                    auditionOutcome: 'joining-later',
+                    followUpCompleted: false,
+                  };
+                  if (!activeConv.followUpDate) {
+                    updates.followUpDate = defaultDate;
                   }
-                }}
-              />
-              <div className="flex gap-2">
-                <input
-                  key={`fd-${activeConv.id}-${activeConv.followUpDate || ''}`}
-                  type="date"
-                  defaultValue={activeConv.followUpDate || ""}
-                  className={`flex-1 rounded-[6px] px-2 py-1.5 text-[11px] outline-none cursor-pointer transition-colors ${
-                    activeConv.followUpCompleted ? 'line-through' : ''
-                  }`}
-                  style={{
-                    border: "1px solid var(--border-input)",
-                    background: "var(--bg-input)",
-                    color: activeConv.followUpCompleted ? "var(--text-muted)" : "var(--text-primary)"
-                  }}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (val !== (activeConv.followUpDate || '')) {
-                      patchConversation(activeConv.id, { followUpDate: val, followUpCompleted: false });
-                    }
-                  }}
-                />
-              </div>
-            </div>
+                  if (!activeConv.followUpNote || !activeConv.followUpNote.trim()) {
+                    updates.followUpNote = 'Joining Later - Follow up';
+                  }
+                  if (activeConv.pipeline === 'Audition Booked') {
+                    updates.pipeline = 'Contacted';
+                  }
+                  patchConversation(activeConv.id, updates);
+                }
+              };
+
+              const handleClearFollowUp = () => {
+                if (isReadOnly) return;
+                patchConversation(activeConv.id, {
+                  followUpDate: '',
+                  followUpNote: '',
+                  followUpCompleted: false,
+                  followUpCompletedAt: null,
+                  auditionOutcome: isJoiningLater ? '' : activeConv.auditionOutcome,
+                });
+              };
+
+              return (
+                <div className="mb-5">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase">Follow-up</h3>
+                      {isJoiningLater && (
+                        <span
+                          className="text-[9px] font-medium px-1.5 py-0.5 rounded-full"
+                          style={{
+                            background: 'var(--bg-pill)',
+                            color: 'var(--text-secondary)',
+                            border: '1px solid var(--border-main)',
+                          }}
+                        >
+                          Joining Later
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {activeConv.followUpCompleted && (
+                        <span
+                          className="text-[9px] font-medium px-2 py-0.5 rounded-full"
+                          style={{ background: 'var(--bg-pill)', color: 'var(--text-muted)', border: '1px solid var(--border-main)' }}
+                        >
+                          Ended
+                        </span>
+                      )}
+                      <Link
+                        href="/follow-ups"
+                        className="text-[10px] font-semibold text-[#0066FF] hover:underline flex items-center gap-0.5"
+                      >
+                        Follow-ups →
+                      </Link>
+                      {hasFollowUp && !isReadOnly && (
+                        <button
+                          type="button"
+                          title="Clear follow-up"
+                          onClick={handleClearFollowUp}
+                          className="text-gray-400 hover:text-red-500 transition-colors p-0.5 cursor-pointer ml-0.5"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 mb-2">
+                    <input
+                      key={`fn-${activeConv.id}-${activeConv.followUpNote || ''}-${activeConv.auditionOutcome || ''}`}
+                      type="text"
+                      defaultValue={activeConv.followUpNote || ""}
+                      placeholder={isJoiningLater ? "e.g. Joining in summer" : "e.g. Call back about Sunday"}
+                      className={`flex-1 min-w-0 rounded-[6px] text-[11px] py-1.5 px-2 outline-none placeholder-gray-400 transition-colors ${
+                        activeConv.followUpCompleted ? 'line-through' : ''
+                      }`}
+                      style={{
+                        border: "1px solid var(--border-input)",
+                        background: "var(--bg-input)",
+                        color: activeConv.followUpCompleted ? "var(--text-muted)" : "var(--text-primary)"
+                      }}
+                      onBlur={(e) => {
+                        const val = e.target.value.trim();
+                        if (val !== (activeConv.followUpNote || '')) {
+                          patchConversation(activeConv.id, { followUpNote: val, followUpCompleted: false });
+                        }
+                      }}
+                    />
+                    <label
+                      className="flex items-center gap-1.5 shrink-0 cursor-pointer select-none py-1.5 px-2 rounded-[6px] border transition-colors h-[29px]"
+                      style={{
+                        background: isJoiningLater ? 'var(--bg-pill)' : 'var(--bg-input)',
+                        borderColor: 'var(--border-input)',
+                      }}
+                      title="Mark as joining later"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isJoiningLater}
+                        disabled={isReadOnly}
+                        onChange={handleToggleJoiningLater}
+                        className="w-3.5 h-3.5 rounded cursor-pointer accent-[#0066FF]"
+                      />
+                      <span
+                        className="text-[11px] font-medium whitespace-nowrap"
+                        style={{
+                          color: isJoiningLater ? 'var(--text-primary)' : 'var(--text-secondary)',
+                        }}
+                      >
+                        Joining later
+                      </span>
+                    </label>
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      key={`fd-${activeConv.id}-${activeConv.followUpDate || ''}-${activeConv.auditionOutcome || ''}`}
+                      type="date"
+                      defaultValue={activeConv.followUpDate || ""}
+                      className={`flex-1 rounded-[6px] px-2 py-1.5 text-[11px] outline-none cursor-pointer transition-colors ${
+                        activeConv.followUpCompleted ? 'line-through' : ''
+                      }`}
+                      style={{
+                        border: "1px solid var(--border-input)",
+                        background: "var(--bg-input)",
+                        color: activeConv.followUpCompleted ? "var(--text-muted)" : "var(--text-primary)"
+                      }}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val !== (activeConv.followUpDate || '')) {
+                          patchConversation(activeConv.id, { followUpDate: val, followUpCompleted: false });
+                        }
+                      }}
+                    />
+                  </div>
+                </div>
+              );
+            })()}
 
             <div>
               <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Notes</h3>
