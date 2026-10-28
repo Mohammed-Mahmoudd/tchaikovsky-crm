@@ -38,6 +38,9 @@ export type Conversation = {
   notes?: string;
   followUpNote?: string;
   followUpDate?: string;
+  followUpCompleted?: boolean;
+  followUpCompletedAt?: string;
+  auditionDate?: string;
   formAnswers?: {
     instrument?: string;
     studentAge?: string;
@@ -45,6 +48,8 @@ export type Conversation = {
     notes?: string;
   };
   cashIn?: number;
+  branch?: string;
+  auditionOutcome?: string;
   messages: Message[];
   createdAt?: string;
   updatedAt?: string;
@@ -58,10 +63,13 @@ export type BadgeCounts = {
   followUps: number;
 };
 
+export type AssignableAgent = { name: string; role: string };
+
 type CRMContextType = {
   conversations: Conversation[];
   loading: boolean;
   badgeCounts: BadgeCounts;
+  assignableAgents: AssignableAgent[];
   activeChatId: string | null;
   setActiveChatId: (id: string | null) => void;
   openChat: (id: string) => void;
@@ -100,6 +108,26 @@ function persistConversationsCache(convs: Conversation[]) {
   } catch {}
 }
 
+function safeDateIso(val: any): string {
+  if (!val) return "";
+  if (typeof val === "string" && /^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
+  try {
+    const d = new Date(val);
+    if (isNaN(d.getTime())) return "";
+    return d.toISOString().split("T")[0];
+  } catch {
+    return "";
+  }
+}
+
+function getLocalTodayIso(): string {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 export function CRMProvider({ children }: { children: React.ReactNode }) {
   const { isReadOnly, token } = useAuth();
   // Hydrate instantly from cache so dashboard/reports/pipeline appear in 0ms (no loading spinner)
@@ -116,6 +144,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     return true;
   });
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const [assignableAgents, setAssignableAgents] = useState<AssignableAgent[]>([]);
 
   // ── Refs for stable closures (never cause re-creation of callbacks) ──
   const activeChatIdRef = useRef<string | null>(null);
@@ -139,6 +168,31 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     pollPausedRef.current = paused;
   }, []);
   const router = useRouter();
+
+  // ── Fetch assignable agents once on mount (cached 60s on backend, ~0ms on hit) ──
+  useEffect(() => {
+    let ignore = false;
+    const fetchAgents = async () => {
+      try {
+        let res = await fetch(`${API}/messages/agents`);
+        if (!res.ok) {
+          res = await fetch(`${API}/agents`);
+        }
+        const data = await res.json();
+        if (!ignore && data.success && Array.isArray(data.data)) {
+          const allowedRoles = ["chairman", "owner", "manager", "admission_officer", "agent"];
+          const filtered = data.data.filter((a: AssignableAgent) =>
+            allowedRoles.includes((a.role || "").toLowerCase().trim())
+          );
+          setAssignableAgents(filtered);
+        }
+      } catch (e) {
+        console.warn("Failed to load assignable agents:", e);
+      }
+    };
+    fetchAgents();
+    return () => { ignore = true; };
+  }, []);
 
   // ── Messages cache: lives outside React state so slim polls never touch it ──
   const messagesCacheRef = useRef<Map<string, Message[]>>(new Map());
@@ -164,7 +218,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       source: c.source || "direct",
       notes: c.notes || "",
       followUpNote: c.followUpNote || "",
-      followUpDate: c.followUpDate ? new Date(c.followUpDate).toISOString().split("T")[0] : "",
+      followUpDate: safeDateIso(c.followUpDate),
+      followUpCompleted: Boolean(c.followUpCompleted),
+      followUpCompletedAt: safeDateIso(c.followUpCompletedAt),
+      auditionDate: safeDateIso(c.auditionDate) || (c.pipeline === "Audition Booked" ? safeDateIso(c.followUpDate) : ""),
+      auditionOutcome: c.auditionOutcome || "",
+      branch: c.branch || "",
       formAnswers: c.formAnswers || {},
       cashIn: (() => {
         if (c.cashIn !== undefined && c.cashIn !== null) return Number(c.cashIn) || 0;
@@ -383,7 +442,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
   // Compute live badges across all pages
   const badgeCounts = useMemo<BadgeCounts>(() => {
-    const today = new Date().toISOString().split("T")[0];
+    const today = getLocalTodayIso();
 
     let inbox = 0;
     let leads = 0;
@@ -406,13 +465,15 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         auditions += 1;
       }
 
-      // 4. Follow-ups badge: due today or overdue
-      if (c.followUpDate) {
-        if (c.followUpDate <= today) {
+      // 4. Follow-ups badge: due today or overdue (excluding booked auditions which are tracked under Auditions and completed follow-ups)
+      if (c.pipeline !== "Audition Booked" && !c.followUpCompleted) {
+        if (c.followUpDate) {
+          if (c.followUpDate <= today) {
+            followUps += 1;
+          }
+        } else if (c.followUpNote && c.followUpNote.trim()) {
           followUps += 1;
         }
-      } else if (c.followUpNote && c.followUpNote.trim()) {
-        followUps += 1;
       }
     });
 
@@ -531,6 +592,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         conversations,
         loading,
         badgeCounts,
+        assignableAgents,
         activeChatId,
         setActiveChatId,
         openChat,

@@ -158,3 +158,20 @@ button, [role="button"] {
   100% { transform: scale(1); box-shadow: 0 0 0 6px rgba(0, 102, 255, 0); }
 }
 
+/* Ensure select dropdown options and optgroups styling */
+select optgroup {
+  font-weight: 500;
+  color: var(--text-secondary);
+  background-color: var(--bg-card);
+}
+
+select option {
+  font-weight: 600;
+  color: #000000;
+  background-color: var(--bg-card);
+}
+
+select option:disabled {
+  font-weight: 400;
+  color: var(--text-muted);
+}

@@ -1,13 +1,15 @@
 "use client";
 
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { useCRM } from '../context/CRMContext';
 import { useAuth } from '../components/AuthProvider';
-import { MessageSquare, Calendar, ChevronLeft, ChevronRight, X } from 'lucide-react';
+import { MessageSquare, Calendar, ChevronLeft, ChevronRight, X, MapPin, ChevronDown, Search } from 'lucide-react';
+import { useBranches, LegacyBranchGroup } from '../lib/branches';
+import { BranchSelect } from '../components/BranchSelect';
 
-type AuditionStatus = 'attended' | 'no-show' | 'free' | 'booked';
-type AttendanceStatus = 'confirmed' | 'no-response' | 'declined' | null;
-type SlotStatus = 'attended' | 'no-show' | 'no-response' | 'booked';
+type AuditionOutcome = 'registered' | 'schedule-followup' | 'paid-trial' | 'joining-later' | 'no-show';
+type SlotStatus = AuditionOutcome | 'booked';
+type AuditionStatus = SlotStatus | 'free';
 
 type Slot = {
   id: string | number;
@@ -18,8 +20,11 @@ type Slot = {
   status: AuditionStatus;
   agent?: string;
   comment?: string;
-  attendanceStatus?: AttendanceStatus;
   phone?: string;
+  branch?: string;
+  auditionDate?: string;
+  followUpDate?: string;
+  dateKey?: string;
 };
 
 type DaySlots = { [dateKey: string]: Slot[] };
@@ -53,12 +58,29 @@ function formatDayLabel(d: Date) {
   return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
 }
 
+function formatTime12(time: string): string {
+  if (!time) return '05:00 PM';
+  if (/\b(?:AM|PM)\b/i.test(time)) return time;
+  const parts = time.split(':');
+  if (parts.length < 2) return time;
+  const h = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  if (isNaN(h) || isNaN(m)) return time;
+  const period = h >= 12 ? 'PM' : 'AM';
+  const hour12 = h % 12 || 12;
+  return `${hour12 < 10 ? '0' : ''}${hour12}:${m < 10 ? '0' : ''}${m} ${period}`;
+}
+
 function parseOverride(val: any): SlotStatus | null {
   if (!val) return null;
   if (typeof val === 'string') {
-    if (val === 'attended' || val === 'no-show' || val === 'no-response' || val === 'booked') return val;
+    // New 5 outcomes
+    if (val === 'registered' || val === 'schedule-followup' || val === 'paid-trial' || val === 'joining-later' || val === 'no-show' || val === 'booked') return val as SlotStatus;
+    // Legacy mappings
+    if (val === 'attended' || val === 'confirmed') return 'schedule-followup';
     if (val === 'declined') return 'no-show';
-    if (val === 'confirmed') return 'attended';
+    if (val === 'no-response') return 'booked';
+    if (val === 'enrolled') return 'registered';
   }
   if (typeof val === 'object' && val.status) {
     return parseOverride(val.status);
@@ -74,16 +96,87 @@ function stripNoResponseTag(text?: string | null): string {
     .trim();
 }
 
+export const BRANCH_GROUPS = [
+  {
+    region: 'Riyadh',
+    branches: [
+      'Alreem Compound (Riyadh)',
+      'Azure Hittin Compound (Riyadh)',
+      'Ishbiliyah Compound (Riyadh)',
+      'Lapalma Compound (Riyadh)',
+      'Lamara Compound (Riyadh)',
+      'Marvella Compound (Riyadh)',
+      'Mohaya Compound (Riyadh)',
+      'Riyadh Park Mall (Riyadh)',
+    ],
+  },
+  {
+    region: 'Jeddah',
+    branches: [
+      'Initiative Hub (Jeddah)',
+    ],
+  },
+  {
+    region: 'Khobar',
+    branches: [
+      'Ajdan Walk (Khobar)',
+    ],
+  },
+  {
+    region: 'Other',
+    branches: [
+      'Dumai Mall',
+      'Online',
+    ],
+  },
+];
+
+function matchesBranch(slotBranch: string | undefined, filter: string): boolean {
+  if (!filter || filter === 'ALL') return true;
+  const b = (slotBranch || '').toLowerCase().trim();
+  if (!b) return false;
+
+  if (filter.startsWith('REGION:')) {
+    const region = filter.replace('REGION:', '').toLowerCase();
+    if (region === 'other') {
+      return (
+        b.includes('dumai') ||
+        b.includes('online') ||
+        (!b.includes('riyadh') && !b.includes('jeddah') && !b.includes('khobar'))
+      );
+    }
+    return b.includes(region);
+  }
+
+  const target = filter.toLowerCase().trim();
+  if (b === target) return true;
+  const cleanTarget = target.replace(/\s*\([^)]*\)/g, '').trim();
+  const cleanB = b.replace(/\s*\([^)]*\)/g, '').trim();
+  if (cleanTarget && cleanB && (cleanB.includes(cleanTarget) || cleanTarget.includes(cleanB))) {
+    return true;
+  }
+  return false;
+}
+
+function getBranchDisplayLabel(b: string): string {
+  if (!b || b === 'ALL') return 'All Branches';
+  if (b.startsWith('REGION:')) {
+    return `${b.replace('REGION:', '')} (All)`;
+  }
+  return b.replace(/\s*\([^)]*\)/g, '').trim() || b;
+}
+
 function getConvDate(c: any, todayIso: string): string {
+  // 1. Explicit dedicated audition date (set when audition is booked)
+  if (c.auditionDate && /^\d{4}-\d{2}-\d{2}$/.test(c.auditionDate)) {
+    return c.auditionDate;
+  }
+  // 2. Follow-up date set during audition booking
   if (c.followUpDate && /^\d{4}-\d{2}-\d{2}$/.test(c.followUpDate)) {
     return c.followUpDate;
   }
-  if (c.updatedAt) {
-    try {
-      const d = isoDate(new Date(c.updatedAt));
-      if (d && d !== 'NaN-NaN-NaN') return d;
-    } catch { }
-  }
+  // 3. Fallback to creation date (when the lead entered) - NEVER updatedAt,
+  // because updatedAt changes whenever status (e.g. no-show, attended) or notes are edited!
   if (c.createdAt) {
     try {
       const d = isoDate(new Date(c.createdAt));
@@ -115,54 +208,412 @@ function getConvTime(c: any): string {
 type BookingModal = { slotId: string | number; dateKey: string; time: string; dayLabel: string } | null;
 type SlotPanelState = { slotId: string | number; dateKey: string } | null;
 
-const ATTENDANCE_OPTIONS: {
-  value: SlotStatus;
+const OUTCOME_CONFIG: Record<AuditionOutcome, {
   label: string;
+  subtitle: string;
   badge: string;
+  icon: string;
   color: string;
   bg: string;
   border: string;
-}[] = [
-  {
-    value: 'attended',
-    label: 'Attended',
-    badge: 'Attended',
-    color: '#34C759',
-    bg: 'rgba(52,199,89,0.12)',
-    border: 'rgba(52,199,89,0.3)',
+}> = {
+  'registered': {
+    label: 'Registered',
+    subtitle: 'Enrolled student',
+    badge: 'Registered',
+    icon: '✓',
+    color: '#10B981',
+    bg: 'rgba(16,185,129,0.12)',
+    border: 'rgba(16,185,129,0.3)',
   },
-  {
-    value: 'no-response',
-    label: 'No Response',
-    badge: 'No Response',
-    color: '#FF9500',
-    bg: 'rgba(255,149,0,0.12)',
-    border: 'rgba(255,149,0,0.3)',
+  'schedule-followup': {
+    label: 'Schedule Follow up',
+    subtitle: 'Attended · needs schedule to complete enrollment',
+    badge: 'Follow-up',
+    icon: '📅',
+    color: '#0066FF',
+    bg: 'rgba(0,102,255,0.1)',
+    border: 'rgba(0,102,255,0.3)',
   },
-  {
-    value: 'no-show',
-    label: 'No-Show',
+  'paid-trial': {
+    label: 'Paid Trial',
+    subtitle: 'Paid trial session completed',
+    badge: 'Paid Trial',
+    icon: '💳',
+    color: '#8B5CF6',
+    bg: 'rgba(139,92,246,0.12)',
+    border: 'rgba(139,92,246,0.3)',
+  },
+  'joining-later': {
+    label: 'Joining Later',
+    subtitle: 'Add to follow up',
+    badge: 'Joining Later',
+    icon: '⏳',
+    color: '#F59E0B',
+    bg: 'rgba(245,158,11,0.12)',
+    border: 'rgba(245,158,11,0.3)',
+  },
+  'no-show': {
+    label: 'No show',
+    subtitle: 'Did not attend audition',
     badge: 'No-Show',
-    color: '#FF3B30',
-    bg: 'rgba(255,59,48,0.12)',
-    border: 'rgba(255,59,48,0.3)',
+    icon: '✕',
+    color: '#EF4444',
+    bg: 'rgba(239,68,68,0.12)',
+    border: 'rgba(239,68,68,0.3)',
   },
-];
+};
+
+const AUDITION_OUTCOMES: AuditionOutcome[] = ['registered', 'schedule-followup', 'paid-trial', 'joining-later', 'no-show'];
+
+function getOutcomePipeline(outcome: SlotStatus): string {
+  switch (outcome) {
+    case 'registered': return 'Enrolled';
+    case 'schedule-followup': return 'Attended';
+    case 'paid-trial': return 'Attended';
+    case 'joining-later': return 'Contacted';
+    case 'no-show': return 'Lost';
+    default: return 'Audition Booked';
+  }
+}
+
+function needsFollowUp(outcome: SlotStatus): boolean {
+  return outcome === 'schedule-followup' || outcome === 'joining-later';
+}
+
+function getDefaultFollowUpDate(outcome: SlotStatus): string {
+  const d = new Date();
+  if (outcome === 'schedule-followup') {
+    d.setDate(d.getDate() + 1);
+  } else {
+    d.setDate(d.getDate() + 14);
+  }
+  return isoDate(d);
+}
+
+function BranchFilterPopover({
+  selectedBranch,
+  onSelectBranch,
+  branchCounts,
+  branchGroups = BRANCH_GROUPS,
+}: {
+  selectedBranch: string;
+  onSelectBranch: (branch: string) => void;
+  branchCounts: Record<string, number>;
+  branchGroups?: LegacyBranchGroup[];
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Close on click outside
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    if (open) {
+      document.addEventListener('mousedown', handleClickOutside);
+      setTimeout(() => searchInputRef.current?.focus(), 50);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [open]);
+
+  // Close on Escape key
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false);
+    }
+    if (open) {
+      document.addEventListener('keydown', handleKeyDown);
+    }
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
+  const isFiltered = selectedBranch && selectedBranch !== 'ALL';
+  const displayLabel = getBranchDisplayLabel(selectedBranch);
+  const totalAuditions = branchCounts[selectedBranch] ?? branchCounts.ALL ?? 0;
+
+  // Filter branches based on search input
+  const q = search.toLowerCase().trim();
+  const filteredGroups = useMemo(() => {
+    if (!q) return branchGroups;
+    return branchGroups.map(g => {
+      const matchRegion = g.region.toLowerCase().includes(q);
+      const filteredBranches = g.branches.filter(b => b.toLowerCase().includes(q));
+      if (matchRegion) return g;
+      if (filteredBranches.length > 0) return { ...g, branches: filteredBranches };
+      return null;
+    }).filter(Boolean) as LegacyBranchGroup[];
+  }, [q, branchGroups]);
+
+  return (
+    <div className="relative inline-block" ref={popoverRef}>
+      {/* Trigger Button: formal, simple white */}
+      <button
+        type="button"
+        onClick={() => setOpen(prev => !prev)}
+        className="h-[28px] px-2.5 text-[11px] font-medium rounded-[6px] flex items-center gap-1.5 transition-colors cursor-pointer select-none bg-white hover:bg-gray-50"
+        style={{
+          border: '1px solid var(--border-input)',
+          color: 'var(--text-primary)',
+        }}
+        title="Filter by branch"
+      >
+        <span className="truncate max-w-[150px] font-medium">
+          {displayLabel}
+        </span>
+        {isFiltered && (
+          <span
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelectBranch('ALL');
+            }}
+            className="text-gray-400 hover:text-red-500 font-bold ml-0.5 text-[10px] leading-none"
+            title="Reset to All"
+          >
+            ✕
+          </span>
+        )}
+        <ChevronDown
+          className={`w-3.5 h-3.5 text-gray-400 transition-transform duration-200 shrink-0 ${
+            open ? 'rotate-180' : ''
+          }`}
+        />
+      </button>
+
+      {/* Popover Menu (opens inward from right) */}
+      {open && (
+        <div
+          className="absolute right-0 top-[calc(100%+4px)] z-50 w-[310px] rounded-2xl shadow-2xl p-2.5 flex flex-col gap-2 animate-in fade-in zoom-in-95 duration-150"
+          style={{
+            background: 'var(--bg-card)',
+            border: '1px solid var(--border-main)',
+            backdropFilter: 'blur(16px)',
+          }}
+        >
+          {/* Search Box */}
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input
+              ref={searchInputRef}
+              type="text"
+              placeholder="Search branch or city…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              className="w-full h-[32px] pl-8 pr-7 text-[12px] rounded-xl outline-none"
+              style={{
+                background: 'var(--bg-input)',
+                border: '1px solid var(--border-input)',
+                color: 'var(--text-primary)',
+              }}
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs p-0.5"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+
+          {/* Branch list */}
+          <div className="flex flex-col gap-1 max-h-[340px] overflow-y-auto pr-0.5" style={{ scrollbarWidth: 'thin' }}>
+            {/* "All Branches" Option */}
+            {(!q || 'all branches'.includes(q)) && (
+              <button
+                type="button"
+                onClick={() => {
+                  onSelectBranch('ALL');
+                  setOpen(false);
+                }}
+                className={`w-full px-2.5 py-2 rounded-xl text-left text-[12px] flex items-center justify-between transition-colors cursor-pointer ${
+                  selectedBranch === 'ALL'
+                    ? 'bg-[#0066FF] text-white font-bold shadow-sm'
+                    : 'hover:bg-[var(--bg-pill)] text-[var(--text-primary)] font-medium'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-[13px]">🏢</span>
+                  <span>All Branches</span>
+                </div>
+                <span
+                  className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                    selectedBranch === 'ALL'
+                      ? 'bg-white/20 text-white'
+                      : 'text-[var(--text-muted)] bg-[var(--bg-pill)]'
+                  }`}
+                >
+                  {branchCounts.ALL || 0}
+                </span>
+              </button>
+            )}
+
+            <div className="h-[1px] my-1" style={{ background: 'var(--border-sidebar)' }} />
+
+            {/* Regions & Specific Branches */}
+            {filteredGroups.map(group => {
+              const regionKey = `REGION:${group.region}`;
+              const isRegionActive = selectedBranch === regionKey;
+              const regionCount = branchCounts[regionKey] || 0;
+
+              return (
+                <div key={group.region} className="flex flex-col gap-0.5 mb-1.5">
+                  {/* Region Header with Rollup Selection */}
+                  <div className="flex items-center justify-between px-2 py-1">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-secondary)]">
+                      {group.region}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSelectBranch(regionKey);
+                        setOpen(false);
+                      }}
+                      className={`text-[10px] font-semibold px-2 py-0.5 rounded-md transition-colors cursor-pointer flex items-center gap-1 ${
+                        isRegionActive
+                          ? 'bg-[#0066FF] text-white'
+                          : 'text-[#0066FF] hover:bg-[#0066FF]/10'
+                      }`}
+                      title={`Filter by all ${group.region} branches`}
+                    >
+                      All in {group.region} ({regionCount})
+                    </button>
+                  </div>
+
+                  {/* Branches in Region */}
+                  {group.branches.map(branch => {
+                    const isBranchActive = selectedBranch === branch;
+                    const count = branchCounts[branch] || 0;
+                    const cleanName = branch.replace(/\s*\([^)]*\)/g, '').trim();
+
+                    return (
+                      <button
+                        key={branch}
+                        type="button"
+                        onClick={() => {
+                          onSelectBranch(branch);
+                          setOpen(false);
+                        }}
+                        className={`w-full px-2.5 py-1.5 rounded-lg text-left text-[11px] flex items-center justify-between transition-colors cursor-pointer pl-4 ${
+                          isBranchActive
+                            ? 'bg-[#0066FF] text-white font-bold'
+                            : 'hover:bg-[var(--bg-pill)] text-[var(--text-primary)] font-medium'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 truncate">
+                          <span
+                            className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                              isBranchActive ? 'bg-white' : count > 0 ? 'bg-[#34C759]' : 'bg-gray-300'
+                            }`}
+                          />
+                          <span className="truncate">{cleanName}</span>
+                        </div>
+                        <span
+                          className={`text-[9.5px] px-1.5 py-0.2 rounded font-bold shrink-0 ml-2 ${
+                            isBranchActive
+                              ? 'bg-white/20 text-white'
+                              : count > 0
+                              ? 'text-[#0066FF] bg-[#0066FF]/10'
+                              : 'text-gray-400'
+                          }`}
+                        >
+                          {count}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })}
+
+            {filteredGroups.length === 0 && (
+              <div className="py-4 text-center text-[11px] text-gray-400">
+                No matching branches found
+              </div>
+            )}
+          </div>
+
+          {/* Bottom Bar: Clear / Info */}
+          {isFiltered && (
+            <div className="pt-1.5 border-t flex items-center justify-between" style={{ borderColor: 'var(--border-input)' }}>
+              <span className="text-[10px] text-gray-400 truncate">
+                Active: <b className="text-[var(--text-primary)]">{displayLabel}</b>
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  onSelectBranch('ALL');
+                  setOpen(false);
+                }}
+                className="text-[10px] text-[#0066FF] font-semibold hover:underline cursor-pointer"
+              >
+                Reset to All
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function AuditionsPage() {
   const { conversations, patchConversation, openChat } = useCRM();
   const { isReadOnly } = useAuth();
+  const { branchGroups, legacyBranchGroups } = useBranches();
   const [currentDate, setCurrentDate] = useState(() => {
     return getWeekStart(new Date());
   });
-  const [customSlots, setCustomSlots] = useState<DaySlots>({});
-  const [nextId, setNextId] = useState(100);
+  const [selectedBranch, setSelectedBranch] = useState<string>(() => {
+    if (typeof window === 'undefined') return 'ALL';
+    try {
+      return localStorage.getItem('audition_selected_branch') || 'ALL';
+    } catch {
+      return 'ALL';
+    }
+  });
+
+  const handleSelectBranch = useCallback((b: string) => {
+    setSelectedBranch(b);
+    try {
+      localStorage.setItem('audition_selected_branch', b);
+    } catch {}
+  }, []);
+  const [customSlots, setCustomSlots] = useState<DaySlots>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const saved = localStorage.getItem('audition_custom_slots');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const updateCustomSlotsState = useCallback((updater: (prev: DaySlots) => DaySlots) => {
+    setCustomSlots(prev => {
+      const next = updater(prev);
+      try {
+        localStorage.setItem('audition_custom_slots', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }, []);
   const [addingSlot, setAddingSlot] = useState<{ dateKey: string; time: string; agent: string } | null>(null);
   const [bookingModal, setBookingModal] = useState<BookingModal>(null);
-  const [bookForm, setBookForm] = useState({ name: '', type: 'Adult', age: '', instrument: '' });
+  const [bookForm, setBookForm] = useState({ branch: '', name: '', type: 'Adult', age: '', instrument: '' });
   const [slotPanel, setSlotPanel] = useState<SlotPanelState>(null);
   const [panelComment, setPanelComment] = useState('');
   const [panelStatus, setPanelStatus] = useState<SlotStatus>('booked');
+  const [panelFollowUpDate, setPanelFollowUpDate] = useState('');
 
   // Track status overrides in real time so cards immediately update and never disappear
   const [statusOverrides, setStatusOverrides] = useState<Record<string, SlotStatus>>(() => {
@@ -182,6 +633,27 @@ export default function AuditionsPage() {
     }
   });
 
+  // Remember locked audition dates in localStorage so cards never shift dates on update
+  const [auditionDates, setAuditionDates] = useState<Record<string, string>>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const saved = localStorage.getItem('audition_locked_dates');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const saveAuditionDate = useCallback((slotId: string | number, date: string) => {
+    setAuditionDates(prev => {
+      const next = { ...prev, [String(slotId)]: date };
+      try {
+        localStorage.setItem('audition_locked_dates', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }, []);
+
   const updateStatusOverride = useCallback((slotId: string | number, status: SlotStatus) => {
     setStatusOverrides(prev => {
       const next = { ...prev, [String(slotId)]: status };
@@ -194,14 +666,18 @@ export default function AuditionsPage() {
 
   const todayIso = isoDate(new Date());
 
-  // Filter CRM conversations for live auditions (never drops overridden no-show / attended cards)
+  // Filter CRM conversations for live auditions (never drops overridden cards)
   const liveAuditionConvs = useMemo(() => {
     return conversations.filter(c =>
       c.pipeline === "Audition Booked" ||
       c.pipeline === "Attended" ||
+      c.pipeline === "Enrolled" ||
+      Boolean(c.auditionOutcome) ||
       statusOverrides[c.id] !== undefined ||
       statusOverrides[`crm-${c.id}`] !== undefined ||
+      (c.pipeline === "Contacted" && Boolean(c.auditionDate)) ||
       (c.pipeline === "Lost" && (
+        Boolean(c.auditionDate) ||
         Boolean(c.followUpDate) ||
         Boolean(c.notes) ||
         Boolean(c.formAnswers?.instrument)
@@ -214,43 +690,29 @@ export default function AuditionsPage() {
     const result: DaySlots = {};
 
     liveAuditionConvs.forEach(c => {
-      const dateKey = getConvDate(c, todayIso);
+      const localLockedDate = auditionDates[c.id] || auditionDates[`crm-${c.id}`];
+      const lockedDate = localLockedDate || c.auditionDate || (c.followUpDate && /^\d{4}-\d{2}-\d{2}$/.test(c.followUpDate) ? c.followUpDate : null);
+      const dateKey = lockedDate || getConvDate(c, todayIso);
       const override = statusOverrides[c.id] || statusOverrides[`crm-${c.id}`];
 
-      const isNoResp =
-        (c.notes && c.notes.toLowerCase().includes("no response")) ||
-        (c.followUpNote && c.followUpNote.toLowerCase().includes("no response"));
-
       let slotStatus: AuditionStatus = 'booked';
-      let attendanceStatus: AttendanceStatus = null;
 
       if (override) {
-        if (override === 'attended') {
-          slotStatus = 'attended';
-          attendanceStatus = 'confirmed';
-        } else if (override === 'no-show') {
-          slotStatus = 'no-show';
-          attendanceStatus = 'declined';
-        } else if (override === 'no-response') {
-          slotStatus = 'booked';
-          attendanceStatus = 'no-response';
-        } else {
-          slotStatus = 'booked';
-          attendanceStatus = null;
-        }
+        slotStatus = override;
+      } else if (c.auditionOutcome) {
+        // Use persisted outcome from backend
+        const parsed = parseOverride(c.auditionOutcome);
+        slotStatus = parsed || 'booked';
       } else {
-        if (c.pipeline === 'Attended') {
-          slotStatus = 'attended';
-          attendanceStatus = 'confirmed';
+        // Legacy pipeline-based mapping
+        if (c.pipeline === 'Enrolled') {
+          slotStatus = 'registered';
+        } else if (c.pipeline === 'Attended') {
+          slotStatus = 'schedule-followup';
         } else if (c.pipeline === 'Lost' || (c.notes && c.notes.toLowerCase().includes('no-show'))) {
           slotStatus = 'no-show';
-          attendanceStatus = 'declined';
-        } else if (isNoResp) {
-          slotStatus = 'booked';
-          attendanceStatus = 'no-response';
         } else {
           slotStatus = 'booked';
-          attendanceStatus = null;
         }
       }
 
@@ -267,8 +729,11 @@ export default function AuditionsPage() {
         status: slotStatus,
         agent: c.agent || "Unassigned",
         comment: stripNoResponseTag(c.notes || c.followUpNote || ""),
-        attendanceStatus,
         phone: c.phone || "",
+        branch: c.branch || "",
+        auditionDate: lockedDate || dateKey,
+        followUpDate: c.followUpDate || "",
+        dateKey,
       };
 
       if (!result[dateKey]) result[dateKey] = [];
@@ -281,7 +746,7 @@ export default function AuditionsPage() {
     });
 
     return result;
-  }, [liveAuditionConvs, customSlots, todayIso, statusOverrides]);
+  }, [liveAuditionConvs, customSlots, todayIso, statusOverrides, auditionDates]);
 
   const weekDays = useMemo(() => {
     return Array.from({ length: 7 }, (_, i) => addDays(currentDate, i));
@@ -296,29 +761,53 @@ export default function AuditionsPage() {
 
   const confirmAddSlot = () => {
     if (!addingSlot) return;
+    const formattedTime = formatTime12(addingSlot.time || '17:00');
+    const branchToAssign =
+      selectedBranch && selectedBranch !== 'ALL' && !selectedBranch.startsWith('REGION:')
+        ? selectedBranch
+        : undefined;
     const newSlot: Slot = {
-      id: nextId,
-      time: addingSlot.time,
+      id: `custom-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      time: formattedTime,
       status: 'free',
-      agent: addingSlot.agent || 'Jwana',
+      agent: addingSlot.agent.trim() || 'Jwana',
+      branch: branchToAssign,
+      dateKey: addingSlot.dateKey,
     };
-    setCustomSlots(prev => ({
+    updateCustomSlotsState(prev => ({
       ...prev,
       [addingSlot.dateKey]: [...(prev[addingSlot.dateKey] || []), newSlot],
     }));
-    setNextId(n => n + 1);
     setAddingSlot(null);
   };
 
+  const deleteCustomSlot = useCallback((dateKey: string, slotId: string | number) => {
+    updateCustomSlotsState(prev => {
+      const currentList = prev[dateKey] || [];
+      const updatedList = currentList.filter(s => s.id !== slotId);
+      const next = { ...prev };
+      if (updatedList.length > 0) {
+        next[dateKey] = updatedList;
+      } else {
+        delete next[dateKey];
+      }
+      return next;
+    });
+  }, [updateCustomSlotsState]);
+
   const openBooking = (slotId: string | number, dateKey: string, time: string, day: Date) => {
     setBookingModal({ slotId, dateKey, time, dayLabel: formatDayLabel(day) });
-    setBookForm({ name: '', type: 'Adult', age: '', instrument: '' });
+    const prefillBranch =
+      selectedBranch && selectedBranch !== 'ALL' && !selectedBranch.startsWith('REGION:')
+        ? selectedBranch
+        : '';
+    setBookForm({ branch: prefillBranch, name: '', type: 'Adult', age: '', instrument: '' });
   };
 
   const confirmBooking = () => {
     if (!bookingModal) return;
     const { slotId, dateKey } = bookingModal;
-    setCustomSlots(prev => ({
+    updateCustomSlotsState(prev => ({
       ...prev,
       [dateKey]: (prev[dateKey] || []).map(s =>
         s.id === slotId
@@ -326,7 +815,10 @@ export default function AuditionsPage() {
             ...s,
             name: bookForm.name || 'Student',
             type: `${bookForm.type}${bookForm.age ? ` ${bookForm.age}` : ''} · ${bookForm.instrument || '—'}`,
+            branch: bookForm.branch || '',
             status: 'booked',
+            auditionDate: dateKey,
+            dateKey,
           }
           : s
       ),
@@ -344,25 +836,35 @@ export default function AuditionsPage() {
     const currentSlot = (slots[dateKey] || []).find(s => s.id === slotId);
     if (currentSlot?.conversationId) {
       if (isReadOnly) return;
-      const targetPipeline =
-        status === "attended" ? "Attended" : status === "no-show" ? "Lost" : "Audition Booked";
+      const targetPipeline = getOutcomePipeline(status);
       const cleanComment = stripNoResponseTag(currentSlot.comment);
-      patchConversation(currentSlot.conversationId, {
+      // Lock the date so it NEVER changes when updating outcome
+      const lockedDate = currentSlot.auditionDate || currentSlot.dateKey || dateKey;
+      saveAuditionDate(currentSlot.id, lockedDate);
+      saveAuditionDate(currentSlot.conversationId, lockedDate);
+      const patch: Record<string, any> = {
         pipeline: targetPipeline,
         notes: cleanComment,
-      });
+        auditionDate: lockedDate,
+        auditionOutcome: status,
+      };
+      if (status === 'no-show') {
+        patch.notes = cleanComment ? `${cleanComment} [No-Show]` : 'No-Show';
+      }
+      // Clear follow-up for non-followup outcomes; the modal handles setting it for followup outcomes
+      if (!needsFollowUp(status)) {
+        patch.followUpDate = '';
+        patch.followUpNote = '';
+      }
+      patchConversation(currentSlot.conversationId, patch);
       return;
     }
 
-    setCustomSlots(prev => ({
+    updateCustomSlotsState(prev => ({
       ...prev,
       [dateKey]: (prev[dateKey] || []).map(s => {
         if (s.id !== slotId) return s;
-        const targetAuditionStatus: AuditionStatus =
-          status === 'attended' ? 'attended' : status === 'no-show' ? 'no-show' : 'booked';
-        const targetAttendance: AttendanceStatus =
-          status === 'attended' ? 'confirmed' : status === 'no-show' ? 'declined' : status === 'no-response' ? 'no-response' : null;
-        return { ...s, status: targetAuditionStatus, attendanceStatus: targetAttendance };
+        return { ...s, status: status === 'booked' ? 'booked' : status };
       }),
     }));
   };
@@ -373,14 +875,17 @@ export default function AuditionsPage() {
     setSlotPanel({ slotId, dateKey });
     setPanelComment(stripNoResponseTag(slot.comment || ''));
     const currentStatus: SlotStatus =
-      slot.status === 'attended'
-        ? 'attended'
-        : slot.status === 'no-show'
-        ? 'no-show'
-        : slot.attendanceStatus === 'no-response'
-        ? 'no-response'
+      slot.status !== 'free' && slot.status !== 'booked'
+        ? slot.status
         : 'booked';
     setPanelStatus(currentStatus);
+    // Read existing follow-up date from conversation, or set default
+    if (needsFollowUp(currentStatus)) {
+      const existingDate = slot.followUpDate;
+      setPanelFollowUpDate(existingDate || getDefaultFollowUpDate(currentStatus));
+    } else {
+      setPanelFollowUpDate('');
+    }
   }, [slots]);
 
   const saveSlotPanel = useCallback(() => {
@@ -391,42 +896,109 @@ export default function AuditionsPage() {
 
     if (currentSlot?.conversationId) {
       if (!isReadOnly) {
-        const targetPipeline =
-          panelStatus === "attended" ? "Attended" : panelStatus === "no-show" ? "Lost" : "Audition Booked";
+        const targetPipeline = getOutcomePipeline(panelStatus);
         const cleanComment = stripNoResponseTag(panelComment);
-        patchConversation(currentSlot.conversationId, {
+        // Lock the audition date: it was set when booked and must NEVER be edited when updating status or notes
+        const lockedDate = currentSlot.auditionDate || currentSlot.dateKey || slotPanel.dateKey;
+        saveAuditionDate(currentSlot.id, lockedDate);
+        saveAuditionDate(currentSlot.conversationId, lockedDate);
+
+        const patch: Record<string, any> = {
           pipeline: targetPipeline,
           notes: cleanComment,
-          followUpNote: cleanComment,
-        });
+          auditionDate: lockedDate,
+          auditionOutcome: panelStatus,
+        };
+
+        // Handle follow-up date for schedule-followup and joining-later
+        if (needsFollowUp(panelStatus) && panelFollowUpDate) {
+          patch.followUpDate = panelFollowUpDate;
+          patch.followUpNote = panelStatus === 'schedule-followup'
+            ? (cleanComment || 'Schedule to complete enrollment')
+            : (cleanComment || 'Joining Later - Follow up');
+        } else if (needsFollowUp(panelStatus)) {
+          // If follow-up outcome selected without manual date, use smart default
+          const defaultDate = getDefaultFollowUpDate(panelStatus);
+          patch.followUpDate = defaultDate;
+          patch.followUpNote = panelStatus === 'schedule-followup'
+            ? (cleanComment || 'Schedule to complete enrollment')
+            : (cleanComment || 'Joining Later - Follow up');
+        } else {
+          // Clear follow-up for non-followup outcomes (registered, paid-trial, no-show)
+          patch.followUpDate = '';
+          patch.followUpNote = '';
+        }
+
+        if (panelStatus === 'no-show') {
+          patch.notes = cleanComment ? `${cleanComment} [No-Show]` : 'No-Show';
+        }
+
+        patchConversation(currentSlot.conversationId, patch);
       }
     } else {
-      setCustomSlots(prev => ({
+      updateCustomSlotsState(prev => ({
         ...prev,
         [slotPanel.dateKey]: (prev[slotPanel.dateKey] || []).map(s =>
           s.id === slotPanel.slotId
             ? {
               ...s,
               comment: stripNoResponseTag(panelComment),
-              status: panelStatus === 'attended' ? 'attended' : panelStatus === 'no-show' ? 'no-show' : 'booked',
-              attendanceStatus: panelStatus === 'attended' ? 'confirmed' : panelStatus === 'no-show' ? 'declined' : panelStatus === 'no-response' ? 'no-response' : null,
+              status: panelStatus === 'booked' ? 'booked' : panelStatus,
             }
             : s
         ),
       }));
     }
     setSlotPanel(null);
-  }, [slotPanel, slots, panelComment, panelStatus, isReadOnly, patchConversation, updateStatusOverride]);
+  }, [slotPanel, slots, panelComment, panelStatus, panelFollowUpDate, isReadOnly, patchConversation, updateStatusOverride, saveAuditionDate, updateCustomSlotsState]);
 
   const panelSlot = slotPanel ? (slots[slotPanel.dateKey] || []).find(s => s.id === slotPanel.slotId) : null;
+
+  // Real-time weekly counts for every branch and region (0ms in-memory calculation)
+  const branchCounts = useMemo(() => {
+    const counts: Record<string, number> = { ALL: 0 };
+    legacyBranchGroups.forEach(g => {
+      counts[`REGION:${g.region}`] = 0;
+      g.branches.forEach(b => {
+        counts[b] = 0;
+      });
+    });
+
+    weekDays.forEach(day => {
+      const key = isoDate(day);
+      const daySlots = slots[key] || [];
+      daySlots.forEach(s => {
+        if (s.status === 'free') return;
+        counts.ALL = (counts.ALL || 0) + 1;
+
+        legacyBranchGroups.forEach(g => {
+          if (matchesBranch(s.branch, `REGION:${g.region}`)) {
+            counts[`REGION:${g.region}`] = (counts[`REGION:${g.region}`] || 0) + 1;
+          }
+          g.branches.forEach(b => {
+            if (matchesBranch(s.branch, b)) {
+              counts[b] = (counts[b] || 0) + 1;
+            }
+          });
+        });
+      });
+    });
+
+    return counts;
+  }, [weekDays, slots, legacyBranchGroups]);
 
   // Dynamic column sizing: expand days with > 5 auditions to 420px so 2-column cards are wide and spacious
   const gridTemplate = useMemo(() => {
     return weekDays.map(day => {
-      const count = (slots[isoDate(day)] || []).length;
+      const key = isoDate(day);
+      const rawDaySlots = slots[key] || [];
+      const count = rawDaySlots.filter(s => {
+        if (s.status === 'free' && !s.branch) return true;
+        return matchesBranch(s.branch, selectedBranch);
+      }).length;
       return count > 5 ? 'minmax(420px, 2.5fr)' : 'minmax(180px, 1fr)';
     }).join(' ');
-  }, [weekDays, slots]);
+  }, [weekDays, slots, selectedBranch]);
 
   return (
     <div className="flex flex-col h-full min-h-0 relative" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
@@ -449,10 +1021,13 @@ export default function AuditionsPage() {
         </div>
         <div className="flex items-center gap-2">
 
-          <select className="h-[28px] text-[11px] rounded-[6px] px-2 outline-none" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}>
-            <option>Jeddah Hub</option>
-            <option>Riyadh Hub</option>
-          </select>
+          {/* Branch Filter dropdown in the old place on the right */}
+          <BranchFilterPopover
+            selectedBranch={selectedBranch}
+            onSelectBranch={handleSelectBranch}
+            branchCounts={branchCounts}
+            branchGroups={legacyBranchGroups}
+          />
 
           {/* Flexible Date Picker */}
           <input
@@ -522,7 +1097,11 @@ export default function AuditionsPage() {
               {weekDays.map((day) => {
                 const key = isoDate(day);
                 const weekdayShort = day.toLocaleDateString('en-US', { weekday: 'short' });
-                const daySlots = slots[key] || [];
+                const rawDaySlots = slots[key] || [];
+                const daySlots = rawDaySlots.filter(s => {
+                  if (s.status === 'free' && !s.branch) return true;
+                  return matchesBranch(s.branch, selectedBranch);
+                });
                 return (
                   <div
                     key={key}
@@ -561,20 +1140,28 @@ export default function AuditionsPage() {
             <div className="grid flex-1 min-h-[500px]" style={{ gridTemplateColumns: gridTemplate }}>
               {weekDays.map((day) => {
                 const key = isoDate(day);
-                const daySlots = slots[key] || [];
+                const rawDaySlots = slots[key] || [];
+                const daySlots = rawDaySlots.filter(s => {
+                  if (s.status === 'free' && !s.branch) return true;
+                  return matchesBranch(s.branch, selectedBranch);
+                });
                 const isAddingHere = addingSlot?.dateKey === key;
                 const isMultiCol = daySlots.length > 5;
 
-                // Optimal Real-Time Arrangement (without complex calculation or delay):
-                // 1. Pending / No Action at top (highest priority for staff attention)
-                // 2. No Response (awaiting client reply)
-                // 3. No-Show (marked as did not attend)
-                // 4. Attended at the bottom (completed)
-                const noActionSlots = daySlots.filter(s => s.status === 'booked' && s.attendanceStatus !== 'no-response');
-                const noResponseSlots = daySlots.filter(s => s.status === 'booked' && s.attendanceStatus === 'no-response');
+                // Optimal Real-Time Arrangement:
+                // 1. Booked (pending action - top priority for staff)
+                // 2. Schedule Follow-up / Joining Later / Paid Trial (in progress)
+                // 3. No-Show
+                // 4. Registered (completed)
+                // 5. Free slots
+                const bookedSlots = daySlots.filter(s => s.status === 'booked');
+                const followUpSlots = daySlots.filter(s => s.status === 'schedule-followup');
+                const joiningSlots = daySlots.filter(s => s.status === 'joining-later');
+                const paidTrialSlots = daySlots.filter(s => s.status === 'paid-trial');
                 const noShowSlots = daySlots.filter(s => s.status === 'no-show');
-                const attendedSlots = daySlots.filter(s => s.status === 'attended');
-                const orderedSlots = [...noActionSlots, ...noResponseSlots, ...noShowSlots, ...attendedSlots];
+                const registeredSlots = daySlots.filter(s => s.status === 'registered');
+                const freeSlots = daySlots.filter(s => s.status === 'free');
+                const orderedSlots = [...bookedSlots, ...followUpSlots, ...joiningSlots, ...paidTrialSlots, ...noShowSlots, ...registeredSlots, ...freeSlots];
 
                 return (
                   <div key={key} className="p-2.5" style={{ borderRight: '1px solid var(--border-sidebar)', background: 'transparent' }}>
@@ -587,6 +1174,7 @@ export default function AuditionsPage() {
                           onStatusChange={(status) => setSlotStatus(key, slot.id, status)}
                           onOpenPanel={() => openSlotPanel(slot.id, key)}
                           onOpenChat={slot.conversationId ? () => openChat(slot.conversationId!) : undefined}
+                          onDelete={slot.status === 'free' ? () => deleteCustomSlot(key, slot.id) : undefined}
                           isReadOnly={isReadOnly}
                         />
                       ))}
@@ -594,10 +1182,12 @@ export default function AuditionsPage() {
                         <div className={`rounded-lg p-2 flex flex-col gap-1.5 shadow-sm ${isMultiCol ? 'col-span-2' : ''}`} style={{ border: '1px solid var(--border-input)', background: 'var(--bg-card)' }}>
                           <input type="time" value={addingSlot.time}
                             onChange={e => setAddingSlot(a => a ? { ...a, time: e.target.value } : a)}
+                            onKeyDown={e => { if (e.key === 'Enter') confirmAddSlot(); }}
                             className="w-full h-[26px] px-2 text-[11px] rounded-[4px] outline-none"
                             style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }} />
                           <input type="text" placeholder="Staff (optional)" value={addingSlot.agent}
                             onChange={e => setAddingSlot(a => a ? { ...a, agent: e.target.value } : a)}
+                            onKeyDown={e => { if (e.key === 'Enter') confirmAddSlot(); }}
                             className="w-full h-[26px] px-2 text-[11px] rounded-[4px] outline-none placeholder-gray-400"
                             style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }} />
                           <div className="flex gap-1">
@@ -640,6 +1230,13 @@ export default function AuditionsPage() {
                 {panelSlot.phone && (
                   <p className="text-[11px] mt-0.5 font-mono" style={{ color: 'var(--text-muted)' }}>{panelSlot.phone}</p>
                 )}
+                {panelSlot.branch && (
+                  <div className="mt-1.5">
+                    <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-md" style={{ color: '#0066FF', background: 'rgba(0, 102, 255, 0.1)', border: '1px solid rgba(0, 102, 255, 0.25)' }}>
+                      📍 {panelSlot.branch}
+                    </span>
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-1.5">
                 {panelSlot.conversationId && (
@@ -661,49 +1258,57 @@ export default function AuditionsPage() {
               </div>
             </div>
 
-            {/* Attendance & Slot status */}
+            {/* Audition Outcome */}
             <div>
-              <p className="text-[11px] font-semibold mb-2" style={{ color: 'var(--text-secondary)' }}>Attendance Status</p>
-              <div className="flex flex-col gap-2">
-                {ATTENDANCE_OPTIONS.map(opt => {
-                  const isActive = panelStatus === opt.value;
+              <p className="text-[11px] font-semibold mb-1.5" style={{ color: 'var(--text-secondary)' }}>Outcome</p>
+              <div className="grid grid-cols-2 gap-1.5">
+                {AUDITION_OUTCOMES.map(outcomeKey => {
+                  const opt = OUTCOME_CONFIG[outcomeKey];
+                  const isActive = panelStatus === outcomeKey;
                   return (
                     <button
-                      key={opt.value}
+                      key={outcomeKey}
                       type="button"
                       onClick={() => {
                         if (isActive) {
                           setPanelStatus('booked');
+                          setPanelFollowUpDate('');
                         } else {
-                          setPanelStatus(opt.value);
+                          setPanelStatus(outcomeKey);
+                          if (needsFollowUp(outcomeKey)) {
+                            setPanelFollowUpDate(panelFollowUpDate || panelSlot?.followUpDate || getDefaultFollowUpDate(outcomeKey));
+                          } else {
+                            setPanelFollowUpDate('');
+                          }
                         }
                       }}
-                      className="flex items-center justify-between w-full px-3.5 py-2.5 rounded-xl text-left transition-all cursor-pointer"
+                      className={`flex items-center gap-2 px-2.5 py-[7px] rounded-lg text-[12px] transition-all cursor-pointer text-left ${outcomeKey === 'no-show' ? 'col-span-2' : ''}`}
                       style={{
                         background: isActive ? opt.bg : 'var(--bg-pill)',
-                        border: `1.5px solid ${isActive ? opt.border : 'var(--border-input)'}`,
+                        border: `1px solid ${isActive ? opt.border : 'var(--border-input)'}`,
                         color: isActive ? opt.color : 'var(--text-secondary)',
                         fontWeight: isActive ? 700 : 500,
                       }}
                     >
-                      <div className="flex items-center gap-2.5">
-                        <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: opt.color }} />
-                        <span className="text-[13px]">{opt.label}</span>
-                      </div>
-                      <span
-                        className="text-[11px] px-2 py-0.5 rounded-md font-semibold"
-                        style={{
-                          background: isActive ? opt.color : 'transparent',
-                          color: isActive ? '#fff' : 'var(--text-muted)',
-                          border: isActive ? 'none' : '1px solid var(--border-input)',
-                        }}
-                      >
-                        {opt.badge} {isActive ? '✓' : ''}
-                      </span>
+                      <span className="w-2 h-2 rounded-full shrink-0" style={{ background: isActive ? opt.color : 'var(--border-input)' }} />
+                      <span className="truncate">{opt.label}</span>
                     </button>
                   );
                 })}
               </div>
+              {/* Inline follow-up date for schedule-followup / joining-later */}
+              {needsFollowUp(panelStatus) && (
+                <div className="flex items-center gap-2 mt-2">
+                  <span className="text-[11px] shrink-0" style={{ color: 'var(--text-muted)' }}>Follow-up:</span>
+                  <input
+                    type="date"
+                    value={panelFollowUpDate}
+                    onChange={e => setPanelFollowUpDate(e.target.value)}
+                    className="flex-1 h-[30px] px-2 text-[12px] rounded-lg outline-none"
+                    style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                  />
+                </div>
+              )}
             </div>
 
             {/* Comment */}
@@ -724,6 +1329,19 @@ export default function AuditionsPage() {
               <button onClick={saveSlotPanel} className="flex-1 h-[38px] text-[13px] font-semibold text-white rounded-xl cursor-pointer" style={{ background: '#0066FF' }}>
                 Save
               </button>
+              {panelSlot && !panelSlot.conversationId && !isReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    deleteCustomSlot(slotPanel.dateKey, slotPanel.slotId);
+                    setSlotPanel(null);
+                  }}
+                  className="h-[38px] px-4 text-[13px] font-medium text-red-500 hover:bg-red-500/10 rounded-xl transition-colors cursor-pointer"
+                  style={{ border: '1px solid rgba(239, 68, 68, 0.3)' }}
+                >
+                  Delete
+                </button>
+              )}
               <button onClick={() => setSlotPanel(null)} className="h-[38px] px-5 text-[13px] font-medium rounded-xl cursor-pointer" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}>
                 Cancel
               </button>
@@ -735,7 +1353,7 @@ export default function AuditionsPage() {
       {/* Book slot modal */}
       {bookingModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="w-full max-w-md rounded-2xl p-5 shadow-2xl flex flex-col gap-4" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}>
+          <div className="w-full max-w-md rounded-2xl p-5 shadow-2xl flex flex-col gap-4 max-h-[90vh] overflow-y-auto" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}>
             <div>
               <p className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
                 {bookingModal.dayLabel} · {bookingModal.time}
@@ -743,6 +1361,15 @@ export default function AuditionsPage() {
               <h3 className="text-[17px] font-bold mt-0.5" style={{ color: 'var(--text-primary)' }}>Book Audition Slot</h3>
             </div>
             <div className="flex flex-col gap-3">
+              <div>
+                <label className="text-[11px] font-bold mb-1 block" style={{ color: 'var(--text-primary)' }}>Branch *</label>
+                <BranchSelect
+                  value={bookForm.branch}
+                  onChange={(b) => setBookForm((f) => ({ ...f, branch: b }))}
+                  branchGroups={branchGroups}
+                />
+              </div>
+
               <div>
                 <label className="text-[11px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>Student Name *</label>
                 <input
@@ -792,7 +1419,7 @@ export default function AuditionsPage() {
               </div>
             </div>
             <div className="flex gap-2 pt-1">
-              <button onClick={confirmBooking} className="flex-1 h-[38px] text-[13px] font-semibold text-white rounded-xl cursor-pointer" style={{ background: '#0066FF' }}>
+              <button disabled={!bookForm.name || !bookForm.branch} onClick={confirmBooking} className="flex-1 h-[38px] text-[13px] font-semibold text-white rounded-xl cursor-pointer disabled:opacity-50" style={{ background: '#0066FF' }}>
                 Confirm Booking
               </button>
               <button onClick={() => setBookingModal(null)} className="h-[38px] px-5 text-[13px] font-medium rounded-xl cursor-pointer" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}>
@@ -809,41 +1436,76 @@ export default function AuditionsPage() {
 
 // ─── Slot Card ────────────────────────────────────────────────────────────────
 
-function SlotCard({ slot, onBook, onStatusChange, onOpenPanel, onOpenChat, isReadOnly }: {
+function SlotCard({
+  slot,
+  onBook,
+  onStatusChange,
+  onOpenPanel,
+  onOpenChat,
+  onDelete,
+  isReadOnly,
+}: {
   slot: Slot;
   onBook: () => void;
   onStatusChange: (s: SlotStatus) => void;
   onOpenPanel: () => void;
   onOpenChat?: () => void;
+  onDelete?: () => void;
   isReadOnly?: boolean;
 }) {
   if (slot.status === 'free') {
     return (
-      <div onClick={!isReadOnly ? onBook : undefined}
-        className={`rounded-lg border border-dashed px-2.5 py-2 transition-colors ${!isReadOnly ? "cursor-pointer hover:border-[#0066FF]" : "cursor-default"}`}
-        style={{ borderColor: 'var(--border-main)', background: 'var(--bg-card)' }}>
-        <span className="text-[11px] font-medium" style={{ color: 'var(--text-secondary)' }}>{slot.time}</span>
-        {slot.agent && <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}> · {slot.agent}</span>}
-        <p className="text-[10px] mt-0.5 text-blue-500 font-medium">{!isReadOnly ? "Free — click to book" : "Free slot"}</p>
+      <div
+        onClick={!isReadOnly ? onBook : undefined}
+        className={`group relative rounded-lg border border-dashed px-2.5 py-2 transition-all ${
+          !isReadOnly ? "cursor-pointer hover:border-[#0066FF] hover:bg-blue-50/20" : "cursor-default"
+        }`}
+        style={{ borderColor: 'var(--border-main)', background: 'var(--bg-card)' }}
+      >
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+            {slot.time}
+          </span>
+          {onDelete && !isReadOnly && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete();
+              }}
+              className="w-4 h-4 rounded flex items-center justify-center text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors text-xs font-bold leading-none cursor-pointer"
+              title="Delete slot"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+        {slot.agent && (
+          <span className="text-[10px] block" style={{ color: 'var(--text-muted)' }}>
+            {slot.agent}
+          </span>
+        )}
+        <p className="text-[10px] mt-1 text-[#0066FF] font-medium">
+          {!isReadOnly ? "Free — click to book" : "Free slot"}
+        </p>
       </div>
     );
   }
 
-  const isNoResponse = slot.attendanceStatus === 'no-response';
   const displayType =
     slot.type &&
     slot.type.trim().toLowerCase() !== slot.comment?.trim().toLowerCase()
       ? slot.type
       : null;
 
-  // Card with No Action or No Response (Pending group)
+  // Card with no outcome yet (Pending / Booked group)
   if (slot.status === 'booked') {
     return (
       <div
         className={`rounded-lg px-2.5 py-2 shadow-sm ${!isReadOnly ? "cursor-pointer hover:opacity-90 transition-opacity" : ""}`}
         style={{
-          background: isNoResponse ? 'rgba(255, 149, 0, 0.08)' : 'var(--bg-selected)',
-          border: isNoResponse ? '1px solid rgba(255, 149, 0, 0.3)' : '1px solid var(--border-main)',
+          background: 'var(--bg-selected)',
+          border: '1px solid var(--border-main)',
         }}
         onClick={!isReadOnly ? onOpenPanel : undefined}
       >
@@ -851,7 +1513,7 @@ function SlotCard({ slot, onBook, onStatusChange, onOpenPanel, onOpenChat, isRea
           <div className="min-w-0">
             <p className="text-[10px] font-bold leading-none mb-0.5" style={{ color: 'var(--text-primary)' }}>{slot.time}</p>
             {slot.name && <p className="text-[11px] font-semibold leading-tight truncate" style={{ color: 'var(--text-primary)' }}>{slot.name}</p>}
-            {displayType && <p className="text-[10px] leading-tight" style={{ color: isNoResponse ? '#FF9500' : 'var(--text-secondary)' }}>{displayType}</p>}
+            {displayType && <p className="text-[10px] leading-tight" style={{ color: 'var(--text-secondary)' }}>{displayType}</p>}
           </div>
           <div className="flex items-center gap-1 shrink-0">
             {onOpenChat && (
@@ -864,11 +1526,6 @@ function SlotCard({ slot, onBook, onStatusChange, onOpenPanel, onOpenChat, isRea
                 <MessageSquare className="w-3 h-3" />
               </button>
             )}
-            {isNoResponse && (
-              <span className="text-[8px] font-bold text-[#FF9500] bg-[#FF9500]/15 border border-[#FF9500]/30 px-1.5 py-0.5 rounded-full shrink-0">
-                No Response
-              </span>
-            )}
           </div>
         </div>
         {slot.comment ? (
@@ -878,20 +1535,21 @@ function SlotCard({ slot, onBook, onStatusChange, onOpenPanel, onOpenChat, isRea
         ) : !isReadOnly ? (
           <p className="text-[9px] mt-1 text-[#0066FF] opacity-75 hover:opacity-100">+ Add note / status</p>
         ) : null}
-        {!isReadOnly && !isNoResponse && (
+        {!isReadOnly && (
           <div className="flex items-center gap-1.5 mt-2">
             <button
-              onClick={(e) => { e.stopPropagation(); onStatusChange('attended'); }}
-              className="text-[9px] font-bold bg-[#34C759] text-white px-2.5 py-0.5 rounded-full hover:opacity-90 whitespace-nowrap cursor-pointer"
+              onClick={(e) => { e.stopPropagation(); onStatusChange('registered'); }}
+              className="text-[9px] font-bold text-white px-2.5 py-0.5 rounded-full hover:opacity-90 whitespace-nowrap cursor-pointer"
+              style={{ background: '#10B981' }}
             >
-              ✓ attended
+              ✓ Registered
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); onStatusChange('no-show'); }}
-              className="text-[9px] font-bold border px-2.5 py-0.5 rounded-full whitespace-nowrap cursor-pointer hover:bg-[#FF3B30]/10"
-              style={{ color: '#FF3B30', borderColor: 'rgba(255, 59, 48, 0.3)', background: 'transparent' }}
+              className="text-[9px] font-bold border px-2.5 py-0.5 rounded-full whitespace-nowrap cursor-pointer hover:bg-[#EF4444]/10"
+              style={{ color: '#EF4444', borderColor: 'rgba(239, 68, 68, 0.3)', background: 'transparent' }}
             >
-              no-show
+              No show
             </button>
           </div>
         )}
@@ -899,11 +1557,22 @@ function SlotCard({ slot, onBook, onStatusChange, onOpenPanel, onOpenChat, isRea
     );
   }
 
-  // Card with Attended status (bottom group)
-  if (slot.status === 'attended') {
+  // ── Outcome cards (all 5 statuses) ──
+  // Use OUTCOME_CONFIG for consistent styling
+  const outcomeKey = slot.status as AuditionOutcome;
+  const cfg = OUTCOME_CONFIG[outcomeKey];
+
+  if (!cfg) {
+    // Fallback for any unknown status
+    return null;
+  }
+
+  // "Registered" gets a solid color card (like old attended)
+  if (slot.status === 'registered') {
     return (
       <div
-        className={`rounded-lg bg-[#34C759] px-2.5 py-2 shadow-sm ${!isReadOnly ? "cursor-pointer hover:opacity-95 transition-opacity" : ""}`}
+        className={`rounded-lg px-2.5 py-2 shadow-sm ${!isReadOnly ? "cursor-pointer hover:opacity-95 transition-opacity" : ""}`}
+        style={{ background: cfg.color }}
         onClick={!isReadOnly ? onOpenPanel : undefined}
       >
         <div className="flex items-start justify-between gap-1">
@@ -928,33 +1597,34 @@ function SlotCard({ slot, onBook, onStatusChange, onOpenPanel, onOpenChat, isRea
             💬 {slot.comment}
           </p>
         ) : !isReadOnly ? (
-          <p className="text-[9px] mt-1 text-white/80 hover:text-white underline decoration-white/40">+ Add note / status</p>
+          <p className="text-[9px] mt-1 text-white/80 hover:text-white">+ Add note</p>
         ) : null}
         <div className="flex flex-wrap gap-1 mt-1.5">
-          <span className="text-[8px] font-bold bg-white/30 text-white px-2 py-0.5 rounded-full whitespace-nowrap">✓ attended</span>
+          <span className="text-[8px] font-bold bg-white/30 text-white px-2 py-0.5 rounded-full whitespace-nowrap">{cfg.icon} {cfg.badge}</span>
         </div>
       </div>
     );
   }
 
-  // Card with No-Show status (middle group)
+  // All other outcomes: bordered card with outcome color accent
   return (
     <div
       className={`rounded-lg px-2.5 py-2 shadow-sm ${!isReadOnly ? "cursor-pointer hover:opacity-90 transition-opacity" : ""}`}
-      style={{ background: 'rgba(255, 59, 48, 0.1)', border: '1px solid rgba(255, 59, 48, 0.25)' }}
+      style={{ background: cfg.bg, border: `1px solid ${cfg.border}` }}
       onClick={!isReadOnly ? onOpenPanel : undefined}
     >
       <div className="flex items-start justify-between gap-1">
         <div className="min-w-0">
           <p className="text-[10px] font-bold leading-none mb-0.5" style={{ color: 'var(--text-primary)' }}>{slot.time}</p>
           {slot.name && <p className="text-[11px] font-semibold leading-tight truncate" style={{ color: 'var(--text-primary)' }}>{slot.name}</p>}
-          {displayType && <p className="text-[10px] leading-tight" style={{ color: '#FF3B30' }}>{displayType}</p>}
+          {displayType && <p className="text-[10px] leading-tight" style={{ color: cfg.color }}>{displayType}</p>}
         </div>
         {onOpenChat && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onOpenChat(); }}
-            className="w-5 h-5 flex items-center justify-center rounded text-[#FF3B30] hover:bg-[#FF3B30]/15 transition-colors shrink-0"
+            className="w-5 h-5 flex items-center justify-center rounded transition-colors shrink-0"
+            style={{ color: cfg.color }}
             title="Open Chat in Inbox"
           >
             <MessageSquare className="w-3 h-3" />
@@ -962,14 +1632,19 @@ function SlotCard({ slot, onBook, onStatusChange, onOpenPanel, onOpenChat, isRea
         )}
       </div>
       {slot.comment ? (
-        <p className="text-[10px] mt-1.5 leading-snug line-clamp-2 px-1.5 py-0.5 rounded" style={{ color: '#FF3B30', background: 'rgba(255, 59, 48, 0.08)' }}>
+        <p className="text-[10px] mt-1.5 leading-snug line-clamp-2 px-1.5 py-0.5 rounded" style={{ color: cfg.color, background: `${cfg.color}10` }}>
           💬 {slot.comment}
         </p>
       ) : !isReadOnly ? (
-        <p className="text-[9px] mt-1 text-[#FF3B30]/80 hover:text-[#FF3B30] underline decoration-[#FF3B30]/40">+ Add note / status</p>
+        <p className="text-[9px] mt-1 opacity-75 hover:opacity-100" style={{ color: cfg.color }}>+ Add note</p>
       ) : null}
       <div className="flex flex-wrap gap-1 mt-1.5">
-        <span className="text-[8px] font-bold bg-[#FF3B30]/15 text-[#FF3B30] px-2 py-0.5 rounded-full whitespace-nowrap">no-show</span>
+        <span className="text-[8px] font-bold px-2 py-0.5 rounded-full whitespace-nowrap" style={{ background: `${cfg.color}20`, color: cfg.color }}>{cfg.icon} {cfg.badge}</span>
+        {slot.followUpDate && (
+          <span className="text-[8px] font-medium px-2 py-0.5 rounded-full whitespace-nowrap" style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)', border: '1px solid var(--border-input)' }}>
+            📅 {slot.followUpDate}
+          </span>
+        )}
       </div>
     </div>
   );

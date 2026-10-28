@@ -2,6 +2,7 @@
 
 import React, { useState, useMemo } from 'react';
 import { useCRM } from '../context/CRMContext';
+import { useAuth } from '../components/AuthProvider';
 import { MessageSquare } from 'lucide-react';
 
 const STAGE_COLORS: Record<string, string> = {
@@ -10,6 +11,7 @@ const STAGE_COLORS: Record<string, string> = {
   "Audition Booked":"#34C759",
   "Attended":       "#30B0C7",
   "Enrolled":       "#5856D6",
+  "Unqualified":    "#8E8E93",
   "Lost":           "#FF3B30",
   "direct":         "#8E8E93",
 };
@@ -27,7 +29,9 @@ type Lead = {
 };
 
 export default function LeadsPage() {
-  const { conversations, loading, openChat } = useCRM();
+  const { conversations, loading, openChat, assignableAgents, patchConversation } = useCRM();
+  const { isReadOnly, user } = useAuth();
+  const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager";
   const [filterStage, setFilterStage] = useState("All");
   const [filterCampaign, setFilterCampaign] = useState("All campaigns");
 
@@ -74,7 +78,7 @@ export default function LeadsPage() {
     return options;
   }, [leads]);
 
-  const stages = ["All", "New", "Contacted", "Audition Booked", "Enrolled", "Lost"];
+  const stages = ["All", "New", "Contacted", "Audition Booked", "Attended", "Enrolled", "Unqualified", "Lost"];
   const filtered = useMemo(() => {
     return leads.filter((l) => {
       if (filterStage !== "All" && l.stage !== filterStage) return false;
@@ -194,7 +198,29 @@ export default function LeadsPage() {
                       </span>
                     </td>
                     <td className="py-3 px-4" style={{ color: 'var(--text-secondary)' }}>{lead.campaign}</td>
-                    <td className="py-3 px-4" style={{ color: 'var(--text-secondary)' }}>{lead.agent}</td>
+                    <td className="py-3 px-4">
+                      {(() => {
+                        const canEditAgent = !isReadOnly && isChairman;
+                        return (
+                          <select
+                            disabled={!canEditAgent}
+                            title={!canEditAgent ? "Only Chairman can assign agents" : undefined}
+                            value={lead.agent}
+                            onChange={(e) => patchConversation(lead.id, { agent: e.target.value })}
+                            className="text-[11px] font-medium rounded-[6px] px-1.5 py-0.5 outline-none cursor-pointer transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                            style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                          >
+                            <option value="Unassigned">Unassigned</option>
+                            {lead.agent && lead.agent !== "Unassigned" && !assignableAgents.some(a => a.name === lead.agent) && (
+                              <option value={lead.agent}>{lead.agent}</option>
+                            )}
+                            {assignableAgents.map(a => (
+                              <option key={a.name} value={a.name}>{a.name}</option>
+                            ))}
+                          </select>
+                        );
+                      })()}
+                    </td>
                     <td className="py-3 px-4">
                       <span
                         className="text-[10px] font-bold px-2 py-0.5 rounded-full"

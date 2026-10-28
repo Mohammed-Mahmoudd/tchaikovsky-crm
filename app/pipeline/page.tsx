@@ -6,6 +6,8 @@ import { MessageSquare, Trash2, AlertTriangle, Calendar, CheckCircle2, Clock, X 
 import { useCRM } from "../context/CRMContext";
 import { useAuth } from "../components/AuthProvider";
 import { formatLastMessageTime } from "../utils/time";
+import { useBranches } from "../lib/branches";
+import { BranchSelect } from "../components/BranchSelect";
 
 import {
   DndContext,
@@ -664,8 +666,9 @@ const Column = React.memo(function Column({
 // ─── Main Page ───────────────────────────────────────────────────────────────
 
 export default function PipelinePage() {
-  const { conversations, patchConversation, openChat, setPollPaused } = useCRM();
-  const { isReadOnly } = useAuth();
+  const { conversations, patchConversation, openChat, setPollPaused, assignableAgents } = useCRM();
+  const { isReadOnly, user } = useAuth();
+  const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager";
   const isMobile = useIsMobile();
 
   const [view, setView] = useState<"pipeline" | "table">("pipeline");
@@ -679,6 +682,8 @@ export default function PipelinePage() {
   const [auditionDate, setAuditionDate] = useState("");
   const [auditionTime, setAuditionTime] = useState("05:00 PM");
   const [auditionNotes, setAuditionNotes] = useState("");
+  const [auditionBranch, setAuditionBranch] = useState("");
+  const { branchGroups } = useBranches();
   const [isBookingAudition, setIsBookingAudition] = useState(false);
 
   // Periodic refresh every 30s to keep relative timestamps live
@@ -777,12 +782,18 @@ export default function PipelinePage() {
       const ag = l.agent || "Unassigned";
       counts[ag] = (counts[ag] || 0) + 1;
     });
+    // Ensure all assignable team members are visible in options
+    assignableAgents.forEach((a) => {
+      if (counts[a.name] === undefined) {
+        counts[a.name] = 0;
+      }
+    });
     const sorted = Object.keys(counts).sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
     return [
       { label: `Everyone (${leads.length})`, value: "Everyone" },
       ...sorted.map((ag) => ({ label: `${ag} (${counts[ag]})`, value: ag })),
     ];
-  }, [leads]);
+  }, [leads, assignableAgents]);
 
   // Real dynamic source options
   const sourceOptions = useMemo(() => {
@@ -978,6 +989,7 @@ export default function PipelinePage() {
     setAuditionDate(defaultDate);
     setAuditionTime(timeMatch ? timeMatch[0].toUpperCase() : "05:00 PM");
     setAuditionNotes(panelConv?.formAnswers?.instrument || "");
+    setAuditionBranch(panelConv?.branch || "");
     setShowAuditionModal(true);
   }, [panelLead, panelConv]);
 
@@ -991,8 +1003,10 @@ export default function PipelinePage() {
       setFollowUpNote(formattedNote);
       await patchConversation(panelLead.id, {
         pipeline: "Audition Booked",
+        auditionDate: auditionDate,
         followUpDate: auditionDate,
         followUpNote: formattedNote,
+        branch: auditionBranch,
       });
       setShowAuditionModal(false);
     } catch (err) {
@@ -1000,7 +1014,7 @@ export default function PipelinePage() {
     } finally {
       setIsBookingAudition(false);
     }
-  }, [panelLead, isReadOnly, isBookingAudition, auditionDate, auditionTime, auditionNotes, moveLeadToStage, patchConversation]);
+  }, [panelLead, isReadOnly, isBookingAudition, auditionDate, auditionTime, auditionNotes, auditionBranch, moveLeadToStage, patchConversation]);
 
   // Cash In & Follow-up states for side panel
   const [cashVal, setCashVal] = useState<string>("");
@@ -1018,7 +1032,7 @@ export default function PipelinePage() {
       setCashSaved(false);
       setFollowUpSaved(false);
     }
-  }, [panelConv?.id]);
+  }, [panelConv?.id, panelConv?.followUpNote, panelConv?.followUpDate, panelConv?.cashIn]);
 
   const handleSaveCash = useCallback(async () => {
     if (!panelLead || isReadOnly) return;
@@ -1310,17 +1324,23 @@ export default function PipelinePage() {
 
           {/* Content */}
           <div className="p-6 flex-1">
-            {panelLead.stage === "Audition Booked" ? (
+            {(panelLead.stage === "Audition Booked" || panelConv?.auditionOutcome || panelConv?.auditionDate) ? (
               <div
                 className="mb-5 p-3.5 rounded-xl border"
                 style={{
-                  background: 'rgba(52, 199, 89, 0.08)',
-                  borderColor: 'rgba(52, 199, 89, 0.25)',
+                  background: panelConv?.auditionOutcome ? 'var(--bg-pill)' : 'rgba(52, 199, 89, 0.08)',
+                  borderColor: panelConv?.auditionOutcome ? 'var(--border-input)' : 'rgba(52, 199, 89, 0.25)',
                 }}
               >
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-[12px] font-bold flex items-center gap-1.5" style={{ color: '#34C759' }}>
-                    <CheckCircle2 className="w-4 h-4" /> Audition Booked
+                  <span className="text-[12px] font-bold flex items-center gap-1.5" style={{ color: panelConv?.auditionOutcome ? '#0066FF' : '#34C759' }}>
+                    <CheckCircle2 className="w-4 h-4" />
+                    {panelConv?.auditionOutcome === 'registered' && 'Registered'}
+                    {panelConv?.auditionOutcome === 'schedule-followup' && 'Schedule Follow up'}
+                    {panelConv?.auditionOutcome === 'paid-trial' && 'Paid Trial'}
+                    {panelConv?.auditionOutcome === 'joining-later' && 'Joining Later'}
+                    {panelConv?.auditionOutcome === 'no-show' && 'No Show'}
+                    {!panelConv?.auditionOutcome && 'Audition Booked'}
                   </span>
                   <Link
                     href="/auditions"
@@ -1330,10 +1350,17 @@ export default function PipelinePage() {
                     Calendar →
                   </Link>
                 </div>
-                {(followUpDate || panelConv?.followUpDate) && (
+                {(panelConv?.auditionDate || followUpDate || panelConv?.followUpDate) && (
                   <p className="text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>
-                    📅 {followUpDate || panelConv?.followUpDate} {(followUpNote || panelConv?.followUpNote) ? `· ${followUpNote || panelConv?.followUpNote}` : ''}
+                    📅 {panelConv?.auditionDate || followUpDate || panelConv?.followUpDate}
                   </p>
+                )}
+                {panelConv?.branch && (
+                  <div className="mt-1.5 flex items-center">
+                    <span className="text-[11px] font-bold px-2 py-0.5 rounded-md" style={{ color: '#0066FF', background: 'rgba(0, 102, 255, 0.1)', border: '1px solid rgba(0, 102, 255, 0.25)' }}>
+                      📍 {panelConv.branch}
+                    </span>
+                  </div>
                 )}
                 {!isReadOnly && (
                   <button
@@ -1375,19 +1402,29 @@ export default function PipelinePage() {
               <div className="flex gap-3">
                 <div className="flex-1">
                   <label className="text-[11px] block mb-1" style={{ color: 'var(--text-secondary)' }}>Assigned to</label>
-                  <select
-                    disabled={isReadOnly}
-                    value={panelLead.agent || "Unassigned"}
-                    onChange={(e) => patchConversation(panelLead.id, { agent: e.target.value })}
-                    className="w-full rounded-[6px] text-[13px] py-1.5 px-2 outline-none disabled:opacity-60 cursor-pointer"
-                    style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
-                  >
-                    {agentOptions.map((opt) => (
-                      <option key={opt.value} value={opt.value === "Everyone" ? "Unassigned" : opt.value}>
-                        {opt.value === "Everyone" ? "Unassigned" : opt.label.replace(/\s*\(\d+\)$/, "")}
-                      </option>
-                    ))}
-                  </select>
+                  {(() => {
+                    const canEditPanelAgent = !isReadOnly && isChairman;
+                    return (
+                      <select
+                        disabled={!canEditPanelAgent}
+                        title={!canEditPanelAgent ? "Only Chairman can assign agents" : undefined}
+                        value={panelLead.agent || "Unassigned"}
+                        onChange={(e) => patchConversation(panelLead.id, { agent: e.target.value })}
+                        className="w-full rounded-[6px] text-[13px] py-1.5 px-2 outline-none disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed"
+                        style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
+                      >
+                        <option value="Unassigned">Unassigned</option>
+                        {panelLead.agent && panelLead.agent !== "Unassigned" && !assignableAgents.some(a => a.name === panelLead.agent) && (
+                          <option value={panelLead.agent}>{panelLead.agent}</option>
+                        )}
+                        {assignableAgents.map((a) => (
+                          <option key={a.name} value={a.name}>
+                            {a.name}
+                          </option>
+                        ))}
+                      </select>
+                    );
+                  })()}
                 </div>
                 <div className="flex-1">
                   <label className="text-[11px] block mb-1" style={{ color: 'var(--text-secondary)' }}>Stage</label>
@@ -1510,7 +1547,7 @@ export default function PipelinePage() {
           onClick={() => !isBookingAudition && setShowAuditionModal(false)}
         >
           <div
-            className="w-full max-w-[440px] rounded-2xl p-6 shadow-2xl relative border animate-in fade-in zoom-in-95 duration-150 flex flex-col gap-4"
+            className="w-full max-w-[440px] rounded-2xl p-6 shadow-2xl relative border animate-in fade-in zoom-in-95 duration-150 flex flex-col gap-4 max-h-[90vh] overflow-y-auto"
             style={{
               background: 'var(--bg-card)',
               borderColor: 'var(--border-main)',
@@ -1538,6 +1575,17 @@ export default function PipelinePage() {
             </div>
 
             <div className="flex flex-col gap-3.5">
+              <div>
+                <label className="text-[12px] font-bold mb-1 block" style={{ color: 'var(--text-primary)' }}>
+                  Branch *
+                </label>
+                <BranchSelect
+                  value={auditionBranch}
+                  onChange={setAuditionBranch}
+                  branchGroups={branchGroups}
+                />
+              </div>
+
               <div>
                 <label className="text-[12px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>
                   Audition Date *
@@ -1590,7 +1638,7 @@ export default function PipelinePage() {
             <div className="flex items-center gap-2 pt-2">
               <button
                 type="button"
-                disabled={isBookingAudition || !auditionDate}
+                disabled={isBookingAudition || !auditionDate || !auditionBranch}
                 onClick={handleConfirmBooking}
                 className="flex-1 h-[40px] text-[13px] font-semibold text-white rounded-xl cursor-pointer hover:bg-[#0055d4] transition-colors disabled:opacity-50"
                 style={{ background: '#0066FF' }}

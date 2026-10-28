@@ -11,6 +11,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Calendar,
+  X,
 } from 'lucide-react';
 
 type CampaignStats = {
@@ -62,6 +63,7 @@ function getWeekEnd(start: Date) {
 
 export default function ReportsPage() {
   const { conversations, loading } = useCRM();
+  const [showCashBreakdown, setShowCashBreakdown] = useState(false);
 
   // Filter state
   const [filterMode, setFilterMode] = useState<'week' | 'all'>('all');
@@ -126,6 +128,7 @@ export default function ReportsPage() {
     attendedPct,
     enrolledPct,
     campaignRows,
+    cashBreakdownList,
   } = useMemo(() => {
     const total = filteredConversations.length;
     const booked = filteredConversations.filter(c => ['Audition Booked', 'Attended', 'Enrolled'].includes(c.pipeline)).length;
@@ -137,6 +140,17 @@ export default function ReportsPage() {
     const aPct = booked > 0 ? `${Math.round((att / booked) * 100)}%` : '0%';
     const ePct = total > 0 ? `${Math.round((enr / total) * 100)}%` : '0%';
     const avgCash = enr > 0 ? Math.round(totalCash / enr) : 0;
+
+    // Build cash breakdown list (who paid and how much)
+    const breakdown = filteredConversations
+      .filter(c => (Number(c.cashIn) || 0) > 0)
+      .map(c => ({
+        name: c.name || c.phone || c.id,
+        phone: c.phone || '',
+        pipeline: c.pipeline,
+        cashIn: Number(c.cashIn) || 0,
+      }))
+      .sort((a, b) => b.cashIn - a.cashIn);
 
     // Aggregate by campaign
     const campaignMap: Record<string, CampaignStats> = {};
@@ -166,7 +180,7 @@ export default function ReportsPage() {
       if (['Audition Booked', 'Attended', 'Enrolled'].includes(c.pipeline)) entry.booked += 1;
       if (['Attended', 'Enrolled'].includes(c.pipeline)) entry.attended += 1;
       if (c.pipeline === 'Enrolled') entry.enrolled += 1;
-      if (c.pipeline === 'Lost') entry.unqualified += 1;
+      if (c.pipeline === 'Lost' || c.pipeline === 'Unqualified') entry.unqualified += 1;
       entry.cashIn += Number(c.cashIn) || 0;
     });
 
@@ -183,6 +197,7 @@ export default function ReportsPage() {
       attendedPct: aPct,
       enrolledPct: ePct,
       campaignRows: rows,
+      cashBreakdownList: breakdown,
     };
   }, [filteredConversations]);
 
@@ -356,6 +371,8 @@ export default function ReportsPage() {
             subValue={avgCashPerEnrolled > 0 ? avgCashPerEnrolled.toLocaleString() : undefined}
             subLabel={avgCashPerEnrolled > 0 ? "avg / enrolled" : undefined}
             icon={<Banknote className="w-4 h-4 text-emerald-500" />}
+            onClick={() => setShowCashBreakdown(true)}
+            clickHint="View breakdown"
           />
         </div>
 
@@ -422,25 +439,136 @@ export default function ReportsPage() {
           </div>
         </div>
       </div>
+
+      {/* Cash Breakdown Modal */}
+      {showCashBreakdown && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+          onClick={() => setShowCashBreakdown(false)}
+        >
+          {/* Backdrop */}
+          <div className="absolute inset-0" style={{ background: 'rgba(0,0,0,0.35)' }} />
+
+          {/* Modal */}
+          <div
+            className="relative w-full sm:max-w-[540px] max-h-[85vh] flex flex-col rounded-t-2xl sm:rounded-xl overflow-hidden"
+            style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)', boxShadow: 'var(--shadow-card)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="px-5 py-3.5 flex items-center justify-between shrink-0" style={{ borderBottom: '1px solid var(--border-main)' }}>
+              <div>
+                <h2 className="text-[14px] font-bold" style={{ color: 'var(--text-primary)' }}>Cash In Breakdown</h2>
+                <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                  {cashBreakdownList.length} payment{cashBreakdownList.length !== 1 ? 's' : ''} · Total: <strong style={{ color: 'var(--text-primary)' }}>{totalCashIn.toLocaleString()} SAR</strong>
+                </p>
+              </div>
+              <button
+                onClick={() => setShowCashBreakdown(false)}
+                className="h-7 w-7 flex items-center justify-center rounded-md transition-colors cursor-pointer"
+                style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)', border: '1px solid var(--border-input)' }}
+                aria-label="Close"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="flex-1 overflow-y-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
+              {cashBreakdownList.length === 0 ? (
+                <div className="p-8 text-center">
+                  <Banknote className="w-7 h-7 mx-auto mb-2" style={{ color: 'var(--text-muted)' }} />
+                  <p className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>No payments recorded yet</p>
+                </div>
+              ) : (
+                <div className="divide-y" style={{ borderColor: 'var(--border-main)' }}>
+                  {cashBreakdownList.map((entry, idx) => (
+                    <div
+                      key={`${entry.name}-${idx}`}
+                      className="px-5 py-2.5 flex items-center justify-between gap-3"
+                      style={{ background: idx % 2 === 0 ? 'transparent' : 'var(--bg-table-alt)' }}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div
+                          className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold"
+                          style={{ background: 'var(--bg-selected)', color: '#0066FF' }}
+                        >
+                          {(entry.name || '?').charAt(0).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-[12px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{entry.name}</p>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            {entry.phone && (
+                              <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{entry.phone}</span>
+                            )}
+                            <span
+                              className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded"
+                              style={{
+                                background: 'var(--bg-selected)',
+                                color: '#0066FF',
+                              }}
+                            >
+                              {entry.pipeline}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      <span className="text-[13px] font-bold shrink-0" style={{ color: 'var(--text-primary)' }}>
+                        {entry.cashIn.toLocaleString()} <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>SAR</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            {cashBreakdownList.length > 0 && (
+              <div
+                className="px-5 py-3 flex items-center justify-between shrink-0"
+                style={{ borderTop: '1px solid var(--border-main)', background: 'var(--bg-table-header)' }}
+              >
+                <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-secondary)' }}>Total</span>
+                <span className="text-[14px] font-extrabold" style={{ color: 'var(--text-primary)' }}>
+                  {totalCashIn.toLocaleString()} <span className="text-[11px] font-semibold" style={{ color: 'var(--text-secondary)' }}>SAR</span>
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function KpiCard({ title, value, subValue, subLabel, icon }: { title: string; value: string; subValue?: string; subLabel?: string; icon?: React.ReactNode }) {
+function KpiCard({ title, value, subValue, subLabel, icon, onClick, clickHint }: { title: string; value: string; subValue?: string; subLabel?: string; icon?: React.ReactNode; onClick?: () => void; clickHint?: string }) {
+  const Wrapper = onClick ? 'button' : 'div';
   return (
-    <div className="rounded-xl p-4 flex flex-col justify-between h-[90px] shadow-sm transition hover:shadow-md" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}>
+    <Wrapper
+      className={`rounded-xl p-4 flex flex-col justify-between h-[90px] shadow-sm transition hover:shadow-md text-left w-full${
+        onClick ? ' cursor-pointer hover:ring-2 hover:ring-emerald-500/30 active:scale-[0.98]' : ''
+      }`}
+      style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+      onClick={onClick}
+      title={clickHint}
+    >
       <div className="flex items-center justify-between">
         <h3 className="text-[11px] font-semibold" style={{ color: 'var(--text-secondary)' }}>{title}</h3>
         {icon}
       </div>
       <div className="flex items-baseline justify-between mt-1">
         <span className="text-[24px] font-extrabold leading-none" style={{ color: 'var(--text-primary)' }}>{value}</span>
-        {subValue && (
-          <span className="text-[11px] font-medium text-[#0066FF] flex items-center gap-1">
-            {subValue} <span className="text-[10px]" style={{ color: 'var(--text-secondary)' }}>{subLabel}</span>
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {subValue && (
+            <span className="text-[11px] font-medium text-[#0066FF] flex items-center gap-1">
+              {subValue} <span className="text-[10px]" style={{ color: 'var(--text-secondary)' }}>{subLabel}</span>
+            </span>
+          )}
+          {clickHint && (
+            <span className="text-[9px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>▸ Details</span>
+          )}
+        </div>
       </div>
-    </div>
+    </Wrapper>
   );
 }

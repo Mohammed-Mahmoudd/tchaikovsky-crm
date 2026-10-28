@@ -3,6 +3,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { ArrowLeft, Info, X, Calendar, CheckCircle2 } from "lucide-react";
+import { useBranches } from "./lib/branches";
+import { BranchSelect } from "./components/BranchSelect";
 
 type Channel = "WA" | "IG" | "FB";
 
@@ -48,6 +50,105 @@ type Conversation = {
 import { useCRM } from "./context/CRMContext";
 import { useAuth } from "./components/AuthProvider";
 import { formatLastMessageTime } from "./utils/time";
+import MessageTemplate, { parseTemplateAttachment } from "./components/MessageTemplate";
+import InstagramMedia from "./components/InstagramMedia";
+
+const isPlaceholderText = (text?: string) => {
+  if (!text) return true;
+  const s = text.trim();
+  const lower = s.toLowerCase();
+  return (
+    s === "📋 [Form / Template]" ||
+    s === "[Form / Template]" ||
+    s === "Form / Template" ||
+    s === "Template" ||
+    s.startsWith("📋 [") ||
+    s === "📋" ||
+    lower === "shared post/reel" ||
+    lower === "[shared post/reel]" ||
+    lower === "🔗 [shared post/reel]" ||
+    lower.includes("shared post/reel") ||
+    lower === "photo" ||
+    lower === "[photo]" ||
+    lower === "📷 [photo]" ||
+    lower === "voice message" ||
+    lower === "[voice message]" ||
+    lower === "🎤 [voice message]" ||
+    lower === "video" ||
+    lower === "[video]" ||
+    lower === "🎥 [video]" ||
+    lower === "file" ||
+    lower === "[file]" ||
+    lower === "📎 [file]" ||
+    lower === "attachment" ||
+    lower === "[attachment]"
+  );
+};
+
+const isRealPhone = (p?: string): boolean => {
+  if (!p) return false;
+  const s = p.trim().toLowerCase();
+  if (s.startsWith("live ") || s === "live") return false;
+  const digits = p.replace(/[^\d]/g, "");
+  return digits.length >= 7;
+};
+
+const extractPhoneFromConversation = (conv?: any | null): string => {
+  if (!conv) return "";
+  if (isRealPhone(conv.phone)) return conv.phone;
+  if (conv.formAnswers && isRealPhone((conv.formAnswers as any).phone)) {
+    return (conv.formAnswers as any).phone;
+  }
+  for (const m of conv.messages || []) {
+    if (!m.text) continue;
+    const match = m.text.match(/(?:phone|mobile|tel|رقم|هاتف|جوال|واتس)?[:\s]*(\+?966[\d\s-]{8,}|05[\d\s-]{8,})/i);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+    const digitMatch = m.text.match(/\b(05\d[\d\s-]{6,}\d|\+?966[\d\s-]{7,}\d)\b/);
+    if (digitMatch && digitMatch[1]) {
+      return digitMatch[1].trim();
+    }
+    const genMatch = m.text.match(/(?:^|\s)(?:\+?\d{1,3}[\s-]?)?\(?\d{2,4}\)?[\s-]?\d{3,4}[\s-]?\d{3,4}(?:\s|$)/);
+    if (genMatch && genMatch[0].replace(/[^\d]/g, "").length >= 7) {
+      return genMatch[0].trim();
+    }
+  }
+  return "";
+};
+
+const isTemplateAttachment = (att: any) =>
+  Boolean(
+    att && (
+      att.type === "template" ||
+      att.payload?.template_type ||
+      Boolean(att.payload?.generic) ||
+      Boolean(att.payload?.button) ||
+      Boolean(att.payload?.elements) ||
+      Boolean(att.elements) ||
+      att.type === "fallback"
+    )
+  );
+
+const PIPELINE_STAGES = [
+  "New",
+  "Contacted",
+  "Audition Booked",
+  "Attended",
+  "Enrolled",
+  "Unqualified",
+  "Lost",
+] as const;
+
+const PIPELINE_STAGE_COLORS: Record<string, string> = {
+  "New": "#007AFF",
+  "Contacted": "#5856D6",
+  "Audition Booked": "#FF9500",
+  "Attended": "#34C759",
+  "Enrolled": "#30D158",
+  "Unqualified": "#8E8E93",
+  "Lost": "#FF3B30",
+};
 
 type MobileView = "list" | "chat" | "details";
 
@@ -57,7 +158,7 @@ export default function InboxPage() {
   const [showDetailsPanel, setShowDetailsPanel] = useState(false);
   const [replyText, setReplyText] = useState("");
   const [isSending, setIsSending] = useState(false);
-  const { isReadOnly } = useAuth();
+  const { isReadOnly, user, token } = useAuth();
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -67,6 +168,7 @@ export default function InboxPage() {
     conversations,
     activeChatId,
     setActiveChatId,
+    assignableAgents,
     patchConversation,
     markConversationAsRead,
     refresh,
@@ -92,7 +194,7 @@ export default function InboxPage() {
   // ── Filter logic ──────────────────────────────────────────────────
   const filteredConversations = conversations.filter((conv) => {
     if (activeFilter === "All") return true;
-    if (activeFilter === "Mine") return conv.agent === "Jwana";
+    if (activeFilter === "Mine") return conv.agent === user?.name;
     if (activeFilter === "Unassigned") return conv.agent === "Unassigned";
     if (activeFilter === "Open") return conv.status === "Open";
     if (activeFilter === "Resolved") return conv.status === "Resolved";
@@ -102,11 +204,22 @@ export default function InboxPage() {
   // Use activeChatId directly — no duplicate local state
   const activeConv = conversations.find((c) => c.id === activeChatId);
 
+  // ── Assignment & Permission Logic ─────────────────────────────────
+  const userClean = (user?.name || "").trim().toLowerCase();
+  const agentClean = (activeConv?.agent || "").trim().toLowerCase();
+  const isAssigned = !!agentClean && agentClean !== "unassigned";
+  const isAssignedToMe = isAssigned && !!userClean && userClean === agentClean;
+  const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager";
+  const isAssignedToOther = isAssigned && !isAssignedToMe;
+  const canSendMessages = !isReadOnly && (!isAssignedToOther || isChairman);
+
   // Audition booking modal state
   const [showAuditionModal, setShowAuditionModal] = useState(false);
   const [auditionDate, setAuditionDate] = useState("");
   const [auditionTime, setAuditionTime] = useState("05:00 PM");
   const [auditionNotes, setAuditionNotes] = useState("");
+  const [auditionBranch, setAuditionBranch] = useState("");
+  const { branchGroups } = useBranches();
   const [isBookingAudition, setIsBookingAudition] = useState(false);
 
   const handleOpenBookingModal = () => {
@@ -117,6 +230,7 @@ export default function InboxPage() {
     setAuditionDate(defaultDate);
     setAuditionTime(timeMatch ? timeMatch[0].toUpperCase() : "05:00 PM");
     setAuditionNotes(activeConv.formAnswers?.instrument || "");
+    setAuditionBranch(activeConv.branch || "");
     setShowAuditionModal(true);
   };
 
@@ -127,8 +241,10 @@ export default function InboxPage() {
       const formattedNote = `${auditionTime}${auditionNotes ? ` · ${auditionNotes}` : ""}`;
       await patchConversation(activeConv.id, {
         pipeline: "Audition Booked",
+        auditionDate: auditionDate,
         followUpDate: auditionDate,
         followUpNote: formattedNote,
+        branch: auditionBranch,
       });
       setShowAuditionModal(false);
     } catch (err) {
@@ -155,17 +271,24 @@ export default function InboxPage() {
   }, [activeChatId, activeConv?.messages?.length]);
 
   const handleSendReply = async () => {
-    if (isReadOnly || !replyText.trim() || !activeConv) return;
+    if (isReadOnly || !replyText.trim() || !activeConv || !canSendMessages) return;
     setIsSending(true);
     try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
       const res = await fetch(`/api/messages/${activeConv.id}/reply`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ text: replyText, channel: activeConv.channel }),
       });
       if (res.ok) {
         setReplyText("");
         refresh();
+      } else {
+        const data = await res.json().catch(() => null);
+        if (data?.error) {
+          alert(data.error);
+        }
       }
     } catch (err) {
       console.error("Failed to send reply:", err);
@@ -329,14 +452,20 @@ export default function InboxPage() {
                 {/* Dropdowns — hidden on small mobile, shown on sm+ */}
                 <div className="hidden sm:flex items-center gap-2">
                   <select
+                    disabled={isReadOnly || !isChairman}
+                    title={!isChairman ? "Only Chairman can assign agents" : undefined}
                     value={activeConv.agent}
                     onChange={(e) => patchConversation(activeConv.id, { agent: e.target.value })}
-                    className="rounded-[6px] text-[12px] py-1 px-2 outline-none"
+                    className="rounded-[6px] text-[12px] py-1 px-2 outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                     style={{ border: "1px solid var(--border-input)", color: "var(--text-primary)", background: "var(--bg-input)" }}
                   >
                     <option value="Unassigned">Unassigned</option>
-                    <option value="Sara">Sara</option>
-                    <option value="Rokaia">Rokaia</option>
+                    {activeConv.agent && activeConv.agent !== "Unassigned" && !assignableAgents.some(a => a.name === activeConv.agent) && (
+                      <option value={activeConv.agent}>{activeConv.agent}</option>
+                    )}
+                    {assignableAgents.map(a => (
+                      <option key={a.name} value={a.name}>{a.name}</option>
+                    ))}
                   </select>
                   <select
                     value={activeConv.status}
@@ -363,70 +492,177 @@ export default function InboxPage() {
 
             {/* Chat Messages */}
             <div className="flex-1 overflow-y-auto p-4 md:p-6 flex flex-col gap-4">
-              {activeConv.messages.map((msg) => (
-                <div key={msg.id} className={`flex ${msg.isIncoming ? "justify-start" : "justify-end"}`}>
-                  <div
-                    className={`max-w-[85%] md:max-w-[70%] rounded-2xl px-4 py-3 ${msg.isIncoming ? "rounded-tl-sm" : "rounded-tr-sm"
-                      }`}
-                    style={{
-                      background: msg.isIncoming ? "var(--bg-chat-incoming)" : "var(--bg-chat-outgoing)",
-                      border: msg.isIncoming ? "1px solid var(--border-main)" : "none",
-                      boxShadow: "var(--shadow-card)",
-                    }}
-                  >
-                    {msg.attachments && msg.attachments.length > 0 && (
-                      <div className="flex flex-col gap-2 mb-1.5">
-                        {msg.attachments.map((att: any, idx: number) => {
-                          const url = att.payload?.url || att.url;
-                          if (att.type === 'image' && url) {
-                            return (
-                              <img
-                                key={idx}
-                                src={url}
-                                alt="Attachment"
-                                className="max-w-full rounded-lg max-h-60 object-cover"
-                              />
-                            );
-                          }
-                          if (att.type === 'audio' && url) {
-                            return (
-                              <audio key={idx} controls className="max-w-full my-1">
-                                <source src={url} />
-                              </audio>
-                            );
-                          }
-                          return null;
-                        })}
-                      </div>
-                    )}
-                    {msg.text && (
-                      <p
-                        className={`text-[14px] md:text-[15px] leading-relaxed ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
-                        style={{ color: msg.isIncoming ? "var(--text-chat-incoming)" : "var(--text-chat-outgoing)" }}
-                        dir={msg.dir}
+              {(() => {
+                const convPhone = extractPhoneFromConversation(activeConv);
+                return activeConv.messages.map((msg) => {
+                  const hasTemplateAttachment = (msg.attachments || []).some(isTemplateAttachment);
+                  const hasSharedPostAttachment = (msg.attachments || []).some(
+                    (a: any) => a.type === "ig_post" || a.type === "ig_reel" || a.type === "share"
+                  );
+                  const hasMediaAttachment = (msg.attachments || []).some(
+                    (a: any) => ["image", "audio", "video", "ig_post", "ig_reel", "share"].includes(a.type)
+                  );
+                  const shouldRenderFallbackCard = !hasTemplateAttachment && !hasMediaAttachment && isPlaceholderText(msg.text);
+
+                  let showPlainText = Boolean(msg.text && !isPlaceholderText(msg.text));
+                  if (hasSharedPostAttachment && msg.text) {
+                    const lowerText = msg.text.trim().toLowerCase();
+                    if (
+                      lowerText === "shared post/reel" ||
+                      lowerText === "[shared post/reel]" ||
+                      lowerText === "🔗 [shared post/reel]" ||
+                      lowerText.includes("shared post/reel")
+                    ) {
+                      showPlainText = false;
+                    }
+                  }
+                  if (showPlainText && hasTemplateAttachment) {
+                    const firstTemplateAtt = msg.attachments?.find(isTemplateAttachment);
+                    const parsed = parseTemplateAttachment(firstTemplateAtt, msg.isIncoming, convPhone);
+                    if (parsed.length > 0 && parsed[0].title.trim() === msg.text.trim()) {
+                      showPlainText = false;
+                    }
+                  }
+
+                  return (
+                    <div key={msg.id} className={`flex ${msg.isIncoming ? "justify-start" : "justify-end"}`}>
+                      <div
+                        className={`${
+                          hasTemplateAttachment || shouldRenderFallbackCard || hasSharedPostAttachment
+                            ? "max-w-[88%] sm:max-w-[300px] p-2 sm:p-2.5"
+                            : "max-w-[85%] md:max-w-[70%] px-4 py-3"
+                        } rounded-2xl ${
+                          msg.isIncoming ? "rounded-tl-sm" : "rounded-tr-sm"
+                        }`}
+                        style={{
+                          background: msg.isIncoming ? "var(--bg-chat-incoming)" : "var(--bg-chat-outgoing)",
+                          border: msg.isIncoming ? "1px solid var(--border-main)" : "none",
+                          boxShadow: "var(--shadow-card)",
+                        }}
                       >
-                        {msg.text}
-                      </p>
-                    )}
-                    <div
-                      className={`text-[10px] mt-1.5 ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
-                      style={{ color: msg.isIncoming ? "var(--text-muted)" : "var(--text-chat-outgoing)", opacity: msg.isIncoming ? 1 : 0.6 }}
-                    >
-                      {!msg.isIncoming && msg.isRead && "✓✓ "}
-                      {msg.time}
+                        {/* Media attachments (photos, voice notes, video) */}
+                        {msg.attachments && msg.attachments.length > 0 && (
+                          <div className="flex flex-col gap-2 mb-1.5">
+                            {msg.attachments.map((att: any, idx: number) => {
+                              if (isTemplateAttachment(att)) return null;
+                              const url = att.payload?.url || att.url;
+                              if (att.type === "image" && url) {
+                                return (
+                                  <img
+                                    key={idx}
+                                    src={url}
+                                    alt="Attachment"
+                                    className="max-w-full rounded-lg max-h-60 object-cover"
+                                  />
+                                );
+                              }
+                              if (att.type === "audio" && url) {
+                                return (
+                                  <audio key={idx} controls className="max-w-full my-1">
+                                    <source src={url} />
+                                  </audio>
+                                );
+                              }
+                              if (att.type === "video" && url) {
+                                return (
+                                  <video key={idx} controls className="max-w-full rounded-lg max-h-60 my-1">
+                                    <source src={url} />
+                                  </video>
+                                );
+                              }
+                              if (
+                                att.type === "ig_post" ||
+                                att.type === "ig_reel" ||
+                                att.type === "share"
+                              ) {
+                                return (
+                                  <InstagramMedia
+                                    key={idx}
+                                    url={att.payload?.url || att.url}
+                                    title={att.payload?.title || att.title}
+                                    type={att.type}
+                                    mediaId={att.payload?.ig_post_media_id}
+                                  />
+                                );
+                              }
+                              return null;
+                            })}
+                          </div>
+                        )}
+
+                        {/* Text content (e.g. form comments or lead message) */}
+                        {showPlainText && (
+                          <p
+                            className={`text-[14px] md:text-[15px] leading-relaxed ${
+                              hasTemplateAttachment || shouldRenderFallbackCard ? "mb-3" : ""
+                            } ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
+                            style={{ color: msg.isIncoming ? "var(--text-chat-incoming)" : "var(--text-chat-outgoing)" }}
+                            dir={msg.dir}
+                          >
+                            {msg.text}
+                          </p>
+                        )}
+
+                        {/* Template card attachments */}
+                        {hasTemplateAttachment && (
+                          <div className="flex flex-col gap-2.5">
+                            {msg.attachments
+                              ?.filter(isTemplateAttachment)
+                              .map((att: any, idx: number) => (
+                                <MessageTemplate
+                                  key={idx}
+                                  attachment={att}
+                                  isIncoming={msg.isIncoming}
+                                  senderPhone={convPhone}
+                                />
+                              ))}
+                          </div>
+                        )}
+
+                        {/* Graceful fallback card for legacy messages that stored placeholder text */}
+                        {shouldRenderFallbackCard && (
+                          <MessageTemplate
+                            attachment={{
+                              type: "template",
+                            }}
+                            isIncoming={msg.isIncoming}
+                            senderPhone={convPhone}
+                          />
+                        )}
+
+                        <div
+                          className={`text-[10px] mt-1.5 ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
+                          style={{ color: msg.isIncoming ? "var(--text-muted)" : "var(--text-chat-outgoing)", opacity: msg.isIncoming ? 1 : 0.6 }}
+                        >
+                          {!msg.isIncoming && msg.isRead && "✓✓ "}
+                          {msg.time}
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                </div>
-              ))}
+                  );
+                });
+              })()}
               <div ref={messagesEndRef} />
             </div>
 
             {/* Chat Input */}
             <div className="px-4 md:px-6 py-4 shrink-0" style={{ background: "var(--bg-card)", borderTop: "1px solid var(--border-main)" }}>
-              {activeConv.agent !== "Unassigned" && (
-                <p className="text-[10px] text-[#FF9500] font-medium mb-2">
-                  Assigned to {activeConv.agent}. Sending here will jump into their conversation.
-                </p>
+              {isAssignedToOther && (
+                <div
+                  className="rounded-[8px] px-3 py-2 text-[11px] mb-2.5 flex items-center gap-2"
+                  style={{
+                    background: isChairman ? "rgba(255, 149, 0, 0.08)" : "rgba(255, 59, 48, 0.08)",
+                    border: `1px solid ${isChairman ? "rgba(255, 149, 0, 0.25)" : "rgba(255, 59, 48, 0.25)"}`,
+                    color: isChairman ? "#FF9500" : "#FF3B30",
+                  }}
+                >
+                  <span className="text-[13px]">{isChairman ? "⚠️" : "🔒"}</span>
+                  <span className="font-medium">
+                    {isChairman
+                      ? `Assigned to ${activeConv.agent}. Sending here will jump into their conversation.`
+                      : `Assigned to ${activeConv.agent}`}
+                  </span>
+                </div>
               )}
               {activeConv.windowLeft === "Closed" ? (
                 <div
@@ -441,15 +677,21 @@ export default function InboxPage() {
                     type="text"
                     value={replyText}
                     onChange={(e) => setReplyText(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleSendReply()}
-                    placeholder={isReadOnly ? "View-only mode (Marketing role)" : "Type a reply..."}
+                    onKeyDown={(e) => e.key === "Enter" && canSendMessages && handleSendReply()}
+                    placeholder={
+                      isReadOnly
+                        ? "View-only mode (Marketing role)"
+                        : !canSendMessages
+                          ? `Assigned to ${activeConv.agent}`
+                          : "Type a reply..."
+                    }
                     className="flex-1 rounded-[8px] px-3 py-2 text-[13px] outline-none placeholder-gray-400 transition-colors focus:border-[#0066FF] disabled:opacity-60"
                     style={{ border: "1px solid var(--border-main)", background: "var(--bg-input)", color: "var(--text-primary)" }}
-                    disabled={isSending || isReadOnly}
+                    disabled={isSending || isReadOnly || !canSendMessages}
                   />
                   <button
                     onClick={handleSendReply}
-                    disabled={isSending || isReadOnly || !replyText.trim()}
+                    disabled={isSending || isReadOnly || !canSendMessages || !replyText.trim()}
                     className="bg-[#0066FF] disabled:bg-[#78B4F9] text-white font-semibold text-[13px] px-4 rounded-[8px] shrink-0 transition-colors"
                   >
                     {isSending ? "Sending..." : "Send"}
@@ -542,41 +784,85 @@ export default function InboxPage() {
             </div>
 
             <div className="mb-5">
-              <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Pipeline</h3>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase">Pipeline</h3>
+                {activeConv.pipeline !== "direct" && (
+                  <span
+                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold transition-all"
+                    style={{
+                      backgroundColor: `${PIPELINE_STAGE_COLORS[activeConv.pipeline] || "#8E8E93"}18`,
+                      color: PIPELINE_STAGE_COLORS[activeConv.pipeline] || "#8E8E93",
+                      border: `1px solid ${PIPELINE_STAGE_COLORS[activeConv.pipeline] || "#8E8E93"}35`,
+                    }}
+                  >
+                    <span
+                      className="w-1.5 h-1.5 rounded-full"
+                      style={{
+                        backgroundColor: PIPELINE_STAGE_COLORS[activeConv.pipeline] || "#8E8E93",
+                      }}
+                    />
+                    {activeConv.pipeline}
+                  </span>
+                )}
+              </div>
               {activeConv.pipeline === "direct" ? (
-                <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
-                  No lead record — this contact messaged directly.
-                </p>
+                <div className="rounded-[6px] p-2.5 space-y-1.5" style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)" }}>
+                  <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
+                    No lead record — this contact messaged directly.
+                  </p>
+                  {!isReadOnly && (
+                    <button
+                      type="button"
+                      onClick={() => patchConversation(activeConv.id, { pipeline: "New" })}
+                      className="text-[11px] font-semibold text-[#0066FF] hover:underline cursor-pointer flex items-center gap-1"
+                    >
+                      + Add to pipeline
+                    </button>
+                  )}
+                </div>
               ) : (
                 <select
                   disabled={isReadOnly}
                   value={activeConv.pipeline}
                   onChange={(e) => patchConversation(activeConv.id, { pipeline: e.target.value })}
-                  className="w-full rounded-[6px] text-[12px] py-1.5 px-2 outline-none disabled:opacity-60"
-                  style={{ border: "1px solid var(--border-input)", background: "var(--bg-input)", color: "var(--text-primary)" }}
+                  className="w-full rounded-[6px] text-[12px] py-1.5 px-2 outline-none disabled:opacity-60 cursor-pointer font-medium transition-colors"
+                  style={{
+                    border: "1px solid var(--border-input)",
+                    background: "var(--bg-input)",
+                    color: "var(--text-primary)",
+                  }}
                 >
-                  <option value="New">New</option>
-                  <option value="Contacted">Contacted</option>
-                  <option value="Audition Booked">Audition Booked</option>
-                  <option value="Enrolled">Enrolled</option>
-                  <option value="Lost">Lost</option>
+                  {PIPELINE_STAGES.map((stage) => (
+                    <option key={stage} value={stage}>
+                      {stage}
+                    </option>
+                  ))}
+                  {!PIPELINE_STAGES.includes(activeConv.pipeline as any) && (
+                    <option value={activeConv.pipeline}>{activeConv.pipeline}</option>
+                  )}
                 </select>
               )}
             </div>
 
             <div className="mb-5">
               <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Audition</h3>
-              {activeConv.pipeline === "Audition Booked" ? (
+              {(activeConv.pipeline === "Audition Booked" || activeConv.auditionOutcome || activeConv.auditionDate) ? (
                 <div
                   className="p-3 rounded-lg border mb-2"
                   style={{
-                    background: 'rgba(52, 199, 89, 0.08)',
-                    borderColor: 'rgba(52, 199, 89, 0.25)',
+                    background: activeConv.auditionOutcome ? 'var(--bg-pill)' : 'rgba(52, 199, 89, 0.08)',
+                    borderColor: activeConv.auditionOutcome ? 'var(--border-input)' : 'rgba(52, 199, 89, 0.25)',
                   }}
                 >
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-[11px] font-bold flex items-center gap-1" style={{ color: '#34C759' }}>
-                      <CheckCircle2 className="w-3.5 h-3.5" /> Booked
+                    <span className="text-[11px] font-bold flex items-center gap-1" style={{ color: activeConv.auditionOutcome ? '#0066FF' : '#34C759' }}>
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      {activeConv.auditionOutcome === 'registered' && 'Registered'}
+                      {activeConv.auditionOutcome === 'schedule-followup' && 'Schedule Follow up'}
+                      {activeConv.auditionOutcome === 'paid-trial' && 'Paid Trial'}
+                      {activeConv.auditionOutcome === 'joining-later' && 'Joining Later'}
+                      {activeConv.auditionOutcome === 'no-show' && 'No Show'}
+                      {!activeConv.auditionOutcome && 'Audition Booked'}
                     </span>
                     <Link
                       href="/auditions"
@@ -585,10 +871,17 @@ export default function InboxPage() {
                       <Calendar className="w-3 h-3" /> Calendar →
                     </Link>
                   </div>
-                  {activeConv.followUpDate && (
+                  {(activeConv.auditionDate || activeConv.followUpDate) && (
                     <p className="text-[11px] font-medium" style={{ color: 'var(--text-primary)' }}>
-                      📅 {activeConv.followUpDate} {activeConv.followUpNote ? `· ${activeConv.followUpNote}` : ''}
+                      📅 {activeConv.auditionDate || activeConv.followUpDate}
                     </p>
+                  )}
+                  {activeConv.branch && (
+                    <div className="mt-1.5 flex items-center">
+                      <span className="text-[11px] font-bold px-2 py-0.5 rounded-md" style={{ color: '#0066FF', background: 'rgba(0, 102, 255, 0.1)', border: '1px solid rgba(0, 102, 255, 0.25)' }}>
+                        📍 {activeConv.branch}
+                      </span>
+                    </div>
                   )}
                   {!isReadOnly && (
                     <button
@@ -637,21 +930,56 @@ export default function InboxPage() {
             </div>
 
             <div className="mb-5">
-              <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Follow-up</h3>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase">Follow-up</h3>
+                {activeConv.followUpCompleted && (
+                  <span
+                    className="text-[9px] font-medium px-2 py-0.5 rounded-full"
+                    style={{ background: 'var(--bg-pill)', color: 'var(--text-muted)', border: '1px solid var(--border-main)' }}
+                  >
+                    Ended
+                  </span>
+                )}
+              </div>
               <input
+                key={`fn-${activeConv.id}-${activeConv.followUpNote || ''}`}
                 type="text"
-                defaultValue={activeConv.formAnswers?.followUpNote || ""}
+                defaultValue={activeConv.followUpNote || ""}
                 placeholder="e.g. Call back about Sunday"
-                className="w-full rounded-[6px] text-[11px] py-1.5 px-2 mb-2 outline-none placeholder-gray-400"
-                style={{ border: "1px solid var(--border-input)", background: "var(--bg-input)", color: "var(--text-primary)" }}
-                onBlur={(e) => patchConversation(activeConv.id, { followUpNote: e.target.value })}
+                className={`w-full rounded-[6px] text-[11px] py-1.5 px-2 mb-2 outline-none placeholder-gray-400 transition-colors ${
+                  activeConv.followUpCompleted ? 'line-through' : ''
+                }`}
+                style={{
+                  border: "1px solid var(--border-input)",
+                  background: "var(--bg-input)",
+                  color: activeConv.followUpCompleted ? "var(--text-muted)" : "var(--text-primary)"
+                }}
+                onBlur={(e) => {
+                  const val = e.target.value.trim();
+                  if (val !== (activeConv.followUpNote || '')) {
+                    patchConversation(activeConv.id, { followUpNote: val, followUpCompleted: false });
+                  }
+                }}
               />
               <div className="flex gap-2">
                 <input
+                  key={`fd-${activeConv.id}-${activeConv.followUpDate || ''}`}
                   type="date"
-                  className="flex-1 rounded-[6px] px-2 py-1.5 text-[11px] outline-none"
-                  style={{ border: "1px solid var(--border-input)", background: "var(--bg-input)", color: "var(--text-primary)" }}
-                  onChange={(e) => patchConversation(activeConv.id, { followUpDate: e.target.value })}
+                  defaultValue={activeConv.followUpDate || ""}
+                  className={`flex-1 rounded-[6px] px-2 py-1.5 text-[11px] outline-none cursor-pointer transition-colors ${
+                    activeConv.followUpCompleted ? 'line-through' : ''
+                  }`}
+                  style={{
+                    border: "1px solid var(--border-input)",
+                    background: "var(--bg-input)",
+                    color: activeConv.followUpCompleted ? "var(--text-muted)" : "var(--text-primary)"
+                  }}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val !== (activeConv.followUpDate || '')) {
+                      patchConversation(activeConv.id, { followUpDate: val, followUpCompleted: false });
+                    }
+                  }}
                 />
               </div>
             </div>
@@ -660,8 +988,8 @@ export default function InboxPage() {
               <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Notes</h3>
               <textarea
                 rows={3}
-                key={activeConv.id}
-                defaultValue={activeConv.formAnswers?.notes || ""}
+                key={`notes-${activeConv.id}-${activeConv.notes || ''}`}
+                defaultValue={activeConv.notes || ""}
                 placeholder="Instrument, age, follow-up promises..."
                 className="w-full rounded-[6px] text-[11px] p-2 outline-none placeholder-gray-400 resize-y"
                 style={{ border: "1px solid var(--border-input)", background: "var(--bg-input)", color: "var(--text-primary)" }}
@@ -683,7 +1011,7 @@ export default function InboxPage() {
           onClick={() => !isBookingAudition && setShowAuditionModal(false)}
         >
           <div
-            className="w-full max-w-[420px] rounded-2xl p-6 shadow-2xl relative border animate-in fade-in zoom-in-95 duration-150 flex flex-col gap-4"
+            className="w-full max-w-[420px] rounded-2xl p-6 shadow-2xl relative border animate-in fade-in zoom-in-95 duration-150 flex flex-col gap-4 max-h-[90vh] overflow-y-auto"
             style={{
               background: 'var(--bg-card)',
               borderColor: 'var(--border-main)',
@@ -711,6 +1039,17 @@ export default function InboxPage() {
             </div>
 
             <div className="flex flex-col gap-3.5">
+              <div>
+                <label className="text-[12px] font-bold mb-1 block" style={{ color: 'var(--text-primary)' }}>
+                  Branch *
+                </label>
+                <BranchSelect
+                  value={auditionBranch}
+                  onChange={setAuditionBranch}
+                  branchGroups={branchGroups}
+                />
+              </div>
+
               <div>
                 <label className="text-[12px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>
                   Audition Date *
@@ -763,7 +1102,7 @@ export default function InboxPage() {
             <div className="flex items-center gap-2 pt-2">
               <button
                 type="button"
-                disabled={isBookingAudition || !auditionDate}
+                disabled={isBookingAudition || !auditionDate || !auditionBranch}
                 onClick={handleConfirmBooking}
                 className="flex-1 h-[40px] text-[13px] font-semibold text-white rounded-xl cursor-pointer hover:bg-[#0055d4] transition-colors disabled:opacity-50"
                 style={{ background: '#0066FF' }}
