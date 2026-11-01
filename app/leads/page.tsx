@@ -32,6 +32,8 @@ export default function LeadsPage() {
   const { conversations, loading, openChat, assignableAgents, patchConversation } = useCRM();
   const { isReadOnly, user } = useAuth();
   const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager";
+  const isAdmission = user?.role === "admission_officer" || user?.role === "agent";
+  const userClean = (user?.name || "").trim().toLowerCase();
   const [filterStage, setFilterStage] = useState("All");
   const [filterCampaign, setFilterCampaign] = useState("All campaigns");
 
@@ -200,24 +202,70 @@ export default function LeadsPage() {
                     <td className="py-3 px-4" style={{ color: 'var(--text-secondary)' }}>{lead.campaign}</td>
                     <td className="py-3 px-4">
                       {(() => {
-                        const canEditAgent = !isReadOnly && isChairman;
+                        const agentClean = (lead.agent || "").trim().toLowerCase();
+                        const isLeadUnassigned = !agentClean || agentClean === "unassigned";
+                        const isAssignedToMe = !isLeadUnassigned && !!userClean && userClean === agentClean;
+                        const isAssignedToOther = !isLeadUnassigned && !isAssignedToMe;
+                        const canAssignToSelf = !isReadOnly && isAdmission && (isLeadUnassigned || isAssignedToMe);
+                        const canEditAgent = !isReadOnly && (isChairman || canAssignToSelf);
+
                         return (
-                          <select
-                            disabled={!canEditAgent}
-                            title={!canEditAgent ? "Only Chairman can assign agents" : undefined}
-                            value={lead.agent}
-                            onChange={(e) => patchConversation(lead.id, { agent: e.target.value })}
-                            className="text-[11px] font-medium rounded-[6px] px-1.5 py-0.5 outline-none cursor-pointer transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-                            style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
-                          >
-                            <option value="Unassigned">Unassigned</option>
-                            {lead.agent && lead.agent !== "Unassigned" && !assignableAgents.some(a => a.name === lead.agent) && (
-                              <option value={lead.agent}>{lead.agent}</option>
+                          <div className="flex items-center gap-1.5">
+                            <select
+                              disabled={!canEditAgent}
+                              title={
+                                !canEditAgent
+                                  ? isAssignedToOther
+                                    ? `Assigned to ${lead.agent}. Only Chairman can reassign.`
+                                    : "Only Chairman or Admission can assign leads"
+                                  : undefined
+                              }
+                              value={lead.agent}
+                              onChange={(e) => patchConversation(lead.id, { agent: e.target.value })}
+                              className="text-[11px] font-medium rounded-[6px] px-1.5 py-0.5 outline-none cursor-pointer transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                              style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                            >
+                              {isChairman ? (
+                                <>
+                                  <option value="Unassigned">Unassigned</option>
+                                  {lead.agent && lead.agent !== "Unassigned" && !assignableAgents.some(a => a.name === lead.agent) && (
+                                    <option value={lead.agent}>{lead.agent}</option>
+                                  )}
+                                  {assignableAgents.map(a => (
+                                    <option key={a.name} value={a.name}>{a.name}</option>
+                                  ))}
+                                </>
+                              ) : isAdmission ? (
+                                <>
+                                  {isLeadUnassigned ? (
+                                    <>
+                                      <option value="Unassigned">Unassigned</option>
+                                      {user?.name && <option value={user.name}>{user.name} (Assign to me)</option>}
+                                    </>
+                                  ) : isAssignedToMe ? (
+                                    <>
+                                      <option value={user?.name || lead.agent}>{user?.name || lead.agent}</option>
+                                      <option value="Unassigned">Unassigned</option>
+                                    </>
+                                  ) : (
+                                    <option value={lead.agent}>{lead.agent}</option>
+                                  )}
+                                </>
+                              ) : (
+                                <option value={lead.agent || "Unassigned"}>{lead.agent || "Unassigned"}</option>
+                              )}
+                            </select>
+                            {isLeadUnassigned && isAdmission && user?.name && !isReadOnly && (
+                              <button
+                                type="button"
+                                onClick={() => patchConversation(lead.id, { agent: user.name })}
+                                className="text-[10px] font-semibold text-[#0066FF] hover:underline cursor-pointer shrink-0"
+                                title="Quick claim lead"
+                              >
+                                Claim
+                              </button>
                             )}
-                            {assignableAgents.map(a => (
-                              <option key={a.name} value={a.name}>{a.name}</option>
-                            ))}
-                          </select>
+                          </div>
                         );
                       })()}
                     </td>

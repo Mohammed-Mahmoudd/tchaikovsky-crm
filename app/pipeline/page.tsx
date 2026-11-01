@@ -669,6 +669,8 @@ export default function PipelinePage() {
   const { conversations, patchConversation, openChat, setPollPaused, assignableAgents } = useCRM();
   const { isReadOnly, user } = useAuth();
   const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager";
+  const isAdmission = user?.role === "admission_officer" || user?.role === "agent";
+  const userClean = (user?.name || "").trim().toLowerCase();
   const isMobile = useIsMobile();
 
   const [view, setView] = useState<"pipeline" | "table">("pipeline");
@@ -1403,26 +1405,71 @@ export default function PipelinePage() {
                 <div className="flex-1">
                   <label className="text-[11px] block mb-1" style={{ color: 'var(--text-secondary)' }}>Assigned to</label>
                   {(() => {
-                    const canEditPanelAgent = !isReadOnly && isChairman;
+                    const agentClean = (panelLead.agent || "").trim().toLowerCase();
+                    const isLeadUnassigned = !agentClean || agentClean === "unassigned";
+                    const isAssignedToMe = !isLeadUnassigned && !!userClean && userClean === agentClean;
+                    const isAssignedToOther = !isLeadUnassigned && !isAssignedToMe;
+                    const canAssignToSelf = !isReadOnly && isAdmission && (isLeadUnassigned || isAssignedToMe);
+                    const canEditPanelAgent = !isReadOnly && (isChairman || canAssignToSelf);
+
                     return (
-                      <select
-                        disabled={!canEditPanelAgent}
-                        title={!canEditPanelAgent ? "Only Chairman can assign agents" : undefined}
-                        value={panelLead.agent || "Unassigned"}
-                        onChange={(e) => patchConversation(panelLead.id, { agent: e.target.value })}
-                        className="w-full rounded-[6px] text-[13px] py-1.5 px-2 outline-none disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed"
-                        style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
-                      >
-                        <option value="Unassigned">Unassigned</option>
-                        {panelLead.agent && panelLead.agent !== "Unassigned" && !assignableAgents.some(a => a.name === panelLead.agent) && (
-                          <option value={panelLead.agent}>{panelLead.agent}</option>
+                      <div className="space-y-1.5">
+                        <select
+                          disabled={!canEditPanelAgent}
+                          title={
+                            !canEditPanelAgent
+                              ? isAssignedToOther
+                                ? `Assigned to ${panelLead.agent}. Only Chairman can reassign.`
+                                : "Only Chairman or Admission can assign leads"
+                              : undefined
+                          }
+                          value={panelLead.agent || "Unassigned"}
+                          onChange={(e) => patchConversation(panelLead.id, { agent: e.target.value })}
+                          className="w-full rounded-[6px] text-[13px] py-1.5 px-2 outline-none disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed font-medium transition-colors"
+                          style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
+                        >
+                          {isChairman ? (
+                            <>
+                              <option value="Unassigned">Unassigned</option>
+                              {panelLead.agent && panelLead.agent !== "Unassigned" && !assignableAgents.some(a => a.name === panelLead.agent) && (
+                                <option value={panelLead.agent}>{panelLead.agent}</option>
+                              )}
+                              {assignableAgents.map((a) => (
+                                <option key={a.name} value={a.name}>
+                                  {a.name}
+                                </option>
+                              ))}
+                            </>
+                          ) : isAdmission ? (
+                            <>
+                              {isLeadUnassigned ? (
+                                <>
+                                  <option value="Unassigned">Unassigned</option>
+                                  {user?.name && <option value={user.name}>{user.name} (Assign to me)</option>}
+                                </>
+                              ) : isAssignedToMe ? (
+                                <>
+                                  <option value={user?.name || panelLead.agent}>{user?.name || panelLead.agent}</option>
+                                  <option value="Unassigned">Unassigned</option>
+                                </>
+                              ) : (
+                                <option value={panelLead.agent}>{panelLead.agent}</option>
+                              )}
+                            </>
+                          ) : (
+                            <option value={panelLead.agent || "Unassigned"}>{panelLead.agent || "Unassigned"}</option>
+                          )}
+                        </select>
+                        {isLeadUnassigned && isAdmission && user?.name && !isReadOnly && (
+                          <button
+                            type="button"
+                            onClick={() => patchConversation(panelLead.id, { agent: user.name })}
+                            className="w-full text-center text-[11px] font-semibold text-[#0066FF] hover:underline cursor-pointer py-0.5"
+                          >
+                            + Assign to me
+                          </button>
                         )}
-                        {assignableAgents.map((a) => (
-                          <option key={a.name} value={a.name}>
-                            {a.name}
-                          </option>
-                        ))}
-                      </select>
+                      </div>
                     );
                   })()}
                 </div>

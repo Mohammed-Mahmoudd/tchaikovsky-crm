@@ -14,6 +14,7 @@ export type Message = {
   isIncoming: boolean;
   isRead?: boolean;
   dir?: "rtl" | "ltr";
+  senderName?: string;
 };
 
 export type Conversation = {
@@ -252,6 +253,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         ? new Date(m.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
         : "",
       isIncoming: m.direction === "incoming",
+      senderName: m.senderName || undefined,
     }));
   }, []);
 
@@ -318,7 +320,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         // Update the messages cache
         messagesCacheRef.current.set(chatId, newMessages);
 
-        // Merge into conversations state (only touch the active conversation's messages)
+        // Merge into conversations state (touch active conversation's messages and metadata)
         setConversations((prev) =>
           prev.map((c) =>
             c.id === chatId
@@ -327,6 +329,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   messages: newMessages,
                   unreadCount: 0,
                   lastMessageAt: json.data?.lastMessageAt || c.lastMessageAt,
+                  pipeline: json.data?.pipeline || c.pipeline,
+                  agent: json.data?.agent || c.agent,
+                  status: json.data?.status || c.status,
                 }
               : c
           )
@@ -373,6 +378,142 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       }
     }
   }, [token, fetchConversations, conversations.length]);
+
+  // ── Real-Time Server-Sent Events (SSE) Stream ──
+  // Instant (< 30ms) reflection when messages arrive or someone replies in Meta Inbox
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    let eventSource: EventSource | null = null;
+    let reconnectTimer: NodeJS.Timeout;
+    let isCancelled = false;
+
+    function connectSSE() {
+      if (isCancelled) return;
+      try {
+        eventSource = new EventSource(`${API}/messages/stream`);
+
+        eventSource.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (!payload || !payload.type) return;
+
+            if (payload.type === "message" && payload.data) {
+              const { conversationId, conversation: remoteConv, message } = payload.data;
+              if (!conversationId) return;
+
+              const isOutgoing = message?.direction === "outgoing";
+              const currentActiveId = activeChatIdRef.current;
+
+              // 1. Update conversations list instantly
+              setConversations((prev) => {
+                const idx = prev.findIndex((c) => c.id === conversationId);
+                const targetUnread = conversationId === currentActiveId || isOutgoing ? 0 : (remoteConv?.unreadCount ?? 1);
+                const targetPipeline = remoteConv?.pipeline || (isOutgoing ? "Contacted" : undefined);
+
+                if (idx >= 0) {
+                  const existing = prev[idx];
+                  const updated: Conversation = {
+                    ...existing,
+                    lastMessageAt: message?.timestamp || Date.now(),
+                    unreadCount: targetUnread,
+                    pipeline: (targetPipeline && existing.pipeline === "New" ? targetPipeline : existing.pipeline) as any,
+                  };
+                  if (remoteConv?.name && !existing.name) updated.name = remoteConv.name;
+                  if (remoteConv?.agent) updated.agent = remoteConv.agent;
+                  if (remoteConv?.status) updated.status = remoteConv.status;
+
+                  // Move to top of the conversation list
+                  const remaining = prev.filter((_, i) => i !== idx);
+                  return [updated, ...remaining];
+                } else if (remoteConv) {
+                  // Newly created conversation arriving in real-time
+                  const normalized = normalizeConversationMeta(remoteConv);
+                  return [{ ...normalized, messages: [] }, ...prev];
+                }
+                return prev;
+              });
+
+              // 2. If this is the currently active chat, append the message in real-time
+              if (currentActiveId === conversationId && message) {
+                const formattedMsg: Message = {
+                  id: message.messageId,
+                  text: message.text || "",
+                  attachments: message.attachments || [],
+                  time: message.timestamp
+                    ? new Date(message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                    : "",
+                  isIncoming: !isOutgoing,
+                  senderName: message.senderName || undefined,
+                };
+
+                const cached = messagesCacheRef.current.get(conversationId) || [];
+                if (!cached.some((m) => m.id === formattedMsg.id)) {
+                  const updatedMessages = [...cached, formattedMsg];
+                  messagesCacheRef.current.set(conversationId, updatedMessages);
+
+                  setConversations((prev) =>
+                    prev.map((c) =>
+                      c.id === conversationId
+                        ? { ...c, messages: updatedMessages, unreadCount: 0 }
+                        : c
+                    )
+                  );
+                }
+              }
+            } else if (payload.type === "conversation_updated" && payload.data) {
+              const { conversationId, conversation: remoteConv } = payload.data;
+              if (!conversationId || !remoteConv) return;
+              setConversations((prev) =>
+                prev.map((c) => {
+                  if (c.id !== conversationId) return c;
+                  return {
+                    ...c,
+                    ...normalizeConversationMeta(remoteConv),
+                    messages: c.messages,
+                  };
+                })
+              );
+            } else if (payload.type === "marked_read" && payload.data) {
+              const { conversationId } = payload.data;
+              if (conversationId) {
+                setConversations((prev) =>
+                  prev.map((c) => (c.id === conversationId ? { ...c, unreadCount: 0 } : c))
+                );
+              }
+            }
+          } catch (e) {
+            console.error("CRMContext: SSE message parse error", e);
+          }
+        };
+
+        eventSource.onerror = () => {
+          if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+          }
+          if (!isCancelled) {
+            reconnectTimer = setTimeout(connectSSE, 4000);
+          }
+        };
+      } catch (err) {
+        console.error("CRMContext: SSE setup error", err);
+        if (!isCancelled) {
+          reconnectTimer = setTimeout(connectSSE, 5000);
+        }
+      }
+    }
+
+    connectSSE();
+
+    return () => {
+      isCancelled = true;
+      if (eventSource) {
+        eventSource.close();
+      }
+      clearTimeout(reconnectTimer);
+    };
+  }, [normalizeConversationMeta]);
 
   // ── Non-overlapping background polling (3s delay after completion) ──
   useEffect(() => {
@@ -554,6 +695,28 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           }
           // Safe to clear the pending guard now — server confirmed the write
           pendingPatchesRef.current.delete(id);
+        } else {
+          // Server rejected the patch (e.g. 403 Forbidden or 409 Conflict): rollback
+          pendingPatchesRef.current.delete(id);
+          try {
+            const rollbackRes = await fetch(`${API}/messages/${id}`, { headers });
+            const rollbackJson = await rollbackRes.json();
+            if (rollbackJson && rollbackJson.data) {
+              const confirmed = normalizeConversationMeta(rollbackJson.data);
+              setConversations((prev) => {
+                const next = prev.map((c) =>
+                  c.id === id
+                    ? ({ ...confirmed, messages: c.messages } as Conversation)
+                    : c
+                );
+                persistConversationsCache(next);
+                return next;
+              });
+            }
+          } catch {}
+          if (json && json.error && typeof window !== "undefined") {
+            alert(json.error);
+          }
         }
       } catch (err) {
         console.error("Failed to patch conversation:", err);

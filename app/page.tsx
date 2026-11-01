@@ -1,10 +1,11 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import Link from "next/link";
 import { ArrowLeft, Info, X, Calendar, CheckCircle2, Trash2 } from "lucide-react";
 import { useBranches } from "./lib/branches";
 import { BranchSelect } from "./components/BranchSelect";
+import { ChatInputBar } from "./components/ChatInputBar";
 
 type Channel = "WA" | "IG" | "FB";
 
@@ -156,8 +157,6 @@ export default function InboxPage() {
   const [activeFilter, setActiveFilter] = useState("All");
   const [mobileView, setMobileView] = useState<MobileView>("list");
   const [showDetailsPanel, setShowDetailsPanel] = useState(false);
-  const [replyText, setReplyText] = useState("");
-  const [isSending, setIsSending] = useState(false);
   const { isReadOnly, user, token } = useAuth();
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -191,18 +190,22 @@ export default function InboxPage() {
     }
   }, [activeChatId, markConversationAsRead]);
 
-  // ── Filter logic ──────────────────────────────────────────────────
-  const filteredConversations = conversations.filter((conv) => {
-    if (activeFilter === "All") return true;
-    if (activeFilter === "Mine") return conv.agent === user?.name;
-    if (activeFilter === "Unassigned") return conv.agent === "Unassigned";
-    if (activeFilter === "Open") return conv.status === "Open";
-    if (activeFilter === "Resolved") return conv.status === "Resolved";
-    return true;
-  });
+  // ── Filter logic (memoized to avoid re-calculating on unrelated renders) ──
+  const filteredConversations = useMemo(() => {
+    return conversations.filter((conv) => {
+      if (activeFilter === "All") return true;
+      if (activeFilter === "Mine") return conv.agent === user?.name;
+      if (activeFilter === "Unassigned") return conv.agent === "Unassigned";
+      if (activeFilter === "Open") return conv.status === "Open";
+      if (activeFilter === "Resolved") return conv.status === "Resolved";
+      return true;
+    });
+  }, [conversations, activeFilter, user?.name]);
 
-  // Use activeChatId directly — no duplicate local state
-  const activeConv = conversations.find((c) => c.id === activeChatId);
+  // Use activeChatId directly — memoized lookup
+  const activeConv = useMemo(() => {
+    return conversations.find((c) => c.id === activeChatId);
+  }, [conversations, activeChatId]);
 
   // ── Assignment & Permission Logic ─────────────────────────────────
   const userClean = (user?.name || "").trim().toLowerCase();
@@ -210,8 +213,11 @@ export default function InboxPage() {
   const isAssigned = !!agentClean && agentClean !== "unassigned";
   const isAssignedToMe = isAssigned && !!userClean && userClean === agentClean;
   const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager";
+  const isAdmission = user?.role === "admission_officer" || user?.role === "agent";
   const isAssignedToOther = isAssigned && !isAssignedToMe;
-  const canSendMessages = !isReadOnly && (!isAssignedToOther || isChairman);
+  const canSendMessages = !isReadOnly;
+  const canAssignToSelf = !isReadOnly && isAdmission && (!isAssigned || isAssignedToMe);
+  const canEditAgent = !isReadOnly && (isChairman || canAssignToSelf);
 
   // Audition booking modal state
   const [showAuditionModal, setShowAuditionModal] = useState(false);
@@ -270,32 +276,40 @@ export default function InboxPage() {
     }
   }, [activeChatId, activeConv?.messages?.length]);
 
-  const handleSendReply = async () => {
-    if (isReadOnly || !replyText.trim() || !activeConv || !canSendMessages) return;
-    setIsSending(true);
-    try {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (token) headers["Authorization"] = `Bearer ${token}`;
-      const res = await fetch(`/api/messages/${activeConv.id}/reply`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ text: replyText, channel: activeConv.channel }),
-      });
-      if (res.ok) {
-        setReplyText("");
-        refresh();
-      } else {
-        const data = await res.json().catch(() => null);
-        if (data?.error) {
-          alert(data.error);
-        }
+  const handleSendReply = useCallback(
+    async (textToSend: string): Promise<boolean> => {
+      if (isReadOnly || !textToSend.trim() || !activeConv || !canSendMessages) return false;
+
+      // Auto-assign to admission officer on first reply to unassigned lead (optimistic 0ms update)
+      if (isAdmission && !isAssigned && user?.name) {
+        patchConversation(activeConv.id, { agent: user.name });
       }
-    } catch (err) {
-      console.error("Failed to send reply:", err);
-    } finally {
-      setIsSending(false);
-    }
-  };
+
+      try {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const res = await fetch(`/api/messages/${activeConv.id}/reply`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ text: textToSend, channel: activeConv.channel }),
+        });
+        if (res.ok) {
+          refresh();
+          return true;
+        } else {
+          const data = await res.json().catch(() => null);
+          if (data?.error) {
+            alert(data.error);
+          }
+          return false;
+        }
+      } catch (err) {
+        console.error("Failed to send reply:", err);
+        return false;
+      }
+    },
+    [isReadOnly, activeConv, canSendMessages, isAdmission, isAssigned, user?.name, patchConversation, token, refresh]
+  );
 
   const handleSelectConv = (id: string) => {
     setActiveChatId(id);
@@ -449,23 +463,63 @@ export default function InboxPage() {
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
+                {/* 1-click Quick "Assign to me" button for unassigned leads */}
+                {!isReadOnly && !isAssigned && isAdmission && user?.name && (
+                  <button
+                    type="button"
+                    onClick={() => patchConversation(activeConv.id, { agent: user.name })}
+                    className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 text-[12px] font-semibold rounded-[6px] text-white bg-[#0066FF] hover:bg-[#0055D6] transition-colors cursor-pointer"
+                    title="Assign this conversation to yourself"
+                  >
+                    Assign to me
+                  </button>
+                )}
+
                 {/* Dropdowns — hidden on small mobile, shown on sm+ */}
                 <div className="hidden sm:flex items-center gap-2">
                   <select
-                    disabled={isReadOnly || !isChairman}
-                    title={!isChairman ? "Only Chairman can assign agents" : undefined}
+                    disabled={!canEditAgent}
+                    title={
+                      !canEditAgent
+                        ? isAssignedToOther
+                          ? `Assigned to ${activeConv.agent}. Only Chairman can reassign.`
+                          : "Only Chairman or Admission can assign leads"
+                        : undefined
+                    }
                     value={activeConv.agent}
                     onChange={(e) => patchConversation(activeConv.id, { agent: e.target.value })}
-                    className="rounded-[6px] text-[12px] py-1 px-2 outline-none disabled:opacity-60 disabled:cursor-not-allowed"
+                    className="rounded-[6px] text-[12px] py-1 px-2 outline-none disabled:opacity-60 disabled:cursor-not-allowed font-medium transition-colors"
                     style={{ border: "1px solid var(--border-input)", color: "var(--text-primary)", background: "var(--bg-input)" }}
                   >
-                    <option value="Unassigned">Unassigned</option>
-                    {activeConv.agent && activeConv.agent !== "Unassigned" && !assignableAgents.some(a => a.name === activeConv.agent) && (
-                      <option value={activeConv.agent}>{activeConv.agent}</option>
+                    {isChairman ? (
+                      <>
+                        <option value="Unassigned">Unassigned</option>
+                        {activeConv.agent && activeConv.agent !== "Unassigned" && !assignableAgents.some(a => a.name === activeConv.agent) && (
+                          <option value={activeConv.agent}>{activeConv.agent}</option>
+                        )}
+                        {assignableAgents.map(a => (
+                          <option key={a.name} value={a.name}>{a.name}</option>
+                        ))}
+                      </>
+                    ) : isAdmission ? (
+                      <>
+                        {!isAssigned ? (
+                          <>
+                            <option value="Unassigned">Unassigned</option>
+                            {user?.name && <option value={user.name}>{user.name} (Assign to me)</option>}
+                          </>
+                        ) : isAssignedToMe ? (
+                          <>
+                            <option value={user?.name || activeConv.agent}>{user?.name || activeConv.agent}</option>
+                            <option value="Unassigned">Unassigned</option>
+                          </>
+                        ) : (
+                          <option value={activeConv.agent}>{activeConv.agent}</option>
+                        )}
+                      </>
+                    ) : (
+                      <option value={activeConv.agent || "Unassigned"}>{activeConv.agent || "Unassigned"}</option>
                     )}
-                    {assignableAgents.map(a => (
-                      <option key={a.name} value={a.name}>{a.name}</option>
-                    ))}
                   </select>
                   <select
                     value={activeConv.status}
@@ -525,7 +579,15 @@ export default function InboxPage() {
                   }
 
                   return (
-                    <div key={msg.id} className={`flex ${msg.isIncoming ? "justify-start" : "justify-end"}`}>
+                    <div key={msg.id} className={`flex flex-col ${msg.isIncoming ? "items-start" : "items-end"}`}>
+                      {!msg.isIncoming && msg.senderName && (
+                        <span
+                          className="text-[11px] font-medium mb-1 px-1.5"
+                          style={{ color: "var(--text-secondary)" }}
+                        >
+                          {msg.senderName}
+                        </span>
+                      )}
                       <div
                         className={`${
                           hasTemplateAttachment || shouldRenderFallbackCard || hasSharedPostAttachment
@@ -632,8 +694,11 @@ export default function InboxPage() {
 
                         <div
                           className={`text-[10px] mt-1.5 ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
-                          style={{ color: msg.isIncoming ? "var(--text-muted)" : "var(--text-chat-outgoing)", opacity: msg.isIncoming ? 1 : 0.6 }}
+                          style={{ color: msg.isIncoming ? "var(--text-muted)" : "var(--text-chat-outgoing)", opacity: msg.isIncoming ? 1 : 0.75 }}
                         >
+                          {!msg.isIncoming && msg.senderName && (
+                            <span className="font-semibold">{msg.senderName} · </span>
+                          )}
                           {!msg.isIncoming && msg.isRead && "✓✓ "}
                           {msg.time}
                         </div>
@@ -645,60 +710,20 @@ export default function InboxPage() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Chat Input */}
-            <div className="px-4 md:px-6 py-4 shrink-0" style={{ background: "var(--bg-card)", borderTop: "1px solid var(--border-main)" }}>
-              {isAssignedToOther && (
-                <div
-                  className="rounded-[8px] px-3 py-2 text-[11px] mb-2.5 flex items-center gap-2"
-                  style={{
-                    background: isChairman ? "rgba(255, 149, 0, 0.08)" : "rgba(255, 59, 48, 0.08)",
-                    border: `1px solid ${isChairman ? "rgba(255, 149, 0, 0.25)" : "rgba(255, 59, 48, 0.25)"}`,
-                    color: isChairman ? "#FF9500" : "#FF3B30",
-                  }}
-                >
-                  <span className="text-[13px]">{isChairman ? "⚠️" : "🔒"}</span>
-                  <span className="font-medium">
-                    {isChairman
-                      ? `Assigned to ${activeConv.agent}. Sending here will jump into their conversation.`
-                      : `Assigned to ${activeConv.agent}`}
-                  </span>
-                </div>
-              )}
-              {activeConv.windowLeft === "Closed" ? (
-                <div
-                  className="rounded-[8px] p-4 text-[12px] text-center"
-                  style={{ background: "var(--bg-input)", border: "1px solid var(--border-main)", color: "var(--text-secondary)" }}
-                >
-                  The 24-hour reply window is closed. It reopens the next time this customer messages — outside it WhatsApp only allows approved template messages.
-                </div>
-              ) : (
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={replyText}
-                    onChange={(e) => setReplyText(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && canSendMessages && handleSendReply()}
-                    placeholder={
-                      isReadOnly
-                        ? "View-only mode (Marketing role)"
-                        : !canSendMessages
-                          ? `Assigned to ${activeConv.agent}`
-                          : "Type a reply..."
-                    }
-                    className="flex-1 rounded-[8px] px-3 py-2 text-[13px] outline-none placeholder-gray-400 transition-colors focus:border-[#0066FF] disabled:opacity-60"
-                    style={{ border: "1px solid var(--border-main)", background: "var(--bg-input)", color: "var(--text-primary)" }}
-                    disabled={isSending || isReadOnly || !canSendMessages}
-                  />
-                  <button
-                    onClick={handleSendReply}
-                    disabled={isSending || isReadOnly || !canSendMessages || !replyText.trim()}
-                    className="bg-[#0066FF] disabled:bg-[#78B4F9] text-white font-semibold text-[13px] px-4 rounded-[8px] shrink-0 transition-colors"
-                  >
-                    {isSending ? "Sending..." : "Send"}
-                  </button>
-                </div>
-              )}
-            </div>
+            {/* Chat Input Bar (isolated state for zero-latency typing) */}
+            <ChatInputBar
+              chatId={activeConv.id}
+              isReadOnly={isReadOnly}
+              canSendMessages={canSendMessages}
+              isAssignedToOther={isAssignedToOther}
+              assignedAgent={activeConv.agent}
+              userName={user?.name}
+              windowLeft={activeConv.windowLeft}
+              isUnassigned={!isAssigned}
+              isAdmission={isAdmission}
+              onAssignToMe={user?.name ? () => patchConversation(activeConv.id, { agent: user.name }) : undefined}
+              onSendMessage={handleSendReply}
+            />
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center">
@@ -762,6 +787,39 @@ export default function InboxPage() {
               >
                 <X className="w-5 h-5" />
               </button>
+            </div>
+
+            <div className="mb-5">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase">Assigned to</h3>
+                {isAssignedToMe && (
+                  <span className="text-[10px] font-semibold text-[#34C759]">Assigned to you</span>
+                )}
+              </div>
+              <div className="rounded-[6px] p-2.5 flex items-center justify-between" style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)" }}>
+                <span className="text-[12px] font-medium" style={{ color: "var(--text-primary)" }}>
+                  {activeConv.agent || "Unassigned"}
+                </span>
+                {!isReadOnly && !isAssigned && isAdmission && user?.name && (
+                  <button
+                    type="button"
+                    onClick={() => patchConversation(activeConv.id, { agent: user.name })}
+                    className="text-[11px] font-semibold text-[#0066FF] hover:underline cursor-pointer"
+                  >
+                    Assign to me →
+                  </button>
+                )}
+                {!isReadOnly && isAssignedToMe && isAdmission && (
+                  <button
+                    type="button"
+                    onClick={() => patchConversation(activeConv.id, { agent: "Unassigned" })}
+                    className="text-[11px] font-medium hover:underline cursor-pointer"
+                    style={{ color: "var(--text-secondary)" }}
+                  >
+                    Unassign
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="mb-5">
