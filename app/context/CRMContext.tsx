@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "../components/AuthProvider";
+import { formatMetaErrorMessage } from "../utils/errorParser";
 
 export type Channel = "WA" | "IG" | "FB";
 
@@ -19,6 +20,7 @@ export type Message = {
 
 export type Conversation = {
   id: string; // senderId
+  _id?: string;
   name: string;
   phone: string;
   agent: string;
@@ -79,6 +81,8 @@ type CRMContextType = {
   refresh: () => Promise<void>;
   // Fix B: lets Pipeline pause the 3s poll during drag so it never races the PATCH
   setPollPaused: (paused: boolean) => void;
+  searchQuery: string;
+  setSearchQuery: (query: string) => void;
 };
 
 const CRMContext = createContext<CRMContextType | undefined>(undefined);
@@ -146,6 +150,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   });
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [assignableAgents, setAssignableAgents] = useState<AssignableAgent[]>([]);
+  const [searchQuery, setSearchQuery] = useState<string>("");
 
   // ── Refs for stable closures (never cause re-creation of callbacks) ──
   const activeChatIdRef = useRef<string | null>(null);
@@ -202,6 +207,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   const normalizeConversationMeta = useCallback((c: any): Omit<Conversation, "messages"> => {
     return {
       id: c.senderId,
+      _id: c._id ? String(c._id) : undefined,
       name:
         c.name ||
         (c.channel === "FB"
@@ -715,7 +721,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             }
           } catch {}
           if (json && json.error && typeof window !== "undefined") {
-            alert(json.error);
+            const parsed = formatMetaErrorMessage(json.error);
+            console.warn(`Conversation update notice: ${parsed.title} - ${parsed.message}`);
           }
         }
       } catch (err) {
@@ -765,6 +772,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         markConversationAsRead,
         refresh: fetchConversations,
         setPollPaused,
+        searchQuery,
+        setSearchQuery,
       }}
     >
       {children}

@@ -1,12 +1,13 @@
 "use client";
 
-import React, { useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useTheme } from './ThemeProvider';
 import { useAuth, canAccessRoute } from './AuthProvider';
 import {
   Search,
+  X,
   Inbox,
   Download,
   Calendar,
@@ -18,6 +19,7 @@ import {
 } from 'lucide-react';
 
 import { useCRM } from '../context/CRMContext';
+import { matchLeadSearch } from '../utils/search';
 
 interface SidebarProps {
   isMobileOpen?: boolean;
@@ -26,10 +28,71 @@ interface SidebarProps {
 
 export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
   const pathname = usePathname();
+  const router = useRouter();
   const { theme, toggle } = useTheme();
   const { user, logout, roleDisplayName, isReadOnly } = useAuth();
-  const { badgeCounts } = useCRM();
+  const { badgeCounts, searchQuery, setSearchQuery, conversations, openChat } = useCRM();
   const closeTouchedRef = useRef(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchContainerRef = useRef<HTMLDivElement>(null);
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+
+  // Top matching leads for the quick sidebar search dropdown
+  const sidebarMatches = useMemo(() => {
+    const q = searchQuery.trim();
+    if (!q) return [];
+    return conversations.filter((c) => matchLeadSearch(c, q)).slice(0, 6);
+  }, [conversations, searchQuery]);
+
+  // Close dropdown on click outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (searchContainerRef.current && !searchContainerRef.current.contains(e.target as Node)) {
+        setIsDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Global keyboard shortcut: ⌘K or Ctrl+K to focus search input
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        setIsDropdownOpen(true);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  const handleSelectLead = useCallback(
+    (id: string) => {
+      openChat(id);
+      setIsDropdownOpen(false);
+      onCloseMobile?.();
+    },
+    [openChat, onCloseMobile]
+  );
+
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      if (sidebarMatches.length > 0) {
+        handleSelectLead(sidebarMatches[0].id);
+      } else if (pathname !== '/') {
+        router.push('/');
+        setIsDropdownOpen(false);
+        onCloseMobile?.();
+      }
+    } else if (e.key === 'Escape') {
+      setSearchQuery('');
+      setIsDropdownOpen(false);
+      searchInputRef.current?.blur();
+    }
+  };
 
   const handleCloseTouchEnd = useCallback((e: React.TouchEvent) => {
     e.preventDefault();
@@ -80,19 +143,113 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
         </div>
 
         {/* Search */}
-        <div className="px-3 pb-3">
-          <div className="relative flex items-center w-full h-[28px] px-2 rounded-[6px]" style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)' }}>
+        <div ref={searchContainerRef} className="relative px-3 pb-3">
+          <div
+            className="relative flex items-center w-full h-[28px] px-2 rounded-[6px]"
+            style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)' }}
+          >
             <Search className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--text-secondary)' }} />
             <input
+              ref={searchInputRef}
               type="text"
-              placeholder="Search"
+              placeholder="Search lead or ID…"
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setIsDropdownOpen(true);
+              }}
+              onFocus={() => {
+                if (searchQuery.trim()) setIsDropdownOpen(true);
+              }}
+              onKeyDown={handleSearchKeyDown}
               className="flex-1 w-full h-full px-1.5 text-[12px] bg-transparent outline-none placeholder-gray-500"
               style={{ color: 'var(--text-primary)' }}
             />
-            <div className="flex items-center justify-center shrink-0 h-[18px] px-1.5 rounded-[4px] text-[10px] font-medium" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}>
-              ⌘K
-            </div>
+            {searchQuery ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  setIsDropdownOpen(false);
+                }}
+                className="flex items-center justify-center w-4 h-4 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors"
+                title="Clear search"
+                aria-label="Clear search"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            ) : (
+              <div
+                className="flex items-center justify-center shrink-0 h-[18px] px-1.5 rounded-[4px] text-[10px] font-medium"
+                style={{
+                  background: 'var(--bg-card)',
+                  border: '1px solid var(--border-input)',
+                  color: 'var(--text-secondary)',
+                }}
+              >
+                ⌘K
+              </div>
+            )}
           </div>
+
+          {/* Quick Search Popover / Dropdown for Sidebar */}
+          {isDropdownOpen && searchQuery.trim() && (
+            <div
+              className="absolute left-3 right-3 top-[32px] z-50 rounded-lg overflow-hidden shadow-lg"
+              style={{
+                background: 'var(--bg-card)',
+                border: '1px solid var(--border-input)',
+              }}
+            >
+              {sidebarMatches.length > 0 ? (
+                <div className="max-h-[260px] overflow-y-auto divide-y divide-[var(--border-main)]">
+                  {sidebarMatches.map((lead) => (
+                    <button
+                      key={lead.id}
+                      type="button"
+                      onClick={() => handleSelectLead(lead.id)}
+                      className="w-full text-left p-2 hover:bg-[var(--bg-hover)] transition-colors flex items-center justify-between gap-1.5"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[12px] font-semibold truncate leading-tight" style={{ color: 'var(--text-primary)' }}>
+                          {lead.name}
+                        </p>
+                        <p className="text-[10px] truncate mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                          {lead.agent || 'Unassigned'}
+                        </p>
+                      </div>
+                      <span
+                        className="text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0"
+                        style={{
+                          background: 'var(--bg-pill)',
+                          color: 'var(--text-secondary)',
+                        }}
+                      >
+                        {lead.channel}
+                      </span>
+                    </button>
+                  ))}
+                  {pathname !== '/' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        router.push('/');
+                        setIsDropdownOpen(false);
+                        onCloseMobile?.();
+                      }}
+                      className="w-full text-center py-1.5 text-[11px] font-medium text-[#0066FF] hover:underline bg-[var(--bg-panel)]"
+                    >
+                      View all in Inbox →
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div className="p-3 text-center text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                  No leads matching &ldquo;{searchQuery}&rdquo;
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Navigation */}

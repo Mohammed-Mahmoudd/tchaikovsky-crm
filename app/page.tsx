@@ -2,10 +2,11 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import Link from "next/link";
-import { ArrowLeft, Info, X, Calendar, CheckCircle2, Trash2 } from "lucide-react";
+import { ArrowLeft, Info, X, Calendar, CheckCircle2, Trash2, Search, AlertCircle } from "lucide-react";
 import { useBranches } from "./lib/branches";
 import { BranchSelect } from "./components/BranchSelect";
 import { ChatInputBar } from "./components/ChatInputBar";
+import { formatMetaErrorMessage, ParsedMetaError } from "./utils/errorParser";
 
 type Channel = "WA" | "IG" | "FB";
 
@@ -53,6 +54,7 @@ import { useAuth } from "./components/AuthProvider";
 import { formatLastMessageTime } from "./utils/time";
 import MessageTemplate, { parseTemplateAttachment } from "./components/MessageTemplate";
 import InstagramMedia from "./components/InstagramMedia";
+import { matchLeadSearch } from "./utils/search";
 
 const isPlaceholderText = (text?: string) => {
   if (!text) return true;
@@ -171,7 +173,31 @@ export default function InboxPage() {
     patchConversation,
     markConversationAsRead,
     refresh,
+    searchQuery,
+    setSearchQuery,
   } = useCRM();
+
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Keyboard shortcut: '/' or '⌘K' to focus the search input
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      } else if (
+        e.key === "/" &&
+        !["INPUT", "TEXTAREA"].includes((e.target as HTMLElement)?.tagName)
+      ) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   // Periodic refresh every 30s to keep relative timestamps (e.g. "23m", "1 day ago") live
   const [, setTimeTick] = useState(0);
@@ -193,14 +219,17 @@ export default function InboxPage() {
   // ── Filter logic (memoized to avoid re-calculating on unrelated renders) ──
   const filteredConversations = useMemo(() => {
     return conversations.filter((conv) => {
-      if (activeFilter === "All") return true;
-      if (activeFilter === "Mine") return conv.agent === user?.name;
-      if (activeFilter === "Unassigned") return conv.agent === "Unassigned";
-      if (activeFilter === "Open") return conv.status === "Open";
-      if (activeFilter === "Resolved") return conv.status === "Resolved";
+      if (activeFilter === "Mine" && conv.agent !== user?.name) return false;
+      if (activeFilter === "Unassigned" && conv.agent !== "Unassigned") return false;
+      if (activeFilter === "Open" && conv.status !== "Open") return false;
+      if (activeFilter === "Resolved" && conv.status !== "Resolved") return false;
+
+      if (searchQuery.trim() && !matchLeadSearch(conv, searchQuery)) {
+        return false;
+      }
       return true;
     });
-  }, [conversations, activeFilter, user?.name]);
+  }, [conversations, activeFilter, searchQuery, user?.name]);
 
   // Use activeChatId directly — memoized lookup
   const activeConv = useMemo(() => {
@@ -227,6 +256,14 @@ export default function InboxPage() {
   const [auditionBranch, setAuditionBranch] = useState("");
   const { branchGroups } = useBranches();
   const [isBookingAudition, setIsBookingAudition] = useState(false);
+
+  // Delivery error state for active chat
+  const [sendError, setSendError] = useState<ParsedMetaError | null>(null);
+
+  // Clear delivery error when switching chats
+  useEffect(() => {
+    setSendError(null);
+  }, [activeChatId]);
 
   const handleOpenBookingModal = () => {
     if (!activeConv) return;
@@ -285,6 +322,8 @@ export default function InboxPage() {
         patchConversation(activeConv.id, { agent: user.name });
       }
 
+      setSendError(null);
+
       try {
         const headers: Record<string, string> = { "Content-Type": "application/json" };
         if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -298,13 +337,17 @@ export default function InboxPage() {
           return true;
         } else {
           const data = await res.json().catch(() => null);
-          if (data?.error) {
-            alert(data.error);
-          }
+          const parsed = formatMetaErrorMessage(data?.error || data);
+          setSendError(parsed);
           return false;
         }
       } catch (err) {
         console.error("Failed to send reply:", err);
+        setSendError({
+          title: "Network error",
+          message: "Could not reach the server to send your reply.",
+          actionHint: "Please check your internet connection and try again.",
+        });
         return false;
       }
     },
@@ -336,20 +379,71 @@ export default function InboxPage() {
         `}
         style={{ background: "var(--bg-card)", borderRight: "1px solid var(--border-main)" }}
       >
-        <div className="p-4" style={{ borderBottom: "1px solid var(--border-main)" }}>
-          <h1 className="text-[18px] font-bold mb-3 flex items-center gap-2" style={{ color: "var(--text-primary)" }}>
-            Inbox
-            <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full" style={{ background: "var(--bg-pill)", color: "var(--text-secondary)" }}>
-              {filteredConversations.length}
-            </span>
-          </h1>
-          <div className="flex flex-wrap gap-2">
+        <div className="p-3.5 space-y-2.5" style={{ borderBottom: "1px solid var(--border-main)" }}>
+          <div className="flex items-center justify-between">
+            <h1 className="text-[17px] font-bold flex items-center gap-2" style={{ color: "var(--text-primary)" }}>
+              Inbox
+              <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full" style={{ background: "var(--bg-pill)", color: "var(--text-secondary)" }}>
+                {filteredConversations.length}
+                {searchQuery.trim() && ` of ${conversations.length}`}
+              </span>
+            </h1>
+          </div>
+
+          {/* Quick Search Bar for Lead Name or ID */}
+          <div
+            className="relative flex items-center w-full h-[32px] px-2.5 rounded-lg"
+            style={{
+              background: "var(--bg-input)",
+              border: "1px solid var(--border-input)",
+            }}
+          >
+            <Search className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--text-secondary)" }} />
+            <input
+              ref={searchInputRef}
+              type="text"
+              placeholder="Search lead name or ID…"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && filteredConversations.length > 0) {
+                  handleSelectConv(filteredConversations[0].id);
+                } else if (e.key === "Escape") {
+                  setSearchQuery("");
+                }
+              }}
+              className="flex-1 w-full h-full px-2 text-[13px] bg-transparent outline-none placeholder:text-[var(--text-muted)]"
+              style={{ color: "var(--text-primary)" }}
+            />
+            {searchQuery ? (
+              <button
+                type="button"
+                onClick={() => setSearchQuery("")}
+                className="p-1 rounded hover:opacity-70 transition-opacity"
+                style={{ color: "var(--text-secondary)" }}
+                aria-label="Clear search"
+                title="Clear search"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            ) : (
+              <span
+                className="hidden sm:inline-flex items-center justify-center h-[18px] px-1.5 rounded text-[10px] font-medium"
+                style={{ background: "var(--bg-card)", border: "1px solid var(--border-input)", color: "var(--text-secondary)" }}
+              >
+                /
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-wrap gap-1.5">
             {filters.map((filter) => (
               <button
                 key={filter}
                 onClick={() => setActiveFilter(filter)}
-                className={`text-[11px] font-semibold px-2.5 py-1 rounded-full transition-colors ${activeFilter === filter ? "bg-[#0066FF] text-white" : ""
-                  }`}
+                className={`text-[11px] font-semibold px-2.5 py-1 rounded-full transition-colors ${
+                  activeFilter === filter ? "bg-[#0066FF] text-white" : ""
+                }`}
                 style={activeFilter !== filter ? { background: "var(--bg-pill)", color: "var(--text-secondary)" } : undefined}
               >
                 {filter}
@@ -359,59 +453,88 @@ export default function InboxPage() {
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          {filteredConversations.map((conv) => {
-            const isActive = conv.id === activeChatId;
-            const timeStr = formatLastMessageTime(conv.lastMessageAt);
-            return (
-              <div
-                key={conv.id}
-                onClick={() => handleSelectConv(conv.id)}
-                className="flex items-start justify-between p-3.5 cursor-pointer transition-colors"
-                style={{
-                  borderBottom: "1px solid var(--border-main)",
-                  background: isActive ? "var(--bg-selected)" : undefined,
-                }}
-              >
-                <div className="min-w-0 pr-2 flex-1">
-                  <h3 className="text-[13px] font-semibold leading-tight mb-0.5 truncate" style={{ color: "var(--text-primary)" }}>
-                    {conv.name}
-                  </h3>
-                  <p className="text-[11px] truncate" style={{ color: isActive ? "#0066FF" : "var(--text-secondary)" }}>
-                    {conv.agent}
-                  </p>
-                </div>
-                <div className="flex flex-col items-end justify-between shrink-0 self-stretch gap-1">
-                  <span
-                    className="text-[9px] font-bold tracking-wide px-1.5 py-0.5 rounded"
-                    style={{
-                      background: isActive ? "var(--bg-card)" : "var(--bg-pill)",
-                      color: isActive ? "#0066FF" : "var(--text-secondary)",
-                    }}
-                  >
-                    {conv.channel}
-                  </span>
-                  <div className="flex items-center gap-1.5 mt-auto">
-                    {timeStr && (
-                      <span
-                        className="text-[10px] font-medium"
-                        style={{
-                          color: isActive ? "#0066FF" : "var(--text-muted)",
-                          opacity: isActive ? 0.9 : 0.85,
-                        }}
-                      >
-                        {timeStr}
-                      </span>
-                    )}
-                    {Boolean(conv.unreadCount && conv.unreadCount > 0) && (
-                      <span className="flex items-center justify-center min-w-[16px] h-[16px] px-1 bg-[#0066FF] text-white text-[9px] font-bold rounded-full">
-                        {conv.unreadCount}
-                      </span>
-                    )}
+          {filteredConversations.length === 0 ? (
+            <div className="p-6 text-center">
+              <div className="w-10 h-10 mx-auto mb-2 rounded-full flex items-center justify-center" style={{ background: "var(--bg-pill)" }}>
+                <Search className="w-5 h-5 opacity-40" style={{ color: "var(--text-secondary)" }} />
+              </div>
+              <p className="text-[13px] font-semibold" style={{ color: "var(--text-primary)" }}>
+                {searchQuery ? "No leads found" : "No conversations"}
+              </p>
+              <p className="text-[11px] mt-1 mb-3" style={{ color: "var(--text-secondary)" }}>
+                {searchQuery
+                  ? `No conversations match "${searchQuery}"`
+                  : `No conversations in ${activeFilter}`}
+              </p>
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="text-[11px] font-semibold px-3 py-1.5 rounded-lg transition-opacity hover:opacity-90"
+                  style={{
+                    background: "#0066FF",
+                    color: "#ffffff",
+                  }}
+                >
+                  Clear search
+                </button>
+              )}
+            </div>
+          ) : (
+            filteredConversations.map((conv) => {
+              const isActive = conv.id === activeChatId;
+              const timeStr = formatLastMessageTime(conv.lastMessageAt);
+              return (
+                <div
+                  key={conv.id}
+                  onClick={() => handleSelectConv(conv.id)}
+                  className="flex items-start justify-between p-3.5 cursor-pointer transition-colors"
+                  style={{
+                    borderBottom: "1px solid var(--border-main)",
+                    background: isActive ? "var(--bg-selected)" : undefined,
+                  }}
+                >
+                  <div className="min-w-0 pr-2 flex-1">
+                    <h3 className="text-[13px] font-semibold leading-tight mb-0.5 truncate" style={{ color: "var(--text-primary)" }}>
+                      {conv.name}
+                    </h3>
+                    <p className="text-[11px] truncate" style={{ color: isActive ? "#0066FF" : "var(--text-secondary)" }}>
+                      {conv.agent}
+                    </p>
+                  </div>
+                  <div className="flex flex-col items-end justify-between shrink-0 self-stretch gap-1">
+                    <span
+                      className="text-[9px] font-bold tracking-wide px-1.5 py-0.5 rounded"
+                      style={{
+                        background: isActive ? "var(--bg-card)" : "var(--bg-pill)",
+                        color: isActive ? "#0066FF" : "var(--text-secondary)",
+                      }}
+                    >
+                      {conv.channel}
+                    </span>
+                    <div className="flex items-center gap-1.5 mt-auto">
+                      {timeStr && (
+                        <span
+                          className="text-[10px] font-medium"
+                          style={{
+                            color: isActive ? "#0066FF" : "var(--text-muted)",
+                            opacity: isActive ? 0.9 : 0.85,
+                          }}
+                        >
+                          {timeStr}
+                        </span>
+                      )}
+                      {Boolean(conv.unreadCount && conv.unreadCount > 0) && (
+                        <span className="flex items-center justify-center min-w-[16px] h-[16px] px-1 bg-[#0066FF] text-white text-[9px] font-bold rounded-full">
+                          {conv.unreadCount}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })
+          )}
         </div>
       </div>
 
@@ -709,6 +832,44 @@ export default function InboxPage() {
               })()}
               <div ref={messagesEndRef} />
             </div>
+
+            {/* Delivery error banner */}
+            {sendError && (
+              <div
+                role="alert"
+                className="mx-4 md:mx-6 mb-2 p-3 rounded-lg flex items-start justify-between gap-3 text-xs shrink-0"
+                style={{
+                  background: "rgba(239, 68, 68, 0.08)",
+                  border: "1px solid rgba(239, 68, 68, 0.25)",
+                  color: "var(--text-primary)",
+                }}
+              >
+                <div className="flex items-start gap-2.5 min-w-0">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-500 mt-0.5" aria-hidden="true" />
+                  <div className="min-w-0">
+                    <p className="font-semibold text-red-600 dark:text-red-400">
+                      {sendError.title}
+                    </p>
+                    <p className="mt-0.5 leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+                      {sendError.message}
+                    </p>
+                    {sendError.actionHint && (
+                      <p className="mt-1 font-medium text-[11px] leading-relaxed" style={{ color: "var(--text-muted)" }}>
+                        {sendError.actionHint}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSendError(null)}
+                  className="p-1 -mr-1 rounded hover:bg-black/5 dark:hover:bg-white/10 text-muted transition-colors shrink-0"
+                  aria-label="Dismiss error"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
 
             {/* Chat Input Bar (isolated state for zero-latency typing) */}
             <ChatInputBar
