@@ -296,6 +296,14 @@ export default function InboxPage() {
     async (textToSend: string): Promise<boolean> => {
       if (isReadOnly || !textToSend.trim() || !activeConv || !canSendMessages) return false;
 
+      if (activeConv.channel === "WA" && user?.email?.toLowerCase().trim() !== "admission@muhammad.com") {
+        setSendError({
+          title: "Privacy Restricted",
+          message: "WhatsApp testing is restricted to admission@muhammad.com.",
+        });
+        return false;
+      }
+
       // Auto-assign to admission officer on first reply to unassigned lead (optimistic 0ms update)
       if (isAdmission && !isAssigned && user?.name) {
         patchConversation(activeConv.id, { agent: user.name });
