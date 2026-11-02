@@ -222,7 +222,8 @@ export default function InboxPage() {
   const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager";
   const isAdmission = user?.role === "admission_officer" || user?.role === "agent";
   const isAssignedToOther = isAssigned && !isAssignedToMe;
-  const canSendMessages = !isReadOnly;
+  const isWhatsAppAllowed = user?.email?.toLowerCase().trim() === "admission@muhammad.com";
+  const canSendMessages = !isReadOnly && (activeConv?.channel !== "WA" || isWhatsAppAllowed);
   const canAssignToSelf = !isReadOnly && isAdmission && (!isAssigned || isAssignedToMe);
   const canEditAgent = !isReadOnly && (isChairman || canAssignToSelf);
 

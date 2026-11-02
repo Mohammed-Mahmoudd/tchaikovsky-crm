@@ -134,9 +134,20 @@ function getLocalTodayIso(): string {
 }
 
 export function CRMProvider({ children }: { children: React.ReactNode }) {
-  const { isReadOnly, token } = useAuth();
+  const { isReadOnly, token, user } = useAuth();
+
+  // Privacy isolation for personal WhatsApp testing:
+  // ONLY admission@muhammad.com is permitted to view or interact with WhatsApp messages
+  const isWhatsAppAllowed = user?.email?.toLowerCase().trim() === "admission@muhammad.com";
+
   // Hydrate instantly from cache so dashboard/reports/pipeline appear in 0ms (no loading spinner)
   const [conversations, setConversations] = useState<Conversation[]>(getCachedConversations);
+
+  // Filter conversations for the UI — strictly exclude WA for all other accounts
+  const visibleConversations = useMemo(() => {
+    if (isWhatsAppAllowed) return conversations;
+    return conversations.filter((c) => c.channel !== "WA");
+  }, [conversations, isWhatsAppAllowed]);
   const [loading, setLoading] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
     try {
@@ -167,6 +178,16 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       initialLoadDone.current = true;
     }
   }, [conversations.length]);
+
+  // Auto-deselect active chat if it is a WhatsApp conversation and user is not allowed
+  useEffect(() => {
+    if (!isWhatsAppAllowed && activeChatId) {
+      const activeConv = conversations.find((c) => c.id === activeChatId);
+      if (activeConv?.channel === "WA") {
+        setActiveChatId(null);
+      }
+    }
+  }, [isWhatsAppAllowed, activeChatId, conversations]);
 
   // Fix B: when true the 3s poll is silently skipped (set during drag + 3s after drop)
   const pollPausedRef = useRef(false);
@@ -596,7 +617,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     let auditions = 0;
     let followUps = 0;
 
-    conversations.forEach((c) => {
+    visibleConversations.forEach((c) => {
       // 1. Inbox badge: total unread messages
       if (c.unreadCount && c.unreadCount > 0) {
         inbox += c.unreadCount;
@@ -627,7 +648,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     });
 
     return { inbox, leads, auditions, followUps };
-  }, [conversations]);
+  }, [visibleConversations]);
 
   // Instant optimistic update across all pages + background PATCH
   const patchConversation = useCallback(
@@ -752,16 +773,20 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   // 1-Click navigation from any page to open that user's chat in Inbox
   const openChat = useCallback(
     (id: string) => {
+      const target = conversations.find((c) => c.id === id);
+      if (target?.channel === "WA" && !isWhatsAppAllowed) {
+        return;
+      }
       setActiveChatId(id);
       router.push("/");
     },
-    [router]
+    [conversations, isWhatsAppAllowed, router]
   );
 
   return (
     <CRMContext.Provider
       value={{
-        conversations,
+        conversations: visibleConversations,
         loading,
         badgeCounts,
         assignableAgents,
