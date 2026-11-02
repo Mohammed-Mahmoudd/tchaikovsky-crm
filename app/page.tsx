@@ -177,28 +177,6 @@ export default function InboxPage() {
     setSearchQuery,
   } = useCRM();
 
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
-
-  // Keyboard shortcut: '/' or '⌘K' to focus the search input
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select();
-      } else if (
-        e.key === "/" &&
-        !["INPUT", "TEXTAREA"].includes((e.target as HTMLElement)?.tagName)
-      ) {
-        e.preventDefault();
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
-
   // Periodic refresh every 30s to keep relative timestamps (e.g. "23m", "1 day ago") live
   const [, setTimeTick] = useState(0);
   useEffect(() => {
@@ -388,52 +366,6 @@ export default function InboxPage() {
                 {searchQuery.trim() && ` of ${conversations.length}`}
               </span>
             </h1>
-          </div>
-
-          {/* Quick Search Bar for Lead Name or ID */}
-          <div
-            className="relative flex items-center w-full h-[32px] px-2.5 rounded-lg"
-            style={{
-              background: "var(--bg-input)",
-              border: "1px solid var(--border-input)",
-            }}
-          >
-            <Search className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--text-secondary)" }} />
-            <input
-              ref={searchInputRef}
-              type="text"
-              placeholder="Search lead name or ID…"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && filteredConversations.length > 0) {
-                  handleSelectConv(filteredConversations[0].id);
-                } else if (e.key === "Escape") {
-                  setSearchQuery("");
-                }
-              }}
-              className="flex-1 w-full h-full px-2 text-[13px] bg-transparent outline-none placeholder:text-[var(--text-muted)]"
-              style={{ color: "var(--text-primary)" }}
-            />
-            {searchQuery ? (
-              <button
-                type="button"
-                onClick={() => setSearchQuery("")}
-                className="p-1 rounded hover:opacity-70 transition-opacity"
-                style={{ color: "var(--text-secondary)" }}
-                aria-label="Clear search"
-                title="Clear search"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            ) : (
-              <span
-                className="hidden sm:inline-flex items-center justify-center h-[18px] px-1.5 rounded text-[10px] font-medium"
-                style={{ background: "var(--bg-card)", border: "1px solid var(--border-input)", color: "var(--text-secondary)" }}
-              >
-                /
-              </span>
-            )}
           </div>
 
           <div className="flex flex-wrap gap-1.5">
