@@ -53,6 +53,7 @@ export type Conversation = {
   cashIn?: number;
   branch?: string;
   auditionOutcome?: string;
+  followUpTags?: string[];
   messages: Message[];
   createdAt?: string;
   updatedAt?: string;
@@ -229,14 +230,24 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     return {
       id: c.senderId,
       _id: c._id ? String(c._id) : undefined,
-      name:
-        c.name ||
-        (c.channel === "FB"
-          ? "Messenger User"
-          : c.channel === "IG"
-            ? "Instagram User"
-            : "WhatsApp User"),
-      phone: c.phone || `Live ${c.channel}`,
+      name: (() => {
+        // If a real human name is present, use it
+        const isPlaceholder = !c.name ||
+          c.name === "WhatsApp User" ||
+          c.name === "WhatsApp Contact" ||
+          /^\+\d{13,}$/.test(c.name); // Fake LID number placeholder
+
+        if (!isPlaceholder && !/^\+\d+$/.test(c.name)) return c.name;
+
+        if (c.channel === "FB") return c.name || "Messenger User";
+        if (c.channel === "IG") return c.name || "Instagram User";
+
+        // WA: prefer genuine E.164 phone number from DB (e.g. +201126633680)
+        const validPhone = c.phone && /^\+\d{7,13}$/.test(c.phone) ? c.phone : null;
+        const derivedPhone = c.senderId && c.senderId.length <= 13 ? `+${String(c.senderId).replace(/\D/g, "")}` : null;
+        return validPhone || (!isPlaceholder ? c.name : null) || derivedPhone || c.phone || "WhatsApp Contact";
+      })(),
+      phone: (c.phone && /^\+\d{7,13}$/.test(c.phone)) ? c.phone : (c.phone || `Live ${c.channel}`),
       agent: c.agent || "Unassigned",
       channel: (c.channel as Channel) || "FB",
       status: c.status || "Open",
@@ -251,6 +262,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       followUpCompletedAt: safeDateIso(c.followUpCompletedAt),
       auditionDate: safeDateIso(c.auditionDate) || (c.pipeline === "Audition Booked" ? safeDateIso(c.followUpDate) : ""),
       auditionOutcome: c.auditionOutcome || "",
+      followUpTags: Array.isArray(c.followUpTags) ? c.followUpTags : [],
       branch: c.branch || "",
       formAnswers: c.formAnswers || {},
       cashIn: (() => {
@@ -508,6 +520,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   prev.map((c) => (c.id === conversationId ? { ...c, unreadCount: 0 } : c))
                 );
               }
+            } else if (payload.type === "names_updated") {
+              // WhatsApp backfill completed on backend — refresh conversations so real names appear
+              fetchConversations();
             }
           } catch (e) {
             console.error("CRMContext: SSE message parse error", e);
@@ -634,14 +649,16 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       }
 
       // 4. Follow-ups badge: due today or overdue (excluding booked auditions which are tracked under Auditions and completed follow-ups)
-      if ((c.pipeline !== "Audition Booked" || c.auditionOutcome === "joining-later") && !c.followUpCompleted) {
+      const tags = c.followUpTags || [];
+      const hasFollowUpTag = tags.includes('payment-pending') || tags.includes('trial-session');
+      if ((c.pipeline !== "Audition Booked" || c.auditionOutcome === "joining-later" || hasFollowUpTag) && !c.followUpCompleted) {
         if (c.followUpDate) {
           if (c.followUpDate <= today) {
             followUps += 1;
           }
         } else if (c.followUpNote && c.followUpNote.trim()) {
           followUps += 1;
-        } else if (c.auditionOutcome === "joining-later") {
+        } else if (c.auditionOutcome === "joining-later" || hasFollowUpTag) {
           followUps += 1;
         }
       }

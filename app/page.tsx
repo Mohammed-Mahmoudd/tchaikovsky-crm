@@ -163,7 +163,7 @@ export default function InboxPage() {
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
-  const filters = ["All", "Mine", "Unassigned", "Open", "Resolved"];
+  const filters = ["All", "Mine", "Unassigned", "Open", "Resolved", "WA", "IG", "FB"];
 
   const {
     conversations,
@@ -201,6 +201,9 @@ export default function InboxPage() {
       if (activeFilter === "Unassigned" && conv.agent !== "Unassigned") return false;
       if (activeFilter === "Open" && conv.status !== "Open") return false;
       if (activeFilter === "Resolved" && conv.status !== "Resolved") return false;
+      if (activeFilter === "WA" && conv.channel !== "WA") return false;
+      if (activeFilter === "IG" && conv.channel !== "IG") return false;
+      if (activeFilter === "FB" && conv.channel !== "FB") return false;
 
       if (searchQuery.trim() && !matchLeadSearch(conv, searchQuery)) {
         return false;
@@ -377,12 +380,13 @@ export default function InboxPage() {
             </h1>
           </div>
 
+          {/* Filters */}
           <div className="flex flex-wrap gap-1.5">
             {filters.map((filter) => (
               <button
                 key={filter}
                 onClick={() => setActiveFilter(filter)}
-                className={`text-[11px] font-semibold px-2.5 py-1 rounded-full transition-colors ${
+                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full transition-colors ${
                   activeFilter === filter ? "bg-[#0066FF] text-white" : ""
                 }`}
                 style={activeFilter !== filter ? { background: "var(--bg-pill)", color: "var(--text-secondary)" } : undefined}
@@ -1014,19 +1018,31 @@ export default function InboxPage() {
                     borderColor: 'var(--border-input)',
                   }}
                 >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[11px] font-bold flex items-center gap-1" style={{ color: 'var(--text-primary)' }}>
-                      <CheckCircle2 className="w-3.5 h-3.5" style={{ color: '#0066FF' }} />
-                      {activeConv.auditionOutcome === 'registered' && 'Registered'}
-                      {activeConv.auditionOutcome === 'schedule-followup' && 'Schedule Follow up'}
-                      {activeConv.auditionOutcome === 'paid-trial' && 'Paid Trial'}
-                      {activeConv.auditionOutcome === 'joining-later' && 'Joining Later'}
-                      {activeConv.auditionOutcome === 'no-show' && 'No Show'}
-                      {!activeConv.auditionOutcome && 'Audition Booked'}
-                    </span>
+                  <div className="flex items-center justify-between mb-1.5 gap-2">
+                    <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" style={{ color: '#0066FF' }} />
+                      <select
+                        disabled={isReadOnly}
+                        value={activeConv.auditionOutcome || ''}
+                        onChange={(e) => patchConversation(activeConv.id, { auditionOutcome: e.target.value })}
+                        className="text-[11px] font-bold rounded px-1.5 py-0.5 outline-none cursor-pointer border transition-colors flex-1 min-w-0"
+                        style={{
+                          borderColor: 'var(--border-input)',
+                          background: 'var(--bg-input)',
+                          color: 'var(--text-primary)',
+                        }}
+                      >
+                        <option value="">Audition Booked</option>
+                        <option value="schedule-followup">Schedule Follow up</option>
+                        <option value="registered">Registered</option>
+                        <option value="paid-trial">Paid Trial</option>
+                        <option value="joining-later">Joining Later</option>
+                        <option value="no-show">No Show</option>
+                      </select>
+                    </div>
                     <Link
                       href={`/auditions?date=${activeConv.auditionDate || activeConv.followUpDate || ''}&id=${activeConv.id}`}
-                      className="text-[10px] font-semibold text-[#0066FF] hover:underline flex items-center gap-0.5"
+                      className="text-[10px] font-semibold text-[#0066FF] hover:underline flex items-center gap-0.5 shrink-0"
                     >
                       <Calendar className="w-3 h-3" /> Calendar →
                     </Link>
@@ -1092,7 +1108,10 @@ export default function InboxPage() {
             {/* Follow-up */}
             {(() => {
               const isJoiningLater = activeConv.auditionOutcome === 'joining-later';
-              const hasFollowUp = Boolean(activeConv.followUpDate || activeConv.followUpNote || isJoiningLater);
+              const tags = activeConv.followUpTags || [];
+              const isPaymentPending = tags.includes('payment-pending');
+              const isTrialSession = tags.includes('trial-session');
+              const hasFollowUp = Boolean(activeConv.followUpDate || activeConv.followUpNote || isJoiningLater || isPaymentPending || isTrialSession);
 
               const handleToggleJoiningLater = () => {
                 if (isReadOnly) return;
@@ -1125,6 +1144,51 @@ export default function InboxPage() {
                 }
               };
 
+              const handleToggleTag = (tag: string, defaultNote: string) => {
+                if (isReadOnly) return;
+                const currentTags = activeConv.followUpTags || [];
+                const hasTag = currentTags.includes(tag);
+                const newTags = hasTag
+                  ? currentTags.filter((t: string) => t !== tag)
+                  : [...currentTags, tag];
+
+                const updates: Record<string, any> = {
+                  followUpTags: newTags,
+                  followUpCompleted: false,
+                };
+
+                // When turning ON a tag (payment-pending or trial-session):
+                // User requirement: make it schedule in audition options as Schedule follow up
+                if (!hasTag) {
+                  updates.auditionOutcome = 'schedule-followup';
+
+                  if (!activeConv.followUpDate) {
+                    const d = new Date();
+                    d.setDate(d.getDate() + 3);
+                    const y = d.getFullYear();
+                    const m = String(d.getMonth() + 1).padStart(2, '0');
+                    const day = String(d.getDate()).padStart(2, '0');
+                    updates.followUpDate = `${y}-${m}-${day}`;
+                  }
+                  if (!activeConv.auditionDate) {
+                    updates.auditionDate = updates.followUpDate || activeConv.followUpDate;
+                  }
+                  if (!activeConv.followUpNote || !activeConv.followUpNote.trim()) {
+                    updates.followUpNote = defaultNote;
+                  }
+                } else {
+                  // When turning OFF, if no follow-up tags remain and auditionOutcome was schedule-followup, reset it
+                  const remainingTags = newTags;
+                  if (!remainingTags.includes('payment-pending') && !remainingTags.includes('trial-session')) {
+                    if (activeConv.auditionOutcome === 'schedule-followup') {
+                      updates.auditionOutcome = '';
+                    }
+                  }
+                }
+
+                patchConversation(activeConv.id, updates);
+              };
+
               const handleClearFollowUp = () => {
                 if (isReadOnly) return;
                 patchConversation(activeConv.id, {
@@ -1132,7 +1196,8 @@ export default function InboxPage() {
                   followUpNote: '',
                   followUpCompleted: false,
                   followUpCompletedAt: null,
-                  auditionOutcome: isJoiningLater ? '' : activeConv.auditionOutcome,
+                  followUpTags: [],
+                  auditionOutcome: (isJoiningLater || activeConv.auditionOutcome === 'schedule-followup') ? '' : activeConv.auditionOutcome,
                 });
               };
 
@@ -1151,6 +1216,30 @@ export default function InboxPage() {
                           }}
                         >
                           Joining Later
+                        </span>
+                      )}
+                      {isPaymentPending && (
+                        <span
+                          className="text-[9px] font-medium px-1.5 py-0.5 rounded-full"
+                          style={{
+                            background: 'rgba(239,68,68,0.08)',
+                            color: '#EF4444',
+                            border: '1px solid rgba(239,68,68,0.2)',
+                          }}
+                        >
+                          Payment Pending
+                        </span>
+                      )}
+                      {isTrialSession && (
+                        <span
+                          className="text-[9px] font-medium px-1.5 py-0.5 rounded-full"
+                          style={{
+                            background: 'rgba(139,92,246,0.08)',
+                            color: '#8B5CF6',
+                            border: '1px solid rgba(139,92,246,0.2)',
+                          }}
+                        >
+                          Trial Session
                         </span>
                       )}
                     </div>
@@ -1184,10 +1273,10 @@ export default function InboxPage() {
 
                   <div className="flex items-center gap-2 mb-2">
                     <input
-                      key={`fn-${activeConv.id}-${activeConv.followUpNote || ''}-${activeConv.auditionOutcome || ''}`}
+                      key={`fn-${activeConv.id}-${activeConv.followUpNote || ''}-${activeConv.auditionOutcome || ''}-${(activeConv.followUpTags || []).join(',')}`}
                       type="text"
                       defaultValue={activeConv.followUpNote || ""}
-                      placeholder={isJoiningLater ? "e.g. Joining in summer" : "e.g. Call back about Sunday"}
+                      placeholder={isJoiningLater ? "e.g. Joining in summer" : isPaymentPending ? "e.g. Waiting for transfer" : isTrialSession ? "e.g. Trial on Saturday" : "e.g. Call back about Sunday"}
                       className={`flex-1 min-w-0 rounded-[6px] text-[11px] py-1.5 px-2 outline-none placeholder-gray-400 transition-colors ${
                         activeConv.followUpCompleted ? 'line-through' : ''
                       }`}
@@ -1203,11 +1292,14 @@ export default function InboxPage() {
                         }
                       }}
                     />
+                  </div>
+                  {/* Tag checkboxes row */}
+                  <div className="flex items-center gap-1.5 mb-2 flex-wrap">
                     <label
                       className="flex items-center gap-1.5 shrink-0 cursor-pointer select-none py-1.5 px-2 rounded-[6px] border transition-colors h-[29px]"
                       style={{
-                        background: isJoiningLater ? 'var(--bg-pill)' : 'var(--bg-input)',
-                        borderColor: 'var(--border-input)',
+                        background: isJoiningLater ? 'rgba(245,158,11,0.06)' : 'var(--bg-input)',
+                        borderColor: isJoiningLater ? 'rgba(245,158,11,0.25)' : 'var(--border-input)',
                       }}
                       title="Mark as joining later"
                     >
@@ -1216,21 +1308,69 @@ export default function InboxPage() {
                         checked={isJoiningLater}
                         disabled={isReadOnly}
                         onChange={handleToggleJoiningLater}
-                        className="w-3.5 h-3.5 rounded cursor-pointer accent-[#0066FF]"
+                        className="w-3.5 h-3.5 rounded cursor-pointer accent-[#F59E0B]"
                       />
                       <span
-                        className="text-[11px] font-medium whitespace-nowrap"
+                        className="text-[10px] font-medium whitespace-nowrap"
                         style={{
-                          color: isJoiningLater ? 'var(--text-primary)' : 'var(--text-secondary)',
+                          color: isJoiningLater ? '#F59E0B' : 'var(--text-secondary)',
                         }}
                       >
                         Joining later
                       </span>
                     </label>
+                    <label
+                      className="flex items-center gap-1.5 shrink-0 cursor-pointer select-none py-1.5 px-2 rounded-[6px] border transition-colors h-[29px]"
+                      style={{
+                        background: isPaymentPending ? 'rgba(239,68,68,0.06)' : 'var(--bg-input)',
+                        borderColor: isPaymentPending ? 'rgba(239,68,68,0.25)' : 'var(--border-input)',
+                      }}
+                      title="Mark as payment pending"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isPaymentPending}
+                        disabled={isReadOnly}
+                        onChange={() => handleToggleTag('payment-pending', 'Payment Pending - Follow up')}
+                        className="w-3.5 h-3.5 rounded cursor-pointer accent-[#EF4444]"
+                      />
+                      <span
+                        className="text-[10px] font-medium whitespace-nowrap"
+                        style={{
+                          color: isPaymentPending ? '#EF4444' : 'var(--text-secondary)',
+                        }}
+                      >
+                        Payment pending
+                      </span>
+                    </label>
+                    <label
+                      className="flex items-center gap-1.5 shrink-0 cursor-pointer select-none py-1.5 px-2 rounded-[6px] border transition-colors h-[29px]"
+                      style={{
+                        background: isTrialSession ? 'rgba(139,92,246,0.06)' : 'var(--bg-input)',
+                        borderColor: isTrialSession ? 'rgba(139,92,246,0.25)' : 'var(--border-input)',
+                      }}
+                      title="Mark as trial session"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isTrialSession}
+                        disabled={isReadOnly}
+                        onChange={() => handleToggleTag('trial-session', 'Trial Session - Follow up')}
+                        className="w-3.5 h-3.5 rounded cursor-pointer accent-[#8B5CF6]"
+                      />
+                      <span
+                        className="text-[10px] font-medium whitespace-nowrap"
+                        style={{
+                          color: isTrialSession ? '#8B5CF6' : 'var(--text-secondary)',
+                        }}
+                      >
+                        Trial session
+                      </span>
+                    </label>
                   </div>
                   <div className="flex gap-2">
                     <input
-                      key={`fd-${activeConv.id}-${activeConv.followUpDate || ''}-${activeConv.auditionOutcome || ''}`}
+                      key={`fd-${activeConv.id}-${activeConv.followUpDate || ''}-${activeConv.auditionOutcome || ''}-${(activeConv.followUpTags || []).join(',')}`}
                       type="date"
                       defaultValue={activeConv.followUpDate || ""}
                       className={`flex-1 rounded-[6px] px-2 py-1.5 text-[11px] outline-none cursor-pointer transition-colors ${

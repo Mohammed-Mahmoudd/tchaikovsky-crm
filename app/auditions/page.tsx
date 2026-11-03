@@ -4,13 +4,13 @@ import React, { useState, useMemo, useCallback, useRef, useEffect, Suspense } fr
 import { useSearchParams } from 'next/navigation';
 import { useCRM } from '../context/CRMContext';
 import { useAuth } from '../components/AuthProvider';
-import { MessageSquare, Calendar, ChevronLeft, ChevronRight, X, MapPin, ChevronDown, Search } from 'lucide-react';
+import { MessageSquare, Calendar, ChevronLeft, ChevronRight, X, MapPin, ChevronDown, Search, Lock, Unlock, User, Clock, Check } from 'lucide-react';
 import { useBranches, LegacyBranchGroup } from '../lib/branches';
 import { BranchSelect } from '../components/BranchSelect';
 
 type AuditionOutcome = 'registered' | 'schedule-followup' | 'paid-trial' | 'joining-later' | 'no-show';
-type SlotStatus = AuditionOutcome | 'booked';
-type AuditionStatus = SlotStatus | 'free';
+type SlotStatus = AuditionOutcome | 'booked' | 'closed';
+type AuditionStatus = SlotStatus | 'free' | 'closed';
 
 type Slot = {
   id: string | number;
@@ -75,8 +75,8 @@ function formatTime12(time: string): string {
 function parseOverride(val: any): SlotStatus | null {
   if (!val) return null;
   if (typeof val === 'string') {
-    // New 5 outcomes
-    if (val === 'registered' || val === 'schedule-followup' || val === 'paid-trial' || val === 'joining-later' || val === 'no-show' || val === 'booked') return val as SlotStatus;
+    // New 5 outcomes + closed
+    if (val === 'registered' || val === 'schedule-followup' || val === 'paid-trial' || val === 'joining-later' || val === 'no-show' || val === 'booked' || val === 'closed') return val as SlotStatus;
     // Legacy mappings
     if (val === 'attended' || val === 'confirmed') return 'schedule-followup';
     if (val === 'declined') return 'no-show';
@@ -568,8 +568,8 @@ function BranchFilterPopover({
 }
 
 function AuditionsPageInner() {
-  const { conversations, patchConversation, openChat } = useCRM();
-  const { isReadOnly } = useAuth();
+  const { conversations, patchConversation, openChat, assignableAgents } = useCRM();
+  const { isReadOnly, user } = useAuth();
   const { branchGroups, legacyBranchGroups } = useBranches();
   const searchParams = useSearchParams();
   const urlDate = searchParams.get('date');
@@ -626,11 +626,72 @@ function AuditionsPageInner() {
   }, []);
   const [addingSlot, setAddingSlot] = useState<{ dateKey: string; time: string; agent: string } | null>(null);
   const [bookingModal, setBookingModal] = useState<BookingModal>(null);
-  const [bookForm, setBookForm] = useState({ branch: '', name: '', type: 'Adult', age: '', instrument: '' });
+  const [bookForm, setBookForm] = useState({ branch: '', name: '', type: 'Adult', age: '', instrument: '', agent: 'Unassigned' });
   const [slotPanel, setSlotPanel] = useState<SlotPanelState>(null);
   const [panelComment, setPanelComment] = useState('');
+  const [panelAgent, setPanelAgent] = useState('Unassigned');
   const [panelStatus, setPanelStatus] = useState<SlotStatus>('booked');
   const [panelFollowUpDate, setPanelFollowUpDate] = useState('');
+
+  // Track closed days and closed slots (saved in localStorage for instantaneous 0ms response)
+  const [closedDays, setClosedDays] = useState<Record<string, boolean>>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const saved = localStorage.getItem('audition_closed_days');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const [closedSlots, setClosedSlots] = useState<Record<string, boolean>>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const saved = localStorage.getItem('audition_closed_slots');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const setDayClosed = useCallback((dateKey: string, closed: boolean) => {
+    setClosedDays(prev => {
+      const next = { ...prev };
+      if (closed) {
+        next[dateKey] = true;
+      } else {
+        delete next[dateKey];
+      }
+      try {
+        localStorage.setItem('audition_closed_days', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }, []);
+
+  const setSlotClosed = useCallback((slotId: string | number, closed: boolean) => {
+    const sId = String(slotId);
+    setClosedSlots(prev => {
+      const next = { ...prev };
+      if (closed) {
+        next[sId] = true;
+      } else {
+        delete next[sId];
+      }
+      try {
+        localStorage.setItem('audition_closed_slots', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }, []);
+
+  const toggleDayClosed = useCallback((dateKey: string) => {
+    setDayClosed(dateKey, !closedDays[dateKey]);
+  }, [closedDays, setDayClosed]);
+
+  const toggleSlotClosed = useCallback((slotId: string | number) => {
+    setSlotClosed(slotId, !closedSlots[String(slotId)]);
+  }, [closedSlots, setSlotClosed]);
 
   // Track status overrides in real time so cards immediately update and never disappear
   const [statusOverrides, setStatusOverrides] = useState<Record<string, SlotStatus>>(() => {
@@ -714,7 +775,9 @@ function AuditionsPageInner() {
 
       let slotStatus: AuditionStatus = 'booked';
 
-      if (override) {
+      if (closedSlots[`crm-${c.id}`] || closedSlots[c.id]) {
+        slotStatus = 'closed';
+      } else if (override) {
         slotStatus = override;
       } else if (c.auditionOutcome) {
         // Use persisted outcome from backend
@@ -759,11 +822,17 @@ function AuditionsPageInner() {
 
     Object.keys(customSlots).forEach(dateKey => {
       if (!result[dateKey]) result[dateKey] = [];
-      result[dateKey].push(...(customSlots[dateKey] || []));
+      const daySlots = (customSlots[dateKey] || []).map(s => {
+        if (closedSlots[String(s.id)] || closedDays[dateKey]) {
+          return { ...s, status: 'closed' as AuditionStatus };
+        }
+        return s;
+      });
+      result[dateKey].push(...daySlots);
     });
 
     return result;
-  }, [liveAuditionConvs, customSlots, todayIso, statusOverrides, auditionDates]);
+  }, [liveAuditionConvs, customSlots, todayIso, statusOverrides, auditionDates, closedSlots, closedDays]);
 
   const weekDays = useMemo(() => {
     return Array.from({ length: 7 }, (_, i) => addDays(currentDate, i));
@@ -818,7 +887,15 @@ function AuditionsPageInner() {
       selectedBranch && selectedBranch !== 'ALL' && !selectedBranch.startsWith('REGION:')
         ? selectedBranch
         : '';
-    setBookForm({ branch: prefillBranch, name: '', type: 'Adult', age: '', instrument: '' });
+    const existingSlot = (slots[dateKey] || []).find(s => s.id === slotId);
+    setBookForm({
+      branch: prefillBranch,
+      name: '',
+      type: 'Adult',
+      age: '',
+      instrument: '',
+      agent: existingSlot?.agent && existingSlot.agent !== 'Unassigned' ? existingSlot.agent : (user?.name || 'Unassigned'),
+    });
   };
 
   const confirmBooking = () => {
@@ -833,6 +910,7 @@ function AuditionsPageInner() {
             name: bookForm.name || 'Student',
             type: `${bookForm.type}${bookForm.age ? ` ${bookForm.age}` : ''} · ${bookForm.instrument || '—'}`,
             branch: bookForm.branch || '',
+            agent: bookForm.agent || s.agent || 'Unassigned',
             status: 'booked',
             auditionDate: dateKey,
             dateKey,
@@ -891,6 +969,7 @@ function AuditionsPageInner() {
     if (!slot) return;
     setSlotPanel({ slotId, dateKey });
     setPanelComment(stripNoResponseTag(slot.comment || ''));
+    setPanelAgent(slot.agent || 'Unassigned');
     const currentStatus: SlotStatus =
       slot.status !== 'free' && slot.status !== 'booked'
         ? slot.status
@@ -904,8 +983,6 @@ function AuditionsPageInner() {
       setPanelFollowUpDate('');
     }
   }, [slots]);
-
-
 
   const saveSlotPanel = useCallback(() => {
     if (!slotPanel) return;
@@ -928,6 +1005,10 @@ function AuditionsPageInner() {
           auditionDate: lockedDate,
           auditionOutcome: panelStatus,
         };
+
+        if (panelAgent && panelAgent !== (currentSlot.agent || 'Unassigned')) {
+          patch.agent = panelAgent;
+        }
 
         // Handle follow-up date for schedule-followup and joining-later
         if (needsFollowUp(panelStatus) && panelFollowUpDate) {
@@ -963,15 +1044,18 @@ function AuditionsPageInner() {
               ...s,
               comment: stripNoResponseTag(panelComment),
               status: panelStatus === 'booked' ? 'booked' : panelStatus,
+              agent: panelAgent || s.agent,
             }
             : s
         ),
       }));
     }
     setSlotPanel(null);
-  }, [slotPanel, slots, panelComment, panelStatus, panelFollowUpDate, isReadOnly, patchConversation, updateStatusOverride, saveAuditionDate, updateCustomSlotsState]);
+  }, [slotPanel, slots, panelComment, panelStatus, panelFollowUpDate, panelAgent, isReadOnly, patchConversation, updateStatusOverride, saveAuditionDate, updateCustomSlotsState]);
 
   const panelSlot = slotPanel ? (slots[slotPanel.dateKey] || []).find(s => s.id === slotPanel.slotId) : null;
+  const isCurrentSlotClosed = panelSlot ? Boolean(closedSlots[String(panelSlot.id)] || panelSlot.status === 'closed') : false;
+  const isCurrentDayClosed = slotPanel ? Boolean(closedDays[slotPanel.dateKey]) : false;
 
   // Real-time weekly counts for every branch and region (0ms in-memory calculation)
   const branchCounts = useMemo(() => {
@@ -1115,6 +1199,7 @@ function AuditionsPageInner() {
             <div className="grid" style={{ gridTemplateColumns: gridTemplate, borderBottom: '1px solid var(--border-sidebar)' }}>
               {weekDays.map((day) => {
                 const key = isoDate(day);
+                const isDayClosed = !!closedDays[key];
                 const weekdayShort = day.toLocaleDateString('en-US', { weekday: 'short' });
                 const rawDaySlots = slots[key] || [];
                 const daySlots = rawDaySlots.filter(s => {
@@ -1124,27 +1209,56 @@ function AuditionsPageInner() {
                 return (
                   <div
                     key={key}
-                    className="py-2.5 px-2 text-center transition-colors"
+                    className="py-2.5 px-2 text-center transition-colors relative group/header"
                     style={{
                       borderRight: '1px solid var(--border-sidebar)',
-                      background: 'var(--bg-card)',
-                      borderTop: '2px solid transparent',
+                      background: isDayClosed ? 'rgba(239, 68, 68, 0.04)' : 'var(--bg-card)',
+                      borderTop: isDayClosed ? '2px solid #EF4444' : '2px solid transparent',
                     }}
                   >
                     <div className="flex items-center justify-center gap-1.5">
                       <span
                         className="text-[11px] font-semibold uppercase tracking-wider"
-                        style={{ color: 'var(--text-secondary)' }}
+                        style={{ color: isDayClosed ? '#EF4444' : 'var(--text-secondary)' }}
                       >
                         {weekdayShort}
                       </span>
                       <span
                         className="text-[12px] font-bold min-w-[22px] h-[22px] rounded-full flex items-center justify-center px-1"
-                        style={{ color: 'var(--text-primary)' }}
+                        style={{
+                          color: isDayClosed ? '#EF4444' : 'var(--text-primary)',
+                          background: isDayClosed ? 'rgba(239, 68, 68, 0.1)' : 'transparent',
+                        }}
                       >
                         {day.getDate()}
                       </span>
                     </div>
+
+                    {/* Day status badge & quick toggle */}
+                    <div className="mt-1 flex items-center justify-center gap-1">
+                      {isDayClosed ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleDayClosed(key)}
+                          className="inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full text-red-500 bg-red-500/10 border border-red-500/20 hover:bg-red-500/20 cursor-pointer transition-colors"
+                          title="Click to reopen day"
+                        >
+                          <Lock className="w-2.5 h-2.5" />
+                          <span>Closed</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => toggleDayClosed(key)}
+                          className="opacity-0 group-hover/header:opacity-100 inline-flex items-center gap-0.5 text-[9px] font-medium px-1.5 py-0.5 rounded text-[var(--text-muted)] hover:text-red-500 hover:bg-red-500/10 cursor-pointer transition-all"
+                          title="Click to close this day"
+                        >
+                          <Lock className="w-2.5 h-2.5" />
+                          <span>Close Day</span>
+                        </button>
+                      )}
+                    </div>
+
                     {daySlots.length > 0 && (
                       <p className="text-[10px] mt-0.5 font-medium" style={{ color: 'var(--text-muted)' }}>
                         {daySlots.length} {daySlots.length === 1 ? 'slot' : 'slots'}
@@ -1159,6 +1273,7 @@ function AuditionsPageInner() {
             <div className="grid flex-1 min-h-[500px]" style={{ gridTemplateColumns: gridTemplate }}>
               {weekDays.map((day) => {
                 const key = isoDate(day);
+                const isDayClosed = !!closedDays[key];
                 const rawDaySlots = slots[key] || [];
                 const daySlots = rawDaySlots.filter(s => {
                   if (s.status === 'free' && !s.branch) return true;
@@ -1172,18 +1287,35 @@ function AuditionsPageInner() {
                 // 2. Schedule Follow-up / Joining Later / Paid Trial (in progress)
                 // 3. No-Show
                 // 4. Registered (completed)
-                // 5. Free slots
+                // 5. Closed slots
+                // 6. Free slots
                 const bookedSlots = daySlots.filter(s => s.status === 'booked');
                 const followUpSlots = daySlots.filter(s => s.status === 'schedule-followup');
                 const joiningSlots = daySlots.filter(s => s.status === 'joining-later');
                 const paidTrialSlots = daySlots.filter(s => s.status === 'paid-trial');
                 const noShowSlots = daySlots.filter(s => s.status === 'no-show');
                 const registeredSlots = daySlots.filter(s => s.status === 'registered');
+                const closedSlotsList = daySlots.filter(s => s.status === 'closed');
                 const freeSlots = daySlots.filter(s => s.status === 'free');
-                const orderedSlots = [...bookedSlots, ...followUpSlots, ...joiningSlots, ...paidTrialSlots, ...noShowSlots, ...registeredSlots, ...freeSlots];
+                const orderedSlots = [...bookedSlots, ...followUpSlots, ...joiningSlots, ...paidTrialSlots, ...noShowSlots, ...registeredSlots, ...closedSlotsList, ...freeSlots];
 
                 return (
-                  <div key={key} className="p-2.5" style={{ borderRight: '1px solid var(--border-sidebar)', background: 'transparent' }}>
+                  <div key={key} className="p-2.5" style={{ borderRight: '1px solid var(--border-sidebar)', background: isDayClosed ? 'rgba(239, 68, 68, 0.02)' : 'transparent' }}>
+                    {isDayClosed && (
+                      <div className={`mb-2 p-2 rounded-lg text-center flex items-center justify-between gap-1 ${isMultiCol ? 'col-span-2' : ''}`} style={{ background: 'rgba(239, 68, 68, 0.08)', border: '1px solid rgba(239, 68, 68, 0.25)' }}>
+                        <div className="flex items-center gap-1.5 text-[11px] font-bold text-red-500">
+                          <Lock className="w-3 h-3" />
+                          <span>Day Closed for Auditions</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => toggleDayClosed(key)}
+                          className="text-[10px] font-bold text-[#0066FF] hover:underline cursor-pointer"
+                        >
+                          Reopen
+                        </button>
+                      </div>
+                    )}
                     <div className={isMultiCol ? "grid grid-cols-2 gap-2" : "flex flex-col gap-2"}>
                       {orderedSlots.map(slot => (
                         <SlotCard
@@ -1193,7 +1325,8 @@ function AuditionsPageInner() {
                           onStatusChange={(status) => setSlotStatus(key, slot.id, status)}
                           onOpenPanel={() => openSlotPanel(slot.id, key)}
                           onOpenChat={slot.conversationId ? () => openChat(slot.conversationId!) : undefined}
-                          onDelete={slot.status === 'free' ? () => deleteCustomSlot(key, slot.id) : undefined}
+                          onDelete={slot.status === 'free' || slot.status === 'closed' ? () => deleteCustomSlot(key, slot.id) : undefined}
+                          onToggleClosed={() => toggleSlotClosed(slot.id)}
                           isReadOnly={isReadOnly}
                           isHighlighted={!!highlightConvId && slot.conversationId === highlightConvId}
                         />
@@ -1236,46 +1369,128 @@ function AuditionsPageInner() {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="w-full max-w-md rounded-2xl p-5 shadow-2xl flex flex-col gap-4" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}>
             {/* Header */}
-            <div className="flex items-start justify-between">
-              <div>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0 flex-1 pr-1">
                 <p className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
                   {formatDayLabel(new Date(slotPanel.dateKey + 'T00:00:00'))} · {panelSlot.time}
                 </p>
-                <h3 className="text-[17px] font-bold mt-0.5" style={{ color: 'var(--text-primary)' }}>
-                  {panelSlot.name || 'Audition Slot'}
-                </h3>
-                {panelSlot.type && (
-                  <p className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>{panelSlot.type}</p>
-                )}
-                {panelSlot.phone && (
-                  <p className="text-[11px] mt-0.5 font-mono" style={{ color: 'var(--text-muted)' }}>{panelSlot.phone}</p>
-                )}
-                {panelSlot.branch && (
-                  <div className="mt-1.5">
-                    <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-md" style={{ color: '#0066FF', background: 'rgba(0, 102, 255, 0.1)', border: '1px solid rgba(0, 102, 255, 0.25)' }}>
-                      📍 {panelSlot.branch}
+                <div className="flex items-baseline gap-1.5 mt-0.5 flex-wrap">
+                  <h3 className="text-[17px] font-bold leading-tight" style={{ color: 'var(--text-primary)' }}>
+                    {panelSlot.name || 'Audition Slot'}
+                  </h3>
+                  {panelSlot.branch && (
+                    <span className="text-[11px] font-medium" style={{ color: '#0066FF' }}>
+                      · {panelSlot.branch}
                     </span>
-                  </div>
+                  )}
+                  <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                    · Agent: <span className="font-medium" style={{ color: 'var(--text-secondary)' }}>{panelAgent || panelSlot.agent || 'Unassigned'}</span>
+                  </span>
+                </div>
+                {(panelSlot.type || panelSlot.phone) && (
+                  <p className="text-[11px] font-medium mt-1" style={{ color: 'var(--text-muted)' }}>
+                    {panelSlot.type && <span>{panelSlot.type}</span>}
+                    {panelSlot.type && panelSlot.phone && <span> · </span>}
+                    {panelSlot.phone && <span className="font-mono">{panelSlot.phone}</span>}
+                  </p>
                 )}
               </div>
-              <div className="flex items-center gap-1.5">
-                {panelSlot.conversationId && (
-                  <button
-                    onClick={() => {
-                      const cid = panelSlot.conversationId!;
-                      setSlotPanel(null);
-                      openChat(cid);
-                    }}
-                    className="p-1.5 rounded-lg text-[#0066FF] hover:bg-[#0066FF]/10 transition-colors"
-                    title="Open Chat in Inbox"
-                  >
-                    <MessageSquare className="w-4 h-4" />
-                  </button>
-                )}
-                <button onClick={() => setSlotPanel(null)} className="p-1.5 rounded-lg" style={{ color: 'var(--text-secondary)', background: 'var(--bg-pill)' }}>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {/* Slot Availability toggle: directly next to Chat, not next to Close button */}
+                <button
+                  type="button"
+                  onClick={() => toggleSlotClosed(panelSlot.id)}
+                  className={`h-[28px] px-2.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1.5 select-none shrink-0 whitespace-nowrap ${
+                    isCurrentSlotClosed
+                      ? 'bg-red-500/15 text-red-500 border border-red-500/30 hover:bg-red-500/25'
+                      : 'text-[#10B981] bg-[#10B981]/10 border border-[#10B981]/25 hover:bg-[#10B981]/20'
+                  }`}
+                  title={isCurrentSlotClosed ? "Click to reopen this slot" : "Click to close this slot"}
+                >
+                  {isCurrentSlotClosed ? (
+                    <>
+                      <Lock className="w-3 h-3 text-red-500 shrink-0" />
+                      <span className="whitespace-nowrap">Slot Closed</span>
+                    </>
+                  ) : (
+                    <>
+                      <Unlock className="w-3 h-3 text-[#10B981] shrink-0" />
+                      <span className="whitespace-nowrap">Slot Open</span>
+                    </>
+                  )}
+                </button>
+
+                {/* Chat button - directly next to Slot Toggle */}
+                {(() => {
+                  const chatConvId = panelSlot.conversationId || conversations.find(c => panelSlot.phone && c.phone === panelSlot.phone)?.id;
+                  if (chatConvId) {
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSlotPanel(null);
+                          openChat(chatConvId);
+                        }}
+                        className="p-1.5 rounded-lg text-[#0066FF] hover:bg-[#0066FF]/10 transition-colors cursor-pointer"
+                        title="Open Chat in Inbox"
+                      >
+                        <MessageSquare className="w-4 h-4" />
+                      </button>
+                    );
+                  }
+                  return (
+                    <div
+                      className="p-1.5 rounded-lg text-[var(--text-muted)] opacity-35"
+                      title="No chat conversation linked"
+                    >
+                      <MessageSquare className="w-4 h-4" />
+                    </div>
+                  );
+                })()}
+
+                {/* Subtle divider before close button */}
+                <div className="w-[1px] h-3.5 mx-0.5 opacity-40" style={{ background: 'var(--border-input)' }} />
+
+                {/* Close modal */}
+                <button
+                  type="button"
+                  onClick={() => setSlotPanel(null)}
+                  className="p-1.5 rounded-lg cursor-pointer hover:opacity-80 transition-opacity"
+                  style={{ color: 'var(--text-secondary)', background: 'var(--bg-pill)' }}
+                  title="Close"
+                >
                   <X className="w-4 h-4" />
                 </button>
               </div>
+            </div>
+
+
+
+            {/* Assigned Agent */}
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <p className="text-[11px] font-semibold" style={{ color: 'var(--text-secondary)' }}>Assigned Agent</p>
+                {panelAgent && panelAgent !== 'Unassigned' && (
+                  <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>
+                    Current: <b style={{ color: 'var(--text-primary)' }}>{panelAgent}</b>
+                  </span>
+                )}
+              </div>
+              <select
+                disabled={isReadOnly}
+                value={panelAgent}
+                onChange={e => setPanelAgent(e.target.value)}
+                className="w-full h-[36px] px-2.5 text-[12px] font-medium rounded-xl outline-none cursor-pointer"
+                style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+              >
+                <option value="Unassigned">Unassigned</option>
+                {assignableAgents.map(a => (
+                  <option key={a.name} value={a.name}>{a.name}</option>
+                ))}
+                {panelAgent && panelAgent !== 'Unassigned' && !assignableAgents.some(a => a.name === panelAgent) && (
+                  <option value={panelAgent}>{panelAgent}</option>
+                )}
+              </select>
             </div>
 
             {/* Audition Outcome */}
@@ -1437,12 +1652,30 @@ function AuditionsPageInner() {
                   style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
                 />
               </div>
+
+              <div>
+                <label className="text-[11px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>Assigned Agent</label>
+                <select
+                  value={bookForm.agent}
+                  onChange={e => setBookForm(f => ({ ...f, agent: e.target.value }))}
+                  className="w-full h-[38px] px-2.5 text-[13px] rounded-xl outline-none cursor-pointer"
+                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                >
+                  <option value="Unassigned">Unassigned</option>
+                  {assignableAgents.map(a => (
+                    <option key={a.name} value={a.name}>{a.name}</option>
+                  ))}
+                  {bookForm.agent && bookForm.agent !== 'Unassigned' && !assignableAgents.some(a => a.name === bookForm.agent) && (
+                    <option value={bookForm.agent}>{bookForm.agent}</option>
+                  )}
+                </select>
+              </div>
             </div>
-            <div className="flex gap-2 pt-1">
+            <div className="flex gap-2 pt-1 flex-wrap">
               <button disabled={!bookForm.name || !bookForm.branch} onClick={confirmBooking} className="flex-1 h-[38px] text-[13px] font-semibold text-white rounded-xl cursor-pointer disabled:opacity-50" style={{ background: '#0066FF' }}>
                 Confirm Booking
               </button>
-              <button onClick={() => setBookingModal(null)} className="h-[38px] px-5 text-[13px] font-medium rounded-xl cursor-pointer" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}>
+              <button onClick={() => setBookingModal(null)} className="h-[38px] px-4 text-[13px] font-medium rounded-xl cursor-pointer" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}>
                 Cancel
               </button>
             </div>
@@ -1463,6 +1696,7 @@ function SlotCard({
   onOpenPanel,
   onOpenChat,
   onDelete,
+  onToggleClosed,
   isReadOnly,
   isHighlighted,
 }: {
@@ -1472,6 +1706,7 @@ function SlotCard({
   onOpenPanel: () => void;
   onOpenChat?: () => void;
   onDelete?: () => void;
+  onToggleClosed?: () => void;
   isReadOnly?: boolean;
   isHighlighted?: boolean;
 }) {
@@ -1482,6 +1717,67 @@ function SlotCard({
       highlightRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   }, [isHighlighted]);
+
+  // ── Closed slot card ──
+  if (slot.status === 'closed') {
+    return (
+      <div
+        ref={isHighlighted ? highlightRef : undefined}
+        className={`rounded-lg px-2.5 py-2 shadow-sm transition-all ${!isReadOnly ? "cursor-pointer hover:opacity-90" : ""}`}
+        style={{
+          background: 'rgba(239, 68, 68, 0.05)',
+          border: '1px dashed rgba(239, 68, 68, 0.4)',
+        }}
+        onClick={!isReadOnly ? onOpenPanel : undefined}
+      >
+        <div className="flex items-start justify-between gap-1">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 mb-0.5">
+              <span className="text-[10px] font-bold leading-none" style={{ color: 'var(--text-secondary)' }}>{slot.time}</span>
+              <span className="inline-flex items-center gap-0.5 text-[8px] font-bold px-1.5 py-0.5 rounded text-red-500 bg-red-500/10 border border-red-500/20">
+                <Lock className="w-2.5 h-2.5" /> Closed
+              </span>
+            </div>
+            {slot.name && slot.name !== 'Closed Slot' && (
+              <p className="text-[11px] font-semibold leading-tight truncate" style={{ color: 'var(--text-primary)' }}>{slot.name}</p>
+            )}
+            <p className="text-[9px] mt-0.5 text-red-500/80 font-medium">Slot unavailable</p>
+            {slot.agent && slot.agent !== 'Unassigned' && (
+              <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded mt-1 max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
+                <User className="w-2 h-2 shrink-0 text-red-500 opacity-70" />
+                <span className="truncate" style={{ color: 'var(--text-muted)' }}>
+                  Agent: <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>{slot.agent}</span>
+                </span>
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            {onOpenChat && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onOpenChat(); }}
+                className="w-5 h-5 flex items-center justify-center rounded text-[#0066FF] hover:bg-[#0066FF]/15 transition-colors"
+                title="Open Chat in Inbox"
+              >
+                <MessageSquare className="w-3 h-3" />
+              </button>
+            )}
+            {onDelete && !isReadOnly && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                className="w-4 h-4 rounded flex items-center justify-center text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors text-xs font-bold leading-none cursor-pointer"
+                title="Delete slot"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (slot.status === 'free') {
     return (
       <div
@@ -1510,9 +1806,12 @@ function SlotCard({
           )}
         </div>
         {slot.agent && (
-          <span className="text-[10px] block" style={{ color: 'var(--text-muted)' }}>
-            {slot.agent}
-          </span>
+          <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded mt-0.5 max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
+            <User className="w-2 h-2 shrink-0 text-[#0066FF] opacity-70" />
+            <span className="truncate" style={{ color: 'var(--text-muted)' }}>
+              Agent: <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>{slot.agent}</span>
+            </span>
+          </div>
         )}
         <p className="text-[10px] mt-1 text-[#0066FF] font-medium">
           {!isReadOnly ? "Free — click to book" : "Free slot"}
@@ -1562,6 +1861,15 @@ function SlotCard({
             )}
           </div>
         </div>
+
+        {/* Agent Name inside booking slot */}
+        <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded mt-1 max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
+          <User className="w-2 h-2 shrink-0 text-[#0066FF] opacity-80" />
+          <span className="truncate" style={{ color: 'var(--text-muted)' }}>
+            Agent: <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>{slot.agent || 'Unassigned'}</span>
+          </span>
+        </div>
+
         {slot.comment ? (
           <p className="text-[10px] mt-1.5 leading-snug line-clamp-2 px-1.5 py-0.5 rounded" style={{ color: 'var(--text-secondary)', background: 'var(--bg-pill)' }}>
             💬 {slot.comment}
@@ -1633,6 +1941,15 @@ function SlotCard({
             </button>
           )}
         </div>
+
+        {/* Agent Name inside registered slot */}
+        <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded mt-1 max-w-full truncate leading-tight bg-black/20 text-white">
+          <User className="w-2 h-2 shrink-0 opacity-80" />
+          <span className="truncate text-white/80">
+            Agent: <span className="font-semibold text-white">{slot.agent || 'Unassigned'}</span>
+          </span>
+        </div>
+
         {slot.comment ? (
           <p className="text-[10px] mt-1.5 leading-snug line-clamp-2 text-white/95 bg-black/15 px-1.5 py-0.5 rounded">
             💬 {slot.comment}
@@ -1680,6 +1997,15 @@ function SlotCard({
           </button>
         )}
       </div>
+
+      {/* Agent Name inside outcome slot */}
+      <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded mt-1 max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
+        <User className="w-2 h-2 shrink-0 opacity-70" style={{ color: cfg.color }} />
+        <span className="truncate" style={{ color: 'var(--text-muted)' }}>
+          Agent: <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>{slot.agent || 'Unassigned'}</span>
+        </span>
+      </div>
+
       {slot.comment ? (
         <p className="text-[10px] mt-1.5 leading-snug line-clamp-2 px-1.5 py-0.5 rounded" style={{ color: cfg.color, background: `${cfg.color}10` }}>
           💬 {slot.comment}
