@@ -26,6 +26,8 @@ export type Conversation = {
   id: string; // senderId
   _id?: string;
   name: string;
+  /** WhatsApp profile/contact name (WA only) — shown as the full name in the details panel */
+  profileName?: string;
   phone: string;
   agent: string;
   channel: Channel;
@@ -218,6 +220,22 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       id: c.senderId,
       _id: c._id ? String(c._id) : undefined,
       name: (() => {
+        // WA leads are always displayed by their phone number only (never the
+        // WhatsApp push-name / username or the raw LID identifier).
+        if (c.channel === "WA") {
+          const isPhone = (v: any) => typeof v === "string" && /^\+\d{7,13}$/.test(v.trim());
+          if (isPhone(c.phone)) return c.phone.trim();
+          const digits = String(c.senderId || "").replace(/\D/g, "");
+          // Real phone JIDs are ≤13 digits; 14-15 digit values are unresolved LIDs
+          if (digits.length >= 7 && digits.length <= 13) return `+${digits}`;
+          // No resolvable phone (unresolved LID) → fall back to the WhatsApp profile name
+          const pushName = typeof c.name === "string" ? c.name.trim() : "";
+          if (pushName && pushName !== "WhatsApp User" && pushName !== "WhatsApp Contact" && !/^\+?\d+$/.test(pushName)) {
+            return pushName;
+          }
+          return "WhatsApp Contact";
+        }
+
         // If a real human name is present, use it
         const isPlaceholder = !c.name ||
           c.name === "WhatsApp User" ||
@@ -234,7 +252,20 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const derivedPhone = c.senderId && c.senderId.length <= 13 ? `+${String(c.senderId).replace(/\D/g, "")}` : null;
         return validPhone || (!isPlaceholder ? c.name : null) || derivedPhone || c.phone || "WhatsApp Contact";
       })(),
-      phone: (c.phone && /^\+\d{7,13}$/.test(c.phone)) ? c.phone : (c.phone || `Live ${c.channel}`),
+      profileName: (() => {
+        if (c.channel !== "WA") return undefined;
+        const n = typeof c.name === "string" ? c.name.trim() : "";
+        if (!n || n === "WhatsApp User" || n === "WhatsApp Contact" || /^\+?\d+$/.test(n)) return undefined;
+        return n;
+      })(),
+      phone: (() => {
+        if (c.phone && /^\+\d{7,13}$/.test(c.phone)) return c.phone;
+        if (c.channel === "WA") {
+          const digits = String(c.senderId || "").replace(/\D/g, "");
+          if (digits.length >= 7 && digits.length <= 13) return `+${digits}`;
+        }
+        return c.phone || `Live ${c.channel}`;
+      })(),
       agent: c.agent || "Unassigned",
       channel: (c.channel as Channel) || "FB",
       status: c.status || "Open",

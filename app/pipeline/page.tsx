@@ -1647,7 +1647,7 @@ export default function PipelinePage() {
               <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Form Answers</h3>
               <div className="mb-1">
                 <p className="text-[11px] mb-0.5" style={{ color: 'var(--text-secondary)' }}>full name</p>
-                <p className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{panelLead.name}</p>
+                <p className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{panelConv?.profileName || panelLead.name}</p>
               </div>
               {panelConv?.formAnswers?.instrument && (
                 <div className="mb-1">

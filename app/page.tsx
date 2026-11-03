@@ -1081,7 +1081,7 @@ export default function InboxPage() {
               <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Form Answers</h3>
               <div className="mb-2">
                 <p className="text-[10px]" style={{ color: "var(--text-secondary)" }}>full name</p>
-                <p className="text-[11px] font-medium" style={{ color: "var(--text-primary)" }}>{activeConv.name}</p>
+                <p className="text-[11px] font-medium" style={{ color: "var(--text-primary)" }}>{activeConv.profileName || activeConv.name}</p>
               </div>
               {activeConv.formAnswers?.instrument && (
                 <div className="mb-2">
