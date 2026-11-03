@@ -12,7 +12,11 @@ export type Message = {
   text: string;
   attachments?: any[];
   time: string;
+  timestamp?: number;
   isIncoming: boolean;
+  status?: "pending" | "sent" | "delivered" | "read";
+  seenAt?: number;
+  deliveredAt?: number;
   isRead?: boolean;
   dir?: "rtl" | "ltr";
   senderName?: string;
@@ -58,6 +62,7 @@ export type Conversation = {
   createdAt?: string;
   updatedAt?: string;
   lastMessageAt?: number;
+  lastSeenAt?: number;
 };
 
 export type BadgeCounts = {
@@ -84,6 +89,8 @@ type CRMContextType = {
   setPollPaused: (paused: boolean) => void;
   searchQuery: string;
   setSearchQuery: (query: string) => void;
+  deleteConversation: (id: string) => Promise<void>;
+  clearWhatsAppConversations: () => Promise<void>;
 };
 
 const CRMContext = createContext<CRMContextType | undefined>(undefined);
@@ -135,20 +142,10 @@ function getLocalTodayIso(): string {
 }
 
 export function CRMProvider({ children }: { children: React.ReactNode }) {
-  const { isReadOnly, token, user } = useAuth();
-
-  // Privacy isolation for personal WhatsApp testing:
-  // ONLY admission@muhammad.com is permitted to view or interact with WhatsApp messages
-  const isWhatsAppAllowed = user?.email?.toLowerCase().trim() === "admission@muhammad.com";
+  const { isReadOnly, token } = useAuth();
 
   // Hydrate instantly from cache so dashboard/reports/pipeline appear in 0ms (no loading spinner)
   const [conversations, setConversations] = useState<Conversation[]>(getCachedConversations);
-
-  // Filter conversations for the UI — strictly exclude WA for all other accounts
-  const visibleConversations = useMemo(() => {
-    if (isWhatsAppAllowed) return conversations;
-    return conversations.filter((c) => c.channel !== "WA");
-  }, [conversations, isWhatsAppAllowed]);
   const [loading, setLoading] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
     try {
@@ -179,16 +176,6 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       initialLoadDone.current = true;
     }
   }, [conversations.length]);
-
-  // Auto-deselect active chat if it is a WhatsApp conversation and user is not allowed
-  useEffect(() => {
-    if (!isWhatsAppAllowed && activeChatId) {
-      const activeConv = conversations.find((c) => c.id === activeChatId);
-      if (activeConv?.channel === "WA") {
-        setActiveChatId(null);
-      }
-    }
-  }, [isWhatsAppAllowed, activeChatId, conversations]);
 
   // Fix B: when true the 3s poll is silently skipped (set during drag + 3s after drop)
   const pollPausedRef = useRef(false);
@@ -279,6 +266,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       createdAt: c.createdAt,
       updatedAt: c.updatedAt,
       lastMessageAt: c.lastMessageAt || (c.updatedAt ? new Date(c.updatedAt).getTime() : undefined) || (c.createdAt ? new Date(c.createdAt).getTime() : undefined),
+      lastSeenAt: c.lastSeenAt,
     };
   }, []);
 
@@ -291,7 +279,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       time: m.timestamp
         ? new Date(m.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
         : "",
+      timestamp: m.timestamp,
       isIncoming: m.direction === "incoming",
+      status: m.status || (m.direction === "outgoing" ? (m.seenAt ? "read" : "sent") : undefined),
+      seenAt: m.seenAt || undefined,
+      deliveredAt: m.deliveredAt || undefined,
+      isRead: m.status === "read" || Boolean(m.seenAt),
       senderName: m.senderName || undefined,
     }));
   }, []);
@@ -520,6 +513,118 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   prev.map((c) => (c.id === conversationId ? { ...c, unreadCount: 0 } : c))
                 );
               }
+            } else if (payload.type === "message_status" && payload.data) {
+              const { conversationId, messageId, status, seenAt, deliveredAt, lastSeenAt } = payload.data;
+              if (!conversationId) return;
+
+              const cached = messagesCacheRef.current.get(conversationId);
+              if (cached) {
+                const updated = cached.map((m) =>
+                  m.id === messageId
+                    ? {
+                        ...m,
+                        status,
+                        seenAt: seenAt || m.seenAt,
+                        deliveredAt: deliveredAt || m.deliveredAt,
+                        isRead: status === "read" || Boolean(seenAt),
+                      }
+                    : m
+                );
+                messagesCacheRef.current.set(conversationId, updated);
+              }
+
+              setConversations((prev) =>
+                prev.map((c) => {
+                  if (c.id !== conversationId) return c;
+                  const updatedMessages = c.messages?.map((m) =>
+                    m.id === messageId
+                      ? {
+                          ...m,
+                          status,
+                          seenAt: seenAt || m.seenAt,
+                          deliveredAt: deliveredAt || m.deliveredAt,
+                          isRead: status === "read" || Boolean(seenAt),
+                        }
+                      : m
+                  );
+                  return {
+                    ...c,
+                    messages: updatedMessages,
+                    lastSeenAt: lastSeenAt || (status === "read" && seenAt ? Math.max(c.lastSeenAt || 0, seenAt) : c.lastSeenAt),
+                  };
+                })
+              );
+            } else if (payload.type === "messages_read_watermark" && payload.data) {
+              const { conversationId, watermark, seenAt, lastSeenAt } = payload.data;
+              if (!conversationId) return;
+
+              const cached = messagesCacheRef.current.get(conversationId);
+              if (cached) {
+                const updated = cached.map((m) =>
+                  !m.isIncoming && m.timestamp && m.timestamp <= watermark
+                    ? { ...m, status: "read" as const, seenAt: seenAt || m.seenAt, isRead: true }
+                    : m
+                );
+                messagesCacheRef.current.set(conversationId, updated);
+              }
+
+              setConversations((prev) =>
+                prev.map((c) => {
+                  if (c.id !== conversationId) return c;
+                  const updatedMessages = c.messages?.map((m) =>
+                    !m.isIncoming && m.timestamp && m.timestamp <= watermark
+                      ? { ...m, status: "read" as const, seenAt: seenAt || m.seenAt, isRead: true }
+                      : m
+                  );
+                  return {
+                    ...c,
+                    messages: updatedMessages,
+                    lastSeenAt: lastSeenAt || Math.max(c.lastSeenAt || 0, seenAt || watermark || 0),
+                  };
+                })
+              );
+            } else if (payload.type === "messages_delivered_watermark" && payload.data) {
+              const { conversationId, watermark, deliveredAt } = payload.data;
+              if (!conversationId) return;
+
+              const cached = messagesCacheRef.current.get(conversationId);
+              if (cached) {
+                const updated = cached.map((m) =>
+                  !m.isIncoming && m.timestamp && m.timestamp <= watermark && m.status !== "read"
+                    ? { ...m, status: "delivered" as const, deliveredAt: deliveredAt || m.deliveredAt }
+                    : m
+                );
+                messagesCacheRef.current.set(conversationId, updated);
+              }
+
+              setConversations((prev) =>
+                prev.map((c) => {
+                  if (c.id !== conversationId) return c;
+                  const updatedMessages = c.messages?.map((m) =>
+                    !m.isIncoming && m.timestamp && m.timestamp <= watermark && m.status !== "read"
+                      ? { ...m, status: "delivered" as const, deliveredAt: deliveredAt || m.deliveredAt }
+                      : m
+                  );
+                  return { ...c, messages: updatedMessages };
+                })
+              );
+            } else if (payload.type === "conversation_deleted" && payload.data) {
+              const { conversationId } = payload.data;
+              if (conversationId) {
+                messagesCacheRef.current.delete(conversationId);
+                setConversations((prev) => prev.filter((c) => c.id !== conversationId));
+                if (activeChatIdRef.current === conversationId) {
+                  setActiveChatId(null);
+                }
+              }
+            } else if (payload.type === "conversations_purged" && payload.data) {
+              if (payload.data.channel === "WA") {
+                setConversations((prev) => prev.filter((c) => c.channel !== "WA"));
+                const active = conversations.find((c) => c.id === activeChatIdRef.current);
+                if (active?.channel === "WA") {
+                  setActiveChatId(null);
+                }
+              }
             } else if (payload.type === "names_updated") {
               // WhatsApp backfill completed on backend — refresh conversations so real names appear
               fetchConversations();
@@ -632,7 +737,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     let auditions = 0;
     let followUps = 0;
 
-    visibleConversations.forEach((c) => {
+    conversations.forEach((c) => {
       // 1. Inbox badge: total unread messages
       if (c.unreadCount && c.unreadCount > 0) {
         inbox += c.unreadCount;
@@ -665,7 +770,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     });
 
     return { inbox, leads, auditions, followUps };
-  }, [visibleConversations]);
+  }, [conversations]);
 
   // Instant optimistic update across all pages + background PATCH
   const patchConversation = useCallback(
@@ -790,20 +895,51 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   // 1-Click navigation from any page to open that user's chat in Inbox
   const openChat = useCallback(
     (id: string) => {
-      const target = conversations.find((c) => c.id === id);
-      if (target?.channel === "WA" && !isWhatsAppAllowed) {
-        return;
-      }
       setActiveChatId(id);
       router.push("/");
     },
-    [conversations, isWhatsAppAllowed, router]
+    [router]
   );
+
+  const deleteConversation = useCallback(
+    async (senderId: string) => {
+      try {
+        setConversations((prev) => prev.filter((c) => c.id !== senderId));
+        messagesCacheRef.current.delete(senderId);
+        if (activeChatIdRef.current === senderId) {
+          setActiveChatId(null);
+        }
+        await fetch(`${API}/messages/${senderId}`, {
+          method: "DELETE",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+      } catch (err) {
+        console.error("Failed to delete conversation:", err);
+      }
+    },
+    [token]
+  );
+
+  const clearWhatsAppConversations = useCallback(async () => {
+    try {
+      setConversations((prev) => prev.filter((c) => c.channel !== "WA"));
+      const active = conversations.find((c) => c.id === activeChatIdRef.current);
+      if (active?.channel === "WA") {
+        setActiveChatId(null);
+      }
+      await fetch(`${API}/whatsapp/clear-conversations`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+    } catch (err) {
+      console.error("Failed to clear WhatsApp conversations:", err);
+    }
+  }, [conversations, token]);
 
   return (
     <CRMContext.Provider
       value={{
-        conversations: visibleConversations,
+        conversations,
         loading,
         badgeCounts,
         assignableAgents,
@@ -816,6 +952,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         setPollPaused,
         searchQuery,
         setSearchQuery,
+        deleteConversation,
+        clearWhatsAppConversations,
       }}
     >
       {children}

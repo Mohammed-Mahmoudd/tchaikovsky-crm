@@ -18,6 +18,7 @@ type Message = {
   isIncoming: boolean;
   isRead?: boolean;
   dir?: "rtl" | "ltr";
+  senderName?: string;
 };
 
 type Conversation = {
@@ -175,6 +176,7 @@ export default function InboxPage() {
     refresh,
     searchQuery,
     setSearchQuery,
+    deleteConversation,
   } = useCRM();
 
   // Periodic refresh every 30s to keep relative timestamps (e.g. "23m", "1 day ago") live
@@ -225,8 +227,7 @@ export default function InboxPage() {
   const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager";
   const isAdmission = user?.role === "admission_officer" || user?.role === "agent";
   const isAssignedToOther = isAssigned && !isAssignedToMe;
-  const isWhatsAppAllowed = user?.email?.toLowerCase().trim() === "admission@muhammad.com";
-  const canSendMessages = !isReadOnly && (activeConv?.channel !== "WA" || isWhatsAppAllowed);
+  const canSendMessages = !isReadOnly;
   const canAssignToSelf = !isReadOnly && isAdmission && (!isAssigned || isAssignedToMe);
   const canEditAgent = !isReadOnly && (isChairman || canAssignToSelf);
 
@@ -298,14 +299,6 @@ export default function InboxPage() {
   const handleSendReply = useCallback(
     async (textToSend: string): Promise<boolean> => {
       if (isReadOnly || !textToSend.trim() || !activeConv || !canSendMessages) return false;
-
-      if (activeConv.channel === "WA" && user?.email?.toLowerCase().trim() !== "admission@muhammad.com") {
-        setSendError({
-          title: "Privacy Restricted",
-          message: "WhatsApp testing is restricted to admission@muhammad.com.",
-        });
-        return false;
-      }
 
       // Auto-assign to admission officer on first reply to unassigned lead (optimistic 0ms update)
       if (isAdmission && !isAssigned && user?.name) {
@@ -767,7 +760,6 @@ export default function InboxPage() {
                           {!msg.isIncoming && msg.senderName && (
                             <span className="font-semibold">{msg.senderName} · </span>
                           )}
-                          {!msg.isIncoming && msg.isRead && "✓✓ "}
                           {msg.time}
                         </div>
                       </div>
