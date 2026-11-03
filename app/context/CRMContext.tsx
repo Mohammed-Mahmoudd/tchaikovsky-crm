@@ -478,7 +478,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   const existing = prev[idx];
                   const updated: Conversation = {
                     ...existing,
-                    lastMessageAt: message?.timestamp || Date.now(),
+                    // Never move backwards (history-synced/late messages must not rewind it)
+                    lastMessageAt: Math.max(
+                      existing.lastMessageAt || 0,
+                      remoteConv?.lastMessageAt || 0,
+                      message?.timestamp || Date.now()
+                    ),
                     unreadCount: targetUnread,
                     pipeline: (targetPipeline && existing.pipeline === "New" ? targetPipeline : existing.pipeline) as any,
                   };
@@ -506,13 +511,17 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   time: message.timestamp
                     ? new Date(message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
                     : "",
+                  timestamp: message.timestamp,
                   isIncoming: !isOutgoing,
                   senderName: message.senderName || undefined,
                 };
 
                 const cached = messagesCacheRef.current.get(conversationId) || [];
                 if (!cached.some((m) => m.id === formattedMsg.id)) {
-                  const updatedMessages = [...cached, formattedMsg];
+                  // Keep chronological order even if an older message arrives late
+                  const updatedMessages = [...cached, formattedMsg].sort(
+                    (a, b) => (a.timestamp || 0) - (b.timestamp || 0)
+                  );
                   messagesCacheRef.current.set(conversationId, updatedMessages);
 
                   setConversations((prev) =>
