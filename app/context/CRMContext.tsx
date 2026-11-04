@@ -28,6 +28,12 @@ export type Conversation = {
   name: string;
   /** WhatsApp profile/contact name (WA only) — shown as the full name in the details panel */
   profileName?: string;
+  /** Customer's full name from Facebook/Instagram Lead Form when unified with WhatsApp */
+  leadName?: string;
+  /** Original Meta channel (FB or IG) when a Lead Form conversation was unified into WhatsApp */
+  metaChannel?: Channel;
+  metaSenderId?: string;
+  formPhone?: string;
   phone: string;
   agent: string;
   channel: Channel;
@@ -253,13 +259,31 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         return validPhone || (!isPlaceholder ? c.name : null) || derivedPhone || c.phone || "WhatsApp Contact";
       })(),
       profileName: (() => {
+        const ln = typeof c.leadName === "string" ? c.leadName.trim() : "";
+        if (ln && ln !== "WhatsApp User" && ln !== "WhatsApp Contact" && !/^\+?\d+$/.test(ln)) {
+          return ln;
+        }
         if (c.channel !== "WA") return undefined;
         const n = typeof c.name === "string" ? c.name.trim() : "";
         if (!n || n === "WhatsApp User" || n === "WhatsApp Contact" || /^\+?\d+$/.test(n)) return undefined;
         return n;
       })(),
+      leadName: (() => {
+        const ln = typeof c.leadName === "string" ? c.leadName.trim() : "";
+        if (ln && ln !== "WhatsApp User" && ln !== "WhatsApp Contact" && !/^\+?\d+$/.test(ln)) {
+          return ln;
+        }
+        return undefined;
+      })(),
+      metaChannel: (c.metaChannel as Channel) || undefined,
+      metaSenderId: c.metaSenderId || undefined,
+      formPhone: c.formPhone || undefined,
       phone: (() => {
-        if (c.phone && /^\+\d{7,13}$/.test(c.phone)) return c.phone;
+        if (c.phone && /^\+\d{7,15}$/.test(c.phone)) return c.phone;
+        if (c.formPhone) {
+          const fDigits = String(c.formPhone).replace(/\D/g, "");
+          if (fDigits.length >= 7 && fDigits.length <= 15) return `+${fDigits}`;
+        }
         if (c.channel === "WA") {
           const digits = String(c.senderId || "").replace(/\D/g, "");
           if (digits.length >= 7 && digits.length <= 13) return `+${digits}`;
@@ -536,16 +560,20 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             } else if (payload.type === "conversation_updated" && payload.data) {
               const { conversationId, conversation: remoteConv } = payload.data;
               if (!conversationId || !remoteConv) return;
-              setConversations((prev) =>
-                prev.map((c) => {
+              setConversations((prev) => {
+                const exists = prev.some((c) => c.id === conversationId);
+                if (!exists) {
+                  return [{ ...normalizeConversationMeta(remoteConv), messages: [] }, ...prev];
+                }
+                return prev.map((c) => {
                   if (c.id !== conversationId) return c;
                   return {
                     ...c,
                     ...normalizeConversationMeta(remoteConv),
                     messages: c.messages,
                   };
-                })
-              );
+                });
+              });
             } else if (payload.type === "marked_read" && payload.data) {
               const { conversationId } = payload.data;
               if (conversationId) {
@@ -649,12 +677,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 })
               );
             } else if (payload.type === "conversation_deleted" && payload.data) {
-              const { conversationId } = payload.data;
+              const { conversationId, mergedInto } = payload.data;
               if (conversationId) {
                 messagesCacheRef.current.delete(conversationId);
                 setConversations((prev) => prev.filter((c) => c.id !== conversationId));
                 if (activeChatIdRef.current === conversationId) {
-                  setActiveChatId(null);
+                  setActiveChatId(mergedInto || null);
                 }
               }
             } else if (payload.type === "conversations_purged" && payload.data) {

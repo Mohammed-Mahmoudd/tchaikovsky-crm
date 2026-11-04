@@ -100,16 +100,21 @@ const isRealPhone = (p?: string): boolean => {
 const extractPhoneFromConversation = (conv?: any | null): string => {
   if (!conv) return "";
   if (isRealPhone(conv.phone)) return conv.phone;
+  if (conv.formPhone && isRealPhone(conv.formPhone)) return `+${String(conv.formPhone).replace(/\D/g, "")}`;
   if (conv.formAnswers && isRealPhone((conv.formAnswers as any).phone)) {
     return (conv.formAnswers as any).phone;
   }
   for (const m of conv.messages || []) {
     if (!m.text) continue;
-    const match = m.text.match(/(?:phone|mobile|tel|رقم|هاتف|جوال|واتس)?[:\s]*(\+?966[\d\s-]{8,}|05[\d\s-]{8,})/i);
+    const match = m.text.match(
+      /(?:phone(?:\s*number)?|mobile|tel|رقم(?:\s*الهاتف|\s*الجوال)?|هاتف|جوال|واتس)?[:\s]*(\+?966[\d\s-]{8,}|05[\d\s-]{8,}|\+?201[0125][\d\s-]{7,}|01[0125][\d\s-]{7,})/i
+    );
     if (match && match[1]) {
       return match[1].trim();
     }
-    const digitMatch = m.text.match(/\b(05\d[\d\s-]{6,}\d|\+?966[\d\s-]{7,}\d)\b/);
+    const digitMatch = m.text.match(
+      /\b(05\d[\d\s-]{6,}\d|\+?966[\d\s-]{7,}\d|01[0125][\d\s-]{6,}\d|\+?201[0125][\d\s-]{6,}\d)\b/
+    );
     if (digitMatch && digitMatch[1]) {
       return digitMatch[1].trim();
     }
@@ -204,8 +209,8 @@ export default function InboxPage() {
       if (activeFilter === "Open" && conv.status !== "Open") return false;
       if (activeFilter === "Resolved" && conv.status !== "Resolved") return false;
       if (activeFilter === "WA" && conv.channel !== "WA") return false;
-      if (activeFilter === "IG" && conv.channel !== "IG") return false;
-      if (activeFilter === "FB" && conv.channel !== "FB") return false;
+      if (activeFilter === "IG" && conv.channel !== "IG" && conv.metaChannel !== "IG") return false;
+      if (activeFilter === "FB" && conv.channel !== "FB" && conv.metaChannel !== "FB") return false;
 
       if (searchQuery.trim() && !matchLeadSearch(conv, searchQuery)) {
         return false;
@@ -437,7 +442,9 @@ export default function InboxPage() {
                       {conv.name}
                     </h3>
                     <p className="text-[11px] truncate" style={{ color: isActive ? "#0066FF" : "var(--text-secondary)" }}>
-                      {conv.agent}
+                      {conv.leadName && conv.leadName !== conv.name
+                        ? `${conv.leadName} · ${conv.agent}`
+                        : conv.agent}
                     </p>
                   </div>
                   <div className="flex flex-col items-end justify-between shrink-0 self-stretch gap-1">
@@ -448,7 +455,7 @@ export default function InboxPage() {
                         color: isActive ? "#0066FF" : "var(--text-secondary)",
                       }}
                     >
-                      {conv.channel}
+                      {conv.metaChannel ? `${conv.channel} · ${conv.metaChannel}` : conv.channel}
                     </span>
                     <div className="flex items-center gap-1.5 mt-auto">
                       {timeStr && (
@@ -504,10 +511,21 @@ export default function InboxPage() {
                 <div className="min-w-0">
                   <h2 className="text-[15px] font-bold truncate" style={{ color: "var(--text-primary)" }}>
                     {activeConv.name}
+                    {activeConv.leadName && activeConv.leadName !== activeConv.name
+                      ? ` · ${activeConv.leadName}`
+                      : ""}
                   </h2>
                   <div className="flex items-center text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
                     <span className="truncate">
-                      {activeConv.channel === "WA" ? "WhatsApp" : activeConv.channel === "IG" ? "Instagram" : "Messenger"}
+                      {activeConv.channel === "WA"
+                        ? activeConv.metaChannel === "FB"
+                          ? "WhatsApp · Facebook Form"
+                          : activeConv.metaChannel === "IG"
+                          ? "WhatsApp · Instagram Form"
+                          : "WhatsApp"
+                        : activeConv.channel === "IG"
+                        ? "Instagram"
+                        : "Messenger"}
                     </span>
                     {activeConv.channel === "WA" && (
                       <>
@@ -861,7 +879,7 @@ export default function InboxPage() {
                 <input
                   key={activeConv.id + '-name'}
                   type="text"
-                  defaultValue={activeConv.name}
+                  defaultValue={activeConv.leadName || activeConv.profileName || activeConv.name}
                   placeholder="Enter customer name..."
                   disabled={isReadOnly}
                   className="w-full text-[16px] font-bold bg-transparent outline-none border-b border-transparent focus:border-[#0066FF] transition-colors pb-0.5 truncate disabled:opacity-80"
@@ -869,8 +887,9 @@ export default function InboxPage() {
                   onBlur={(e) => {
                     if (isReadOnly) return;
                     const newName = e.target.value.trim();
-                    if (newName && newName !== activeConv.name) {
-                      patchConversation(activeConv.id, { name: newName });
+                    const currentDisplayName = activeConv.leadName || activeConv.profileName || activeConv.name;
+                    if (newName && newName !== currentDisplayName) {
+                      patchConversation(activeConv.id, { name: newName, leadName: newName });
                     }
                   }}
                 />

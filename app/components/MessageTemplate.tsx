@@ -24,7 +24,7 @@ interface MessageTemplateProps {
 }
 
 /**
- * Format phone numbers into clean Saudi display format: +966 55 108 3674
+ * Format phone numbers into clean international display format
  */
 export function formatDisplayPhone(raw: string): string {
   if (!raw) return "";
@@ -37,6 +37,14 @@ export function formatDisplayPhone(raw: string): string {
   if (digits.startsWith("9665") && digits.length === 12) {
     return `+966 ${digits.slice(3, 5)} ${digits.slice(5, 8)} ${digits.slice(8)}`;
   }
+  // Egypt 01xxxxxxxxx -> +20 1xx xxx xxxx
+  if (digits.startsWith("01") && digits.length === 11) {
+    return `+20 ${digits.slice(1, 4)} ${digits.slice(4, 7)} ${digits.slice(7)}`;
+  }
+  // Egypt 201xxxxxxxxx -> +20 1xx xxx xxxx
+  if (digits.startsWith("201") && digits.length === 12) {
+    return `+20 ${digits.slice(2, 5)} ${digits.slice(5, 8)} ${digits.slice(8)}`;
+  }
   if (raw.startsWith("+")) return raw;
   return digits.length >= 7 ? `+${digits}` : raw;
 }
@@ -48,6 +56,9 @@ export function extractCleanDigits(phoneCandidate: string): string {
   if (!phoneCandidate) return "";
   let rawDigits = phoneCandidate.replace(/[^\d]/g, "");
   if (!rawDigits) return "";
+  if (rawDigits.startsWith("00") && rawDigits.length >= 11) {
+    rawDigits = rawDigits.slice(2);
+  }
   // Saudi 05xxxxxxxx (10 digits) -> 9665xxxxxxxx
   if (rawDigits.startsWith("05") && rawDigits.length === 10) {
     return `966${rawDigits.slice(1)}`;
@@ -56,8 +67,13 @@ export function extractCleanDigits(phoneCandidate: string): string {
   if (rawDigits.startsWith("5") && rawDigits.length === 9) {
     return `966${rawDigits}`;
   }
-  if (rawDigits.startsWith("966")) {
-    return rawDigits;
+  // Egypt 01xxxxxxxxx (11 digits) -> 201xxxxxxxxx
+  if (rawDigits.startsWith("01") && rawDigits.length === 11) {
+    return `20${rawDigits.slice(1)}`;
+  }
+  // Egypt 1xxxxxxxxx (10 digits without leading 0) -> 201xxxxxxxxx
+  if (/^1[0125]\d{8}$/.test(rawDigits)) {
+    return `20${rawDigits}`;
   }
   return rawDigits;
 }
