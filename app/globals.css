@@ -33,6 +33,13 @@
   --text-chat-incoming: #1c1c1e;
   --text-chat-outgoing: #003380;
 
+  /* File attachment card */
+  --file-card-bg: rgba(255, 255, 255, 0.85);
+  --file-card-border: rgba(0, 0, 0, 0.12);
+  --file-icon-bg: #ffffff;
+  --file-icon-border: rgba(0, 0, 0, 0.15);
+  --file-icon-color: #000000;
+
   /* Other */
   --bg-banner: #0066FF;
   --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.05);
@@ -74,6 +81,13 @@
   --text-on-card: #e5e5ea;
   --text-chat-incoming: #e5e5ea;
   --text-chat-outgoing: #e5e5ea;
+
+  /* File attachment card */
+  --file-card-bg: rgba(255, 255, 255, 0.05);
+  --file-card-border: rgba(255, 255, 255, 0.1);
+  --file-icon-bg: rgba(255, 255, 255, 0.1);
+  --file-icon-border: rgba(255, 255, 255, 0.15);
+  --file-icon-color: #e5e5ea;
 
   /* Other */
   --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.5);
@@ -180,4 +194,70 @@ select option {
 select option:disabled {
   font-weight: 400;
   color: var(--text-muted);
+}
+
+/* Composer assist bar (emoji suggestions + formatting toolbar) */
+@keyframes composer-assist-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.composer-assist-in {
+  animation: composer-assist-in 120ms ease-out;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* ── Live WhatsApp formatting inside the composer (mirror overlay) ──
+   Only width-neutral styles are allowed here so the textarea caret stays aligned. */
+.wa-ed-input {
+  color: transparent !important;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--text-primary);
+  background: transparent !important;
+}
+.wa-ed-input::selection {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background: rgba(0, 102, 255, 0.25);
+}
+.wa-ed-input::placeholder {
+  -webkit-text-fill-color: var(--text-muted);
+}
+.wa-ed-mirror {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+.wa-ed-mk,
+.wa-ed-prefix {
+  opacity: 0.4;
+}
+.wa-ed-prefix {
+  color: #0066ff;
+  opacity: 0.85;
+}
+.wa-ed-b {
+  -webkit-text-stroke: 0.45px currentColor;
+}
+.wa-ed-i {
+  font-style: oblique 10deg;
+  font-synthesis: style;
+}
+.wa-ed-s {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.wa-ed-code {
+  background: rgba(127, 127, 127, 0.16);
+  border-radius: 3px;
+}
+.wa-ed-quote {
+  color: var(--text-secondary);
 }

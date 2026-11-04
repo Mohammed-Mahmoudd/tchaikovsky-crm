@@ -7,6 +7,13 @@ import { formatMetaErrorMessage } from "../utils/errorParser";
 
 export type Channel = "WA" | "IG" | "FB";
 
+export type MessageReaction = {
+  emoji: string;
+  sender?: string;
+  fromMe: boolean;
+  timestamp?: number;
+};
+
 export type Message = {
   id: string;
   text: string;
@@ -20,6 +27,9 @@ export type Message = {
   isRead?: boolean;
   dir?: "rtl" | "ltr";
   senderName?: string;
+  isEdited?: boolean;
+  editedAt?: number;
+  reactions?: MessageReaction[];
 };
 
 export type Conversation = {
@@ -99,6 +109,10 @@ type CRMContextType = {
   setSearchQuery: (query: string) => void;
   deleteConversation: (id: string) => Promise<void>;
   clearWhatsAppConversations: () => Promise<void>;
+  editMessage: (chatId: string, messageId: string, newText: string) => Promise<{ ok: boolean; error?: string }>;
+  reactToMessage: (chatId: string, messageId: string, emoji: string) => Promise<boolean>;
+  addOptimisticMessages: (chatId: string, msgs: Message[]) => void;
+  finalizeOptimisticMessages: (chatId: string, tempIds: string[], confirmedRawMessages?: any[]) => void;
 };
 
 const CRMContext = createContext<CRMContextType | undefined>(undefined);
@@ -341,6 +355,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       deliveredAt: m.deliveredAt || undefined,
       isRead: m.status === "read" || Boolean(m.seenAt),
       senderName: m.senderName || undefined,
+      isEdited: Boolean(m.isEdited),
+      editedAt: m.editedAt || undefined,
+      reactions: Array.isArray(m.reactions) ? m.reactions : [],
     }));
   }, []);
 
@@ -402,7 +419,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       const res = await fetch(`${API}/messages/${chatId}`);
       const json = await res.json();
       if (json.success && json.data) {
-        const newMessages = normalizeMessages(json.data.messages);
+        const serverMessages = normalizeMessages(json.data.messages);
+        const existingCached = messagesCacheRef.current.get(chatId) || [];
+        // Keep any in-flight optimistic messages (temp_*) that are still uploading/sending
+        const inFlightOptimistic = existingCached.filter(
+          (m) => m.id.startsWith("temp_") && m.status === "pending"
+        );
+        const newMessages =
+          inFlightOptimistic.length > 0 ? [...serverMessages, ...inFlightOptimistic] : serverMessages;
 
         // Update the messages cache
         messagesCacheRef.current.set(chatId, newMessages);
@@ -537,25 +561,46 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     : "",
                   timestamp: message.timestamp,
                   isIncoming: !isOutgoing,
+                  status: message.status || (isOutgoing ? "sent" : undefined),
                   senderName: message.senderName || undefined,
+                  isEdited: Boolean(message.isEdited),
+                  editedAt: message.editedAt || undefined,
+                  reactions: Array.isArray(message.reactions) ? message.reactions : [],
                 };
 
                 const cached = messagesCacheRef.current.get(conversationId) || [];
-                if (!cached.some((m) => m.id === formattedMsg.id)) {
+                const existingIdx = cached.findIndex((m) => m.id === formattedMsg.id);
+                let updatedMessages: Message[];
+                if (existingIdx >= 0) {
+                  // Merge upgraded fields (e.g. attachment URL or senderName) into existing message
+                  updatedMessages = cached.map((m, idx) =>
+                    idx === existingIdx
+                      ? {
+                          ...m,
+                          ...formattedMsg,
+                          attachments:
+                            formattedMsg.attachments && formattedMsg.attachments.length > 0
+                              ? formattedMsg.attachments
+                              : m.attachments,
+                          senderName: formattedMsg.senderName || m.senderName,
+                        }
+                      : m
+                  );
+                } else {
                   // Keep chronological order even if an older message arrives late
-                  const updatedMessages = [...cached, formattedMsg].sort(
+                  updatedMessages = [...cached, formattedMsg].sort(
                     (a, b) => (a.timestamp || 0) - (b.timestamp || 0)
                   );
-                  messagesCacheRef.current.set(conversationId, updatedMessages);
-
-                  setConversations((prev) =>
-                    prev.map((c) =>
-                      c.id === conversationId
-                        ? { ...c, messages: updatedMessages, unreadCount: 0 }
-                        : c
-                    )
-                  );
                 }
+                messagesCacheRef.current.set(conversationId, updatedMessages);
+
+                setConversations((prev) =>
+                  prev.map((c) =>
+                    c.id === conversationId
+                      ? { ...c, messages: updatedMessages, unreadCount: 0 }
+                      : c
+                  )
+                );
               }
             } else if (payload.type === "conversation_updated" && payload.data) {
               const { conversationId, conversation: remoteConv } = payload.data;
@@ -693,6 +738,52 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   setActiveChatId(null);
                 }
               }
+            } else if (payload.type === "message_edited" && payload.data) {
+              const { conversationId, messageId, text, editedAt } = payload.data;
+              if (!conversationId || !messageId) return;
+
+              const cached = messagesCacheRef.current.get(conversationId);
+              if (cached) {
+                const updated = cached.map((m) =>
+                  m.id === messageId
+                    ? { ...m, text, isEdited: true, editedAt: editedAt || Date.now() }
+                    : m
+                );
+                messagesCacheRef.current.set(conversationId, updated);
+              }
+
+              setConversations((prev) =>
+                prev.map((c) => {
+                  if (c.id !== conversationId) return c;
+                  const updatedMessages = c.messages?.map((m) =>
+                    m.id === messageId
+                      ? { ...m, text, isEdited: true, editedAt: editedAt || Date.now() }
+                      : m
+                  );
+                  return { ...c, messages: updatedMessages || [] };
+                })
+              );
+            } else if (payload.type === "message_reaction" && payload.data) {
+              const { conversationId, messageId, reactions } = payload.data;
+              if (!conversationId || !messageId) return;
+
+              const cached = messagesCacheRef.current.get(conversationId);
+              if (cached) {
+                const updated = cached.map((m) =>
+                  m.id === messageId ? { ...m, reactions: Array.isArray(reactions) ? reactions : [] } : m
+                );
+                messagesCacheRef.current.set(conversationId, updated);
+              }
+
+              setConversations((prev) =>
+                prev.map((c) => {
+                  if (c.id !== conversationId) return c;
+                  const updatedMessages = c.messages?.map((m) =>
+                    m.id === messageId ? { ...m, reactions: Array.isArray(reactions) ? reactions : [] } : m
+                  );
+                  return { ...c, messages: updatedMessages || [] };
+                })
+              );
             } else if (payload.type === "names_updated") {
               // WhatsApp backfill completed on backend — refresh conversations so real names appear
               fetchConversations();
@@ -1004,6 +1095,203 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     }
   }, [conversations, token]);
 
+  // 0ms optimistic message edit + server sync
+  const editMessage = useCallback(
+    async (chatId: string, messageId: string, newText: string): Promise<{ ok: boolean; error?: string }> => {
+      if (isReadOnly) return { ok: false, error: "View-only mode" };
+      const trimmed = newText.trim();
+      if (!trimmed) return { ok: false, error: "Message cannot be empty" };
+
+      const prevCached = messagesCacheRef.current.get(chatId);
+      const editedAt = Date.now();
+
+      // 1. Instant 0ms optimistic update
+      if (prevCached) {
+        const nextCached = prevCached.map((m) =>
+          m.id === messageId ? { ...m, text: trimmed, isEdited: true, editedAt } : m
+        );
+        messagesCacheRef.current.set(chatId, nextCached);
+      }
+
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id !== chatId) return c;
+          return {
+            ...c,
+            messages: (c.messages || []).map((m) =>
+              m.id === messageId ? { ...m, text: trimmed, isEdited: true, editedAt } : m
+            ),
+          };
+        })
+      );
+
+      // 2. Persist to backend & WhatsApp
+      try {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const res = await fetch(`${API}/messages/${chatId}/messages/${messageId}`, {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ text: trimmed }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          // Rollback on failure
+          if (prevCached) {
+            messagesCacheRef.current.set(chatId, prevCached);
+            setConversations((prev) =>
+              prev.map((c) => (c.id === chatId ? { ...c, messages: prevCached } : c))
+            );
+          }
+          return { ok: false, error: json?.error || "Failed to edit message" };
+        }
+        return { ok: true };
+      } catch (err: any) {
+        if (prevCached) {
+          messagesCacheRef.current.set(chatId, prevCached);
+          setConversations((prev) =>
+            prev.map((c) => (c.id === chatId ? { ...c, messages: prevCached } : c))
+          );
+        }
+        return { ok: false, error: err?.message || "Network error while editing message" };
+      }
+    },
+    [isReadOnly, token]
+  );
+
+  // 0ms optimistic emoji reaction toggle/update + server sync
+  const reactToMessage = useCallback(
+    async (chatId: string, messageId: string, emoji: string): Promise<boolean> => {
+      if (isReadOnly) return false;
+      const prevCached = messagesCacheRef.current.get(chatId);
+
+      // Compute next reactions: if the same emoji is already set by us (fromMe=true), toggle it off ("")
+      let effectiveEmoji = emoji.trim();
+      const applyReaction = (msg: Message): Message => {
+        if (msg.id !== messageId) return msg;
+        const current = Array.isArray(msg.reactions) ? msg.reactions : [];
+        const myExisting = current.find((r) => r.fromMe);
+        if (myExisting && myExisting.emoji === effectiveEmoji) {
+          effectiveEmoji = ""; // Toggle off
+        }
+        const others = current.filter((r) => !r.fromMe);
+        const nextReactions: MessageReaction[] = effectiveEmoji
+          ? [...others, { emoji: effectiveEmoji, sender: "You", fromMe: true, timestamp: Date.now() }]
+          : others;
+        return { ...msg, reactions: nextReactions };
+      };
+
+      // 1. Instant 0ms optimistic update
+      if (prevCached) {
+        const nextCached = prevCached.map(applyReaction);
+        messagesCacheRef.current.set(chatId, nextCached);
+      }
+
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id !== chatId) return c;
+          return {
+            ...c,
+            messages: (c.messages || []).map(applyReaction),
+          };
+        })
+      );
+
+      // 2. Persist to backend & WhatsApp
+      try {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const res = await fetch(`${API}/messages/${chatId}/messages/${messageId}/react`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ emoji: effectiveEmoji }),
+        });
+        if (!res.ok) {
+          if (prevCached) {
+            messagesCacheRef.current.set(chatId, prevCached);
+            setConversations((prev) =>
+              prev.map((c) => (c.id === chatId ? { ...c, messages: prevCached } : c))
+            );
+          }
+          return false;
+        }
+        return true;
+      } catch (err) {
+        console.error("Failed to react to message:", err);
+        if (prevCached) {
+          messagesCacheRef.current.set(chatId, prevCached);
+          setConversations((prev) =>
+            prev.map((c) => (c.id === chatId ? { ...c, messages: prevCached } : c))
+          );
+        }
+        return false;
+      }
+    },
+    [isReadOnly, token]
+  );
+
+  // 0ms optimistic message insertion for instant text & attachment rendering
+  const addOptimisticMessages = useCallback((chatId: string, msgs: Message[]) => {
+    if (!chatId || !msgs || msgs.length === 0) return;
+    const cached = messagesCacheRef.current.get(chatId) || [];
+    const nextCached = [...cached, ...msgs];
+    messagesCacheRef.current.set(chatId, nextCached);
+
+    const now = Date.now();
+    setConversations((prev) => {
+      const idx = prev.findIndex((c) => c.id === chatId);
+      if (idx < 0) return prev;
+      const target = prev[idx];
+      const updated: Conversation = {
+        ...target,
+        messages: [...(target.messages || []), ...msgs],
+        lastMessageAt: Math.max(target.lastMessageAt || 0, now),
+        unreadCount: 0,
+        pipeline: target.pipeline === "New" ? "Contacted" : target.pipeline,
+      };
+      const rest = prev.filter((_, i) => i !== idx);
+      return [updated, ...rest];
+    });
+  }, []);
+
+  // Replace or remove optimistic messages once the server confirms or rejects delivery
+  const finalizeOptimisticMessages = useCallback(
+    (chatId: string, tempIds: string[], confirmedRawMessages?: any[]) => {
+      if (!chatId) return;
+      const tempSet = new Set(tempIds);
+      const cached = messagesCacheRef.current.get(chatId) || [];
+      const withoutTemp = cached.filter((m) => !tempSet.has(m.id));
+
+      let nextMessages = withoutTemp;
+      if (Array.isArray(confirmedRawMessages) && confirmedRawMessages.length > 0) {
+        const normalizedConfirmed: Message[] = confirmedRawMessages.map((rm: any) => ({
+          id: rm.message_id || rm.messageId || `msg_${Date.now()}`,
+          text: rm.text || "",
+          attachments: rm.attachments || [],
+          time: new Date(rm.timestamp || Date.now()).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+          timestamp: rm.timestamp || Date.now(),
+          isIncoming: false,
+          status: "sent",
+          senderName: rm.senderName || undefined,
+        }));
+        const existingIds = new Set(withoutTemp.map((m) => m.id));
+        const toAdd = normalizedConfirmed.filter((m) => !existingIds.has(m.id));
+        nextMessages = [...withoutTemp, ...toAdd].sort(
+          (a, b) => (a.timestamp || 0) - (b.timestamp || 0)
+        );
+      }
+
+      messagesCacheRef.current.set(chatId, nextMessages);
+      setConversations((prev) =>
+        prev.map((c) => (c.id === chatId ? { ...c, messages: nextMessages } : c))
+      );
+    },
+    []
+  );
+
   return (
     <CRMContext.Provider
       value={{
@@ -1022,6 +1310,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         setSearchQuery,
         deleteConversation,
         clearWhatsAppConversations,
+        editMessage,
+        reactToMessage,
+        addOptimisticMessages,
+        finalizeOptimisticMessages,
       }}
     >
       {children}

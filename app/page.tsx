@@ -2,10 +2,33 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import Link from "next/link";
-import { ArrowLeft, Info, X, Calendar, CheckCircle2, Trash2, Search, AlertCircle } from "lucide-react";
+import {
+  ArrowLeft,
+  Info,
+  X,
+  Calendar,
+  CheckCircle2,
+  Trash2,
+  Search,
+  AlertCircle,
+  SmilePlus,
+  Pencil,
+  Copy,
+  Check,
+  CheckCheck,
+  Plus,
+  FileText,
+  Download,
+  ExternalLink,
+  Image as ImageIcon,
+  Clock,
+  UploadCloud,
+} from "lucide-react";
 import { useBranches } from "./lib/branches";
 import { BranchSelect } from "./components/BranchSelect";
-import { ChatInputBar } from "./components/ChatInputBar";
+import { ChatInputBar, OutgoingAttachmentPayload, formatFileSize } from "./components/ChatInputBar";
+import { renderWhatsAppText } from "./utils/messageFormatting";
+import { EmojiPicker, WHATSAPP_QUICK_REACTIONS, recordRecentEmoji } from "./components/EmojiPicker";
 import { formatMetaErrorMessage, ParsedMetaError } from "./utils/errorParser";
 
 type Channel = "WA" | "IG" | "FB";
@@ -168,6 +191,7 @@ export default function InboxPage() {
   const { isReadOnly, user, token } = useAuth();
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const chatScrollContainerRef = useRef<HTMLDivElement | null>(null);
 
   const filters = ["All", "Mine", "Unassigned", "Open", "Resolved", "WA", "IG", "FB"];
 
@@ -182,6 +206,10 @@ export default function InboxPage() {
     searchQuery,
     setSearchQuery,
     deleteConversation,
+    editMessage,
+    reactToMessage,
+    addOptimisticMessages,
+    finalizeOptimisticMessages,
   } = useCRM();
 
   // Periodic refresh every 30s to keep relative timestamps (e.g. "23m", "1 day ago") live
@@ -248,10 +276,93 @@ export default function InboxPage() {
   // Delivery error state for active chat
   const [sendError, setSendError] = useState<ParsedMetaError | null>(null);
 
-  // Clear delivery error when switching chats
+  // WhatsApp Message Edit & Reaction UI state
+  const [editingMessage, setEditingMessage] = useState<{ id: string; text: string } | null>(null);
+  const [activeReactionMenu, setActiveReactionMenu] = useState<{
+    msgId: string;
+    style: React.CSSProperties;
+    anchorRect: DOMRect;
+    isIncoming: boolean;
+  } | null>(null);
+  const [fullEmojiMenu, setFullEmojiMenu] = useState<{
+    msgId: string;
+    style: React.CSSProperties;
+  } | null>(null);
+  const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
+  const [lightboxImage, setLightboxImage] = useState<{ url: string; fileName?: string } | null>(null);
+  const [isDraggingOverChat, setIsDraggingOverChat] = useState(false);
+  const [droppedFilesForInput, setDroppedFilesForInput] = useState<{
+    files: File[];
+    timestamp: number;
+  } | null>(null);
+  const dragDepthRef = useRef(0);
+
+  // Compute clamped fixed coordinates so reaction bars & emoji pickers NEVER clip under the header or edges
+  const computeReactionBarStyle = useCallback((anchorRect: DOMRect, isIncoming: boolean): React.CSSProperties => {
+    const BAR_W = 284;
+    const BAR_H = 46;
+    const containerRect = chatScrollContainerRef.current?.getBoundingClientRect();
+    const minTop = (containerRect ? containerRect.top : 64) + 8;
+    const maxBottom = (containerRect ? containerRect.bottom : window.innerHeight - 70) - 8;
+    const minLeft = (containerRect ? containerRect.left : 0) + 12;
+    const maxRight = (containerRect ? containerRect.right : window.innerWidth) - 12;
+
+    // Place above if there's enough room below the chat header; otherwise flip below the message!
+    let top = anchorRect.top - BAR_H - 8;
+    if (top < minTop) {
+      top = Math.min(maxBottom - BAR_H, anchorRect.bottom + 8);
+    }
+
+    let left = isIncoming ? anchorRect.left : anchorRect.right - BAR_W;
+    left = Math.max(minLeft, Math.min(left, maxRight - BAR_W));
+
+    return { top, left };
+  }, []);
+
+  const computeFullPickerStyle = useCallback((anchorRect: DOMRect, isIncoming: boolean): React.CSSProperties => {
+    const PICKER_W = typeof window !== "undefined" && window.innerWidth < 640 ? 300 : 330;
+    const PICKER_H = 304;
+    const containerRect = chatScrollContainerRef.current?.getBoundingClientRect();
+    const minTop = (containerRect ? containerRect.top : 64) + 8;
+    const maxBottom = (containerRect ? containerRect.bottom : window.innerHeight - 70) - 8;
+    const minLeft = (containerRect ? containerRect.left : 0) + 12;
+    const maxRight = (containerRect ? containerRect.right : window.innerWidth) - 12;
+
+    const spaceAbove = anchorRect.top - minTop;
+    const spaceBelow = maxBottom - anchorRect.bottom;
+
+    let top: number;
+    if (spaceAbove >= PICKER_H + 8) {
+      top = anchorRect.top - PICKER_H - 8;
+    } else if (spaceBelow >= PICKER_H + 8) {
+      top = anchorRect.bottom + 8;
+    } else {
+      top = Math.max(minTop, Math.min(anchorRect.bottom + 8, maxBottom - PICKER_H));
+    }
+
+    let left = isIncoming ? anchorRect.left : anchorRect.right - PICKER_W;
+    left = Math.max(minLeft, Math.min(left, maxRight - PICKER_W));
+
+    return { top, left };
+  }, []);
+
+  // Clear delivery error and active message menus when switching chats
   useEffect(() => {
     setSendError(null);
+    setEditingMessage(null);
+    setActiveReactionMenu(null);
+    setFullEmojiMenu(null);
   }, [activeChatId]);
+
+  // Dismiss quick reaction pill when clicking outside
+  useEffect(() => {
+    if (!activeReactionMenu) return;
+    const handleClickOutside = () => {
+      setActiveReactionMenu(null);
+    };
+    document.addEventListener("click", handleClickOutside);
+    return () => document.removeEventListener("click", handleClickOutside);
+  }, [activeReactionMenu]);
 
   const handleOpenBookingModal = () => {
     if (!activeConv) return;
@@ -302,28 +413,112 @@ export default function InboxPage() {
   }, [activeChatId, activeConv?.messages?.length]);
 
   const handleSendReply = useCallback(
-    async (textToSend: string): Promise<boolean> => {
-      if (isReadOnly || !textToSend.trim() || !activeConv || !canSendMessages) return false;
+    async (textToSend: string, attachments?: OutgoingAttachmentPayload[]): Promise<boolean> => {
+      const hasText = Boolean(textToSend && textToSend.trim());
+      const hasAttachments = Boolean(attachments && attachments.length > 0);
+      if (isReadOnly || (!hasText && !hasAttachments) || !activeConv || !canSendMessages) return false;
+
+      const chatId = activeConv.id;
 
       // Auto-assign to admission officer on first reply to unassigned lead (optimistic 0ms update)
       if (isAdmission && !isAssigned && user?.name) {
-        patchConversation(activeConv.id, { agent: user.name });
+        patchConversation(chatId, { agent: user.name });
       }
 
       setSendError(null);
 
+      // 1. Insert 0ms optimistic message(s) so photos/files/text appear in the thread immediately
+      const now = Date.now();
+      const timeStr = new Date(now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const tempIds: string[] = [];
+
+      if (hasAttachments && attachments) {
+        const optimisticMsgs = attachments.map((att, idx) => {
+          const tempId = `temp_${now}_${idx}`;
+          tempIds.push(tempId);
+          const captionForThis = idx === 0 ? textToSend.trim() : "";
+          const displayText =
+            captionForThis ||
+            (att.type === "image"
+              ? "Photo"
+              : att.type === "video"
+              ? "Video"
+              : att.type === "audio"
+              ? "Voice message"
+              : att.fileName || "File");
+          return {
+            id: tempId,
+            text: displayText,
+            attachments: [
+              {
+                type: att.type,
+                url: att.previewUrl || att.url,
+                fileName: att.fileName,
+                mimeType: att.mimeType,
+                fileSize: att.fileSize,
+              },
+            ],
+            time: timeStr,
+            timestamp: now + idx,
+            isIncoming: false,
+            status: "pending" as const,
+            senderName: user?.name || "Staff",
+          };
+        });
+        addOptimisticMessages(chatId, optimisticMsgs);
+      } else {
+        const tempId = `temp_${now}_0`;
+        tempIds.push(tempId);
+        addOptimisticMessages(chatId, [
+          {
+            id: tempId,
+            text: textToSend.trim(),
+            attachments: [],
+            time: timeStr,
+            timestamp: now,
+            isIncoming: false,
+            status: "pending" as const,
+            senderName: user?.name || "Staff",
+          },
+        ]);
+      }
+
       try {
         const headers: Record<string, string> = { "Content-Type": "application/json" };
         if (token) headers["Authorization"] = `Bearer ${token}`;
-        const res = await fetch(`/api/messages/${activeConv.id}/reply`, {
+
+        // Strip local blob previewUrl before sending JSON to server
+        const serverAttachments = hasAttachments
+          ? attachments!.map(({ previewUrl: _p, ...rest }) => rest)
+          : undefined;
+
+        const res = await fetch(`/api/messages/${chatId}/reply`, {
           method: "POST",
           headers,
-          body: JSON.stringify({ text: textToSend, channel: activeConv.channel }),
+          body: JSON.stringify({
+            text: textToSend,
+            channel: activeConv.channel,
+            attachments: serverAttachments,
+          }),
         });
         if (res.ok) {
+          const json = await res.json().catch(() => null);
+          const confirmedList = Array.isArray(json?.messages)
+            ? json.messages
+            : json?.data
+            ? [
+                {
+                  ...json.data,
+                  text: textToSend.trim(),
+                  senderName: json.senderName || user?.name,
+                },
+              ]
+            : undefined;
+          finalizeOptimisticMessages(chatId, tempIds, confirmedList);
           refresh();
           return true;
         } else {
+          finalizeOptimisticMessages(chatId, tempIds);
           const data = await res.json().catch(() => null);
           const parsed = formatMetaErrorMessage(data?.error || data);
           setSendError(parsed);
@@ -331,6 +526,7 @@ export default function InboxPage() {
         }
       } catch (err) {
         console.error("Failed to send reply:", err);
+        finalizeOptimisticMessages(chatId, tempIds);
         setSendError({
           title: "Network error",
           message: "Could not reach the server to send your reply.",
@@ -339,8 +535,58 @@ export default function InboxPage() {
         return false;
       }
     },
-    [isReadOnly, activeConv, canSendMessages, isAdmission, isAssigned, user?.name, patchConversation, token, refresh]
+    [
+      isReadOnly,
+      activeConv,
+      canSendMessages,
+      isAdmission,
+      isAssigned,
+      user?.name,
+      patchConversation,
+      token,
+      refresh,
+      addOptimisticMessages,
+      finalizeOptimisticMessages,
+    ]
   );
+
+  const handleSaveEditMessage = useCallback(
+    async (messageId: string, newText: string): Promise<boolean> => {
+      if (!activeConv || isReadOnly) return false;
+      setEditingMessage(null);
+      setSendError(null);
+      const res = await editMessage(activeConv.id, messageId, newText);
+      if (!res.ok) {
+        setSendError({
+          title: "Could not edit message",
+          message: res.error || "WhatsApp only allows editing messages within 15 minutes of sending.",
+        });
+        return false;
+      }
+      return true;
+    },
+    [activeConv, isReadOnly, editMessage]
+  );
+
+  const handleReactToMessage = useCallback(
+    async (messageId: string, emoji: string) => {
+      if (!activeConv || isReadOnly) return;
+      setActiveReactionMenu(null);
+      setFullEmojiMenu(null);
+      if (emoji) recordRecentEmoji(emoji);
+      await reactToMessage(activeConv.id, messageId, emoji);
+    },
+    [activeConv, isReadOnly, reactToMessage]
+  );
+
+  const handleCopyMessage = useCallback((messageId: string, text: string) => {
+    if (!text || typeof navigator === "undefined") return;
+    navigator.clipboard?.writeText(text).catch(() => {});
+    setCopiedMsgId(messageId);
+    setTimeout(() => {
+      setCopiedMsgId((prev) => (prev === messageId ? null : prev));
+    }, 1500);
+  }, []);
 
   const handleSelectConv = (id: string) => {
     setActiveChatId(id);
@@ -485,13 +731,62 @@ export default function InboxPage() {
 
       {/* ── MIDDLE: Conversation Detail ── */}
       <div
+        onDragEnter={(e) => {
+          if (!activeConv || isReadOnly || !canSendMessages) return;
+          if (e.dataTransfer?.types?.includes("Files")) {
+            e.preventDefault();
+            dragDepthRef.current += 1;
+            setIsDraggingOverChat(true);
+          }
+        }}
+        onDragOver={(e) => {
+          if (!activeConv || isReadOnly || !canSendMessages) return;
+          if (e.dataTransfer?.types?.includes("Files")) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "copy";
+          }
+        }}
+        onDragLeave={(e) => {
+          if (!activeConv || isReadOnly || !canSendMessages) return;
+          if (e.dataTransfer?.types?.includes("Files")) {
+            e.preventDefault();
+            dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+            if (dragDepthRef.current === 0) {
+              setIsDraggingOverChat(false);
+            }
+          }
+        }}
+        onDrop={(e) => {
+          if (!activeConv || isReadOnly || !canSendMessages) return;
+          e.preventDefault();
+          dragDepthRef.current = 0;
+          setIsDraggingOverChat(false);
+          const dropped = Array.from(e.dataTransfer?.files || []);
+          if (dropped.length > 0) {
+            setDroppedFilesForInput({ files: dropped, timestamp: Date.now() });
+          }
+        }}
         className={`
-          flex-1 flex flex-col min-w-0
+          relative flex-1 flex flex-col min-w-0
           ${mobileView === "chat" || mobileView === "list" ? "" : ""}
           ${mobileView === "list" ? "hidden md:flex" : "flex"}
         `}
         style={{ background: "var(--bg-page)" }}
       >
+        {/* Drag & Drop File Overlay */}
+        {isDraggingOverChat && activeConv && (
+          <div className="absolute inset-3 z-[70] rounded-2xl border-2 border-dashed border-[#0066FF] bg-[#0066FF]/10 backdrop-blur-xs flex flex-col items-center justify-center gap-2 pointer-events-none animate-in fade-in duration-100">
+            <div className="w-14 h-14 rounded-full bg-[#0066FF] text-white flex items-center justify-center shadow-lg">
+              <UploadCloud className="w-7 h-7" />
+            </div>
+            <p className="text-[15px] font-bold" style={{ color: "var(--text-primary)" }}>
+              Drop photos or files here to attach
+            </p>
+            <p className="text-[12px]" style={{ color: "var(--text-secondary)" }}>
+              Images, PDFs, Documents, Audio & Videos
+            </p>
+          </div>
+        )}
         {activeConv ? (
           <>
             {/* Chat Header */}
@@ -624,7 +919,14 @@ export default function InboxPage() {
             </div>
 
             {/* Chat Messages */}
-            <div className="flex-1 overflow-y-auto p-4 md:p-6 flex flex-col gap-4">
+            <div
+              ref={chatScrollContainerRef}
+              onScroll={() => {
+                if (activeReactionMenu) setActiveReactionMenu(null);
+                if (fullEmojiMenu) setFullEmojiMenu(null);
+              }}
+              className="flex-1 overflow-y-auto p-4 md:p-6 flex flex-col gap-4"
+            >
               {(() => {
                 const convPhone = extractPhoneFromConversation(activeConv);
                 return activeConv.messages.map((msg) => {
@@ -632,12 +934,21 @@ export default function InboxPage() {
                   const hasSharedPostAttachment = (msg.attachments || []).some(
                     (a: any) => a.type === "ig_post" || a.type === "ig_reel" || a.type === "share"
                   );
-                  const hasMediaAttachment = (msg.attachments || []).some(
-                    (a: any) => ["image", "audio", "video", "ig_post", "ig_reel", "share"].includes(a.type)
+                  const hasMediaAttachment = (msg.attachments || []).some((a: any) =>
+                    ["image", "audio", "video", "file", "document", "ig_post", "ig_reel", "share"].includes(a.type)
                   );
                   const shouldRenderFallbackCard = !hasTemplateAttachment && !hasMediaAttachment && isPlaceholderText(msg.text);
 
                   let showPlainText = Boolean(msg.text && !isPlaceholderText(msg.text));
+                  if (showPlainText && hasMediaAttachment && msg.attachments) {
+                    const trimmedMsgText = msg.text.trim();
+                    const matchesAttachmentFileName = msg.attachments.some(
+                      (a: any) => a.fileName && a.fileName.trim() === trimmedMsgText
+                    );
+                    if (matchesAttachmentFileName) {
+                      showPlainText = false;
+                    }
+                  }
                   if (hasSharedPostAttachment && msg.text) {
                     const lowerText = msg.text.trim().toLowerCase();
                     if (
@@ -657,8 +968,49 @@ export default function InboxPage() {
                     }
                   }
 
+                  const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
+                  const canEditThisMessage =
+                    !isReadOnly &&
+                    !msg.isIncoming &&
+                    showPlainText &&
+                    activeConv.channel === "WA" &&
+                    (!msg.timestamp || Date.now() - msg.timestamp <= FIFTEEN_MINUTES_MS);
+                  const canReactToThisMessage = !isReadOnly && activeConv.channel === "WA";
+                  const isEditingThis = editingMessage?.id === msg.id;
+                  const isReactionOpen = activeReactionMenu?.msgId === msg.id;
+                  const isFullPickerOpen = fullEmojiMenu?.msgId === msg.id;
+                  const reactions = msg.reactions || [];
+                  const myReactionEmoji = reactions.find((r) => r.fromMe)?.emoji || null;
+
+                  // Group reactions by emoji for the WhatsApp pill badge
+                  const groupedReactions = reactions.reduce<
+                    { emoji: string; count: number; hasMe: boolean; senders: string[] }[]
+                  >((acc, r) => {
+                    if (!r.emoji) return acc;
+                    const existing = acc.find((item) => item.emoji === r.emoji);
+                    const senderLabel = r.fromMe ? "You" : r.sender || activeConv.name || "Contact";
+                    if (existing) {
+                      existing.count += 1;
+                      if (r.fromMe) existing.hasMe = true;
+                      existing.senders.push(senderLabel);
+                    } else {
+                      acc.push({
+                        emoji: r.emoji,
+                        count: 1,
+                        hasMe: Boolean(r.fromMe),
+                        senders: [senderLabel],
+                      });
+                    }
+                    return acc;
+                  }, []);
+
                   return (
-                    <div key={msg.id} className={`flex flex-col ${msg.isIncoming ? "items-start" : "items-end"}`}>
+                    <div
+                      key={msg.id}
+                      className={`group relative flex flex-col ${msg.isIncoming ? "items-start" : "items-end"} ${
+                        groupedReactions.length > 0 ? "mb-2" : ""
+                      }`}
+                    >
                       {!msg.isIncoming && msg.senderName && (
                         <span
                           className="text-[11px] font-medium mb-1 px-1.5"
@@ -667,118 +1019,481 @@ export default function InboxPage() {
                           {msg.senderName}
                         </span>
                       )}
+
                       <div
-                        className={`${
-                          hasTemplateAttachment || shouldRenderFallbackCard || hasSharedPostAttachment
-                            ? "max-w-[88%] sm:max-w-[300px] p-2 sm:p-2.5"
-                            : "max-w-[85%] md:max-w-[70%] px-4 py-3"
-                        } rounded-2xl ${
-                          msg.isIncoming ? "rounded-tl-sm" : "rounded-tr-sm"
+                        data-msg-bubble-row
+                        className={`relative flex items-center gap-1.5 max-w-full ${
+                          msg.isIncoming ? "flex-row" : "flex-row-reverse"
                         }`}
-                        style={{
-                          background: msg.isIncoming ? "var(--bg-chat-incoming)" : "var(--bg-chat-outgoing)",
-                          border: msg.isIncoming ? "1px solid var(--border-main)" : "none",
-                          boxShadow: "var(--shadow-card)",
-                        }}
                       >
-                        {/* Media attachments (photos, voice notes, video) */}
-                        {msg.attachments && msg.attachments.length > 0 && (
-                          <div className="flex flex-col gap-2 mb-1.5">
-                            {msg.attachments.map((att: any, idx: number) => {
-                              if (isTemplateAttachment(att)) return null;
-                              const url = att.payload?.url || att.url;
-                              if (att.type === "image" && url) {
-                                return (
-                                  <img
-                                    key={idx}
-                                    src={url}
-                                    alt="Attachment"
-                                    className="max-w-full rounded-lg max-h-60 object-cover"
-                                  />
-                                );
-                              }
-                              if (att.type === "audio" && url) {
-                                return (
-                                  <audio key={idx} controls className="max-w-full my-1">
-                                    <source src={url} />
-                                  </audio>
-                                );
-                              }
-                              if (att.type === "video" && url) {
-                                return (
-                                  <video key={idx} controls className="max-w-full rounded-lg max-h-60 my-1">
-                                    <source src={url} />
-                                  </video>
-                                );
-                              }
-                              if (
-                                att.type === "ig_post" ||
-                                att.type === "ig_reel" ||
-                                att.type === "share"
-                              ) {
-                                return (
-                                  <InstagramMedia
-                                    key={idx}
-                                    url={att.payload?.url || att.url}
-                                    title={att.payload?.title || att.title}
-                                    type={att.type}
-                                    mediaId={att.payload?.ig_post_media_id}
-                                  />
-                                );
-                              }
-                              return null;
-                            })}
-                          </div>
-                        )}
-
-                        {/* Text content (e.g. form comments or lead message) */}
-                        {showPlainText && (
-                          <p
-                            className={`text-[14px] md:text-[15px] leading-relaxed ${
-                              hasTemplateAttachment || shouldRenderFallbackCard ? "mb-3" : ""
-                            } ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
-                            style={{ color: msg.isIncoming ? "var(--text-chat-incoming)" : "var(--text-chat-outgoing)" }}
-                            dir={msg.dir}
-                          >
-                            {msg.text}
-                          </p>
-                        )}
-
-                        {/* Template card attachments */}
-                        {hasTemplateAttachment && (
-                          <div className="flex flex-col gap-2.5">
-                            {msg.attachments
-                              ?.filter(isTemplateAttachment)
-                              .map((att: any, idx: number) => (
-                                <MessageTemplate
-                                  key={idx}
-                                  attachment={att}
-                                  isIncoming={msg.isIncoming}
-                                  senderPhone={convPhone}
-                                />
-                              ))}
-                          </div>
-                        )}
-
-                        {/* Graceful fallback card for legacy messages that stored placeholder text */}
-                        {shouldRenderFallbackCard && (
-                          <MessageTemplate
-                            attachment={{
-                              type: "template",
+                        {/* Floating WhatsApp Quick Reaction Bar (👍 ❤️ 😂 😮 😢 🙏 +) — viewport-clamped so it NEVER clips under header */}
+                        {isReactionOpen && activeReactionMenu && (
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className="fixed z-[65] flex items-center gap-1 px-2.5 py-1.5 rounded-full shadow-2xl border select-none animate-in fade-in zoom-in-95 duration-100"
+                            style={{
+                              background: "var(--bg-card)",
+                              borderColor: "var(--border-main)",
+                              boxShadow: "0 10px 28px rgba(0,0,0,0.28)",
+                              ...activeReactionMenu.style,
                             }}
-                            isIncoming={msg.isIncoming}
-                            senderPhone={convPhone}
+                          >
+                            {WHATSAPP_QUICK_REACTIONS.map((emoji) => {
+                              const isSelected = myReactionEmoji === emoji;
+                              return (
+                                <button
+                                  key={emoji}
+                                  type="button"
+                                  onClick={() => handleReactToMessage(msg.id, emoji)}
+                                  className={`w-8 h-8 flex items-center justify-center text-[20px] rounded-full border transition-colors cursor-pointer ${
+                                    isSelected
+                                      ? "border-[#0066FF] bg-[var(--bg-selected)]"
+                                      : "border-transparent hover:border-[#0066FF]"
+                                  }`}
+                                  title={isSelected ? `Remove ${emoji} reaction` : `React with ${emoji}`}
+                                >
+                                  {emoji}
+                                </button>
+                              );
+                            })}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const pickerStyle = computeFullPickerStyle(
+                                  activeReactionMenu.anchorRect,
+                                  activeReactionMenu.isIncoming
+                                );
+                                setActiveReactionMenu(null);
+                                setFullEmojiMenu({ msgId: msg.id, style: pickerStyle });
+                              }}
+                              title="More emojis"
+                              className="w-7 h-7 flex items-center justify-center rounded-full border transition-colors cursor-pointer ml-0.5"
+                              style={{
+                                background: "var(--bg-pill)",
+                                color: "var(--text-primary)",
+                                borderColor: "var(--border-input)",
+                              }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.borderColor = "#0066FF";
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.borderColor = "var(--border-input)";
+                              }}
+                            >
+                              <Plus className="w-4 h-4" />
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Full Emoji Picker when "+" is clicked on a message reaction bar */}
+                        {isFullPickerOpen && fullEmojiMenu && (
+                          <EmojiPicker
+                            onSelect={(emoji) => handleReactToMessage(msg.id, emoji)}
+                            onClose={() => setFullEmojiMenu(null)}
+                            fixedStyle={fullEmojiMenu.style}
                           />
                         )}
 
+                        {/* Message Bubble */}
                         <div
-                          className={`text-[10px] mt-1.5 ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
-                          style={{ color: msg.isIncoming ? "var(--text-muted)" : "var(--text-chat-outgoing)", opacity: msg.isIncoming ? 1 : 0.75 }}
+                          className={`relative ${
+                            hasTemplateAttachment || shouldRenderFallbackCard || hasSharedPostAttachment
+                              ? "max-w-[88%] sm:max-w-[300px] p-2 sm:p-2.5"
+                              : "max-w-[85%] md:max-w-[460px] lg:max-w-[540px] px-4 py-3"
+                          } rounded-2xl transition-all ${
+                            msg.isIncoming ? "rounded-tl-sm" : "rounded-tr-sm"
+                          } ${isEditingThis ? "ring-2 ring-[#0066FF]" : ""}`}
+                          style={{
+                            background: msg.isIncoming ? "var(--bg-chat-incoming)" : "var(--bg-chat-outgoing)",
+                            border: msg.isIncoming ? "1px solid var(--border-main)" : "none",
+                            boxShadow: "var(--shadow-card)",
+                          }}
                         >
-                          {!msg.isIncoming && msg.senderName && (
-                            <span className="font-semibold">{msg.senderName} · </span>
+                          {/* Media attachments (photos, files/documents, voice notes, video) */}
+                          {msg.attachments && msg.attachments.length > 0 && (
+                            <div className="flex flex-col gap-2 mb-1.5">
+                              {msg.attachments.map((att: any, idx: number) => {
+                                if (isTemplateAttachment(att)) return null;
+                                const url = att.previewUrl || att.payload?.url || att.url;
+                                const fileName =
+                                  att.fileName ||
+                                  att.payload?.title ||
+                                  att.title ||
+                                  (att.type === "file" && msg.text && !isPlaceholderText(msg.text)
+                                    ? msg.text
+                                    : undefined);
+                                const fileSizeStr = formatFileSize(att.fileSize);
+                                const downloadUrl =
+                                  url && !url.startsWith("blob:")
+                                    ? `${url}${url.includes("?") ? "&" : "?"}download=1&name=${encodeURIComponent(
+                                        fileName || "attachment"
+                                      )}`
+                                    : url;
+
+                                if (att.type === "image") {
+                                  if (url) {
+                                    return (
+                                      <div
+                                        key={idx}
+                                        className="relative group/img overflow-hidden rounded-xl max-w-[300px]"
+                                      >
+                                        <img
+                                          src={url}
+                                          alt={fileName || "Photo"}
+                                          loading="lazy"
+                                          onClick={() =>
+                                            setLightboxImage({ url, fileName: fileName || "Photo.jpg" })
+                                          }
+                                          className="max-w-full rounded-xl max-h-72 object-cover cursor-zoom-in transition-transform duration-150 hover:scale-[1.01]"
+                                        />
+                                        <a
+                                          href={downloadUrl}
+                                          download={fileName || "Photo.jpg"}
+                                          onClick={(e) => e.stopPropagation()}
+                                          title="Download photo"
+                                          className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center opacity-0 group-hover/img:opacity-100 transition-opacity shadow-sm"
+                                        >
+                                          <Download className="w-3.5 h-3.5" />
+                                        </a>
+                                      </div>
+                                    );
+                                  }
+                                  return (
+                                    <div
+                                      key={idx}
+                                      className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg text-[12px] font-medium border border-black/10 dark:border-white/10 ${
+                                        msg.isIncoming
+                                          ? "bg-[var(--bg-pill)] text-[var(--text-primary)]"
+                                          : "bg-white/85 dark:bg-white/5 text-[var(--text-chat-outgoing)]"
+                                      }`}
+                                    >
+                                      <ImageIcon className="w-4 h-4 shrink-0 opacity-80" />
+                                      <span>Photo</span>
+                                    </div>
+                                  );
+                                }
+
+                                if (att.type === "file" || att.type === "document") {
+                                  const displayFileName = fileName || "Document";
+                                  const ext = displayFileName.includes(".")
+                                    ? displayFileName.split(".").pop()?.toUpperCase().slice(0, 5) || "FILE"
+                                    : "FILE";
+                                  return (
+                                    <div
+                                      key={idx}
+                                      className="flex items-center justify-between gap-3 p-2.5 rounded-xl border min-w-[210px] max-w-[320px] transition-colors"
+                                      style={{
+                                        background: msg.isIncoming ? "var(--bg-pill)" : "var(--file-card-bg)",
+                                        borderColor: "var(--file-card-border)",
+                                      }}
+                                    >
+                                      <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                        <div
+                                          className="w-10 h-10 rounded-lg flex flex-col items-center justify-center shrink-0 border"
+                                          style={{
+                                            background: "var(--file-icon-bg)",
+                                            borderColor: "var(--file-icon-border)",
+                                            color: "var(--file-icon-color)",
+                                          }}
+                                        >
+                                          <FileText className="w-4 h-4" />
+                                          <span className="text-[8px] font-extrabold leading-none mt-0.5">
+                                            {ext}
+                                          </span>
+                                        </div>
+                                        <div className="min-w-0 flex-1">
+                                          <p
+                                            className="text-[12px] font-semibold truncate"
+                                            style={{
+                                              color: msg.isIncoming
+                                                ? "var(--text-chat-incoming)"
+                                                : "var(--text-chat-outgoing)",
+                                            }}
+                                            title={displayFileName}
+                                          >
+                                            {displayFileName}
+                                          </p>
+                                          <p
+                                            className="text-[10px] mt-0.5 opacity-80"
+                                            style={{
+                                              color: msg.isIncoming
+                                                ? "var(--text-secondary)"
+                                                : "var(--text-chat-outgoing)",
+                                            }}
+                                          >
+                                            {fileSizeStr ? `${ext} · ${fileSizeStr}` : `${ext} Document`}
+                                          </p>
+                                        </div>
+                                      </div>
+
+                                      {url && (
+                                        <div className="flex items-center gap-1 shrink-0">
+                                          <a
+                                            href={url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            title="Open file"
+                                            className="p-1.5 rounded-lg hover:bg-black/10 dark:hover:bg-white/15 transition-colors"
+                                            style={{
+                                              color: msg.isIncoming
+                                                ? "var(--text-primary)"
+                                                : "var(--text-chat-outgoing)",
+                                            }}
+                                          >
+                                            <ExternalLink className="w-3.5 h-3.5" />
+                                          </a>
+                                          <a
+                                            href={downloadUrl}
+                                            download={displayFileName}
+                                            title="Download file"
+                                            className="p-1.5 rounded-lg hover:bg-black/10 dark:hover:bg-white/15 transition-colors"
+                                            style={{
+                                              color: msg.isIncoming
+                                                ? "var(--text-primary)"
+                                                : "var(--text-chat-outgoing)",
+                                            }}
+                                          >
+                                            <Download className="w-3.5 h-3.5" />
+                                          </a>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                }
+
+                                if (att.type === "audio" && url) {
+                                  return (
+                                    <audio key={idx} controls className="max-w-full my-1">
+                                      <source src={url} />
+                                    </audio>
+                                  );
+                                }
+                                if (att.type === "video" && url) {
+                                  return (
+                                    <video
+                                      key={idx}
+                                      controls
+                                      playsInline
+                                      preload="metadata"
+                                      className="max-w-full rounded-xl max-h-64 my-1"
+                                    >
+                                      <source src={url} />
+                                    </video>
+                                  );
+                                }
+                                if (
+                                  att.type === "ig_post" ||
+                                  att.type === "ig_reel" ||
+                                  att.type === "share"
+                                ) {
+                                  return (
+                                    <InstagramMedia
+                                      key={idx}
+                                      url={att.payload?.url || att.url}
+                                      title={att.payload?.title || att.title}
+                                      type={att.type}
+                                      mediaId={att.payload?.ig_post_media_id}
+                                    />
+                                  );
+                                }
+                                return null;
+                              })}
+                            </div>
                           )}
-                          {msg.time}
+
+                          {/* Text content (e.g. form comments or lead message) */}
+                          {showPlainText && (
+                            <p
+                              className={`text-[14px] md:text-[15px] leading-relaxed whitespace-pre-wrap break-words ${
+                                hasTemplateAttachment || shouldRenderFallbackCard ? "mb-3" : ""
+                              } ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
+                              style={{ color: msg.isIncoming ? "var(--text-chat-incoming)" : "var(--text-chat-outgoing)" }}
+                              dir={msg.dir}
+                            >
+                              {activeConv.channel === "WA" ? renderWhatsAppText(msg.text) : msg.text}
+                            </p>
+                          )}
+
+                          {/* Template card attachments */}
+                          {hasTemplateAttachment && (
+                            <div className="flex flex-col gap-2.5">
+                              {msg.attachments
+                                ?.filter(isTemplateAttachment)
+                                .map((att: any, idx: number) => (
+                                  <MessageTemplate
+                                    key={idx}
+                                    attachment={att}
+                                    isIncoming={msg.isIncoming}
+                                    senderPhone={convPhone}
+                                  />
+                                ))}
+                            </div>
+                          )}
+
+                          {/* Graceful fallback card for legacy messages that stored placeholder text */}
+                          {shouldRenderFallbackCard && (
+                            <MessageTemplate
+                              attachment={{
+                                type: "template",
+                              }}
+                              isIncoming={msg.isIncoming}
+                              senderPhone={convPhone}
+                            />
+                          )}
+
+                          {/* WhatsApp Message Footer: Sender · Edited · Time · Read Ticks */}
+                          <div
+                            className={`text-[10px] mt-1.5 flex items-center gap-1 ${
+                              msg.dir === "rtl" ? "justify-start" : "justify-end"
+                            }`}
+                            style={{
+                              color: msg.isIncoming ? "var(--text-muted)" : "var(--text-chat-outgoing)",
+                              opacity: msg.isIncoming ? 1 : 0.78,
+                            }}
+                          >
+                            {!msg.isIncoming && msg.senderName && (
+                              <span className="font-semibold">{msg.senderName} ·</span>
+                            )}
+                            {msg.isEdited && (
+                              <span className="italic opacity-90">Edited ·</span>
+                            )}
+                            <span>{msg.time}</span>
+                            {!msg.isIncoming && (
+                              <span className="inline-flex items-center ml-0.5" title={msg.status || "sent"}>
+                                {msg.status === "pending" ? (
+                                  <Clock className="w-3 h-3 opacity-80 animate-pulse" />
+                                ) : activeConv.channel === "WA" ? (
+                                  msg.status === "read" || msg.isRead ? (
+                                    <CheckCheck className="w-3.5 h-3.5 text-[#0088FF] dark:text-[#34B7F1] stroke-[2.4]" />
+                                  ) : msg.status === "delivered" ? (
+                                    <CheckCheck className="w-3.5 h-3.5 opacity-75 stroke-[2.2]" />
+                                  ) : (
+                                    <Check className="w-3.5 h-3.5 opacity-70 stroke-[2.2]" />
+                                  )
+                                ) : null}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* WhatsApp Reaction Pill Badges tucked at bottom edge of bubble */}
+                          {groupedReactions.length > 0 && (
+                            <div
+                              className={`absolute -bottom-3 flex items-center gap-1 z-10 ${
+                                msg.isIncoming ? "left-2.5" : "right-2.5"
+                              }`}
+                            >
+                              {groupedReactions.map((g) => (
+                                <button
+                                  key={g.emoji}
+                                  type="button"
+                                  disabled={!canReactToThisMessage}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (canReactToThisMessage) {
+                                      handleReactToMessage(msg.id, g.emoji);
+                                    }
+                                  }}
+                                  title={`${g.senders.join(", ")} reacted with ${g.emoji}${
+                                    g.hasMe && canReactToThisMessage ? " (Click to remove)" : ""
+                                  }`}
+                                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[12px] leading-none shadow-sm border transition-colors hover:border-[#0066FF] cursor-pointer ${
+                                    g.hasMe ? "ring-1 ring-[#0066FF]/40" : ""
+                                  }`}
+                                  style={{
+                                    background: "var(--bg-card)",
+                                    borderColor: g.hasMe ? "#0066FF" : "var(--border-main)",
+                                    color: "var(--text-primary)",
+                                  }}
+                                >
+                                  <span>{g.emoji}</span>
+                                  {g.count > 1 && (
+                                    <span className="text-[10px] font-bold" style={{ color: "var(--text-secondary)" }}>
+                                      {g.count}
+                                    </span>
+                                  )}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* WhatsApp Hover Action Bar (React, Edit, Copy) */}
+                        <div
+                          className={`flex items-center gap-0.5 px-1 py-0.5 rounded-full border shadow-xs transition-opacity shrink-0 ${
+                            isReactionOpen || isFullPickerOpen || isEditingThis
+                              ? "opacity-100"
+                              : "opacity-0 group-hover:opacity-100 focus-within:opacity-100"
+                          }`}
+                          style={{
+                            background: "var(--bg-card)",
+                            borderColor: "var(--border-main)",
+                          }}
+                        >
+                          {canReactToThisMessage && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setFullEmojiMenu(null);
+                                if (activeReactionMenu?.msgId === msg.id) {
+                                  setActiveReactionMenu(null);
+                                  return;
+                                }
+                                const rowEl = e.currentTarget.closest("[data-msg-bubble-row]") as HTMLElement | null;
+                                const rect = (rowEl || e.currentTarget).getBoundingClientRect();
+                                const style = computeReactionBarStyle(rect, msg.isIncoming);
+                                setActiveReactionMenu({
+                                  msgId: msg.id,
+                                  style,
+                                  anchorRect: rect,
+                                  isIncoming: msg.isIncoming,
+                                });
+                              }}
+                              title="React with emoji"
+                              className="p-1.5 rounded-full border border-transparent hover:border-[#0066FF] transition-colors cursor-pointer"
+                              style={{ color: isReactionOpen ? "#0066FF" : "var(--text-secondary)" }}
+                            >
+                              <SmilePlus className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+
+                          {canEditThisMessage && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setActiveReactionMenu(null);
+                                setFullEmojiMenu(null);
+                                setEditingMessage({ id: msg.id, text: msg.text });
+                              }}
+                              title="Edit message"
+                              className="p-1.5 rounded-full border border-transparent hover:border-[#0066FF] transition-colors cursor-pointer"
+                              style={{ color: isEditingThis ? "#0066FF" : "var(--text-secondary)" }}
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+
+                          {showPlainText && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleCopyMessage(msg.id, msg.text);
+                              }}
+                              title="Copy text"
+                              className="p-1.5 rounded-full border border-transparent hover:border-[#0066FF] transition-colors cursor-pointer"
+                              style={{
+                                color: copiedMsgId === msg.id ? "#34C759" : "var(--text-secondary)",
+                              }}
+                            >
+                              {copiedMsgId === msg.id ? (
+                                <Check className="w-3.5 h-3.5" />
+                              ) : (
+                                <Copy className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -826,9 +1541,11 @@ export default function InboxPage() {
               </div>
             )}
 
-            {/* Chat Input Bar (isolated state for zero-latency typing) */}
+            {/* Chat Input Bar (isolated state for zero-latency typing & file/photo attachments) */}
             <ChatInputBar
               chatId={activeConv.id}
+              channel={activeConv.channel}
+              token={token}
               isReadOnly={isReadOnly}
               canSendMessages={canSendMessages}
               isAssignedToOther={isAssignedToOther}
@@ -839,6 +1556,10 @@ export default function InboxPage() {
               isAdmission={isAdmission}
               onAssignToMe={user?.name ? () => patchConversation(activeConv.id, { agent: user.name }) : undefined}
               onSendMessage={handleSendReply}
+              editingMessage={editingMessage}
+              onCancelEdit={() => setEditingMessage(null)}
+              onSaveEdit={handleSaveEditMessage}
+              externalDroppedFiles={droppedFilesForInput}
             />
           </>
         ) : (
@@ -1422,6 +2143,53 @@ export default function InboxPage() {
             </div>
           </div>
         </>
+      )}
+
+      {/* Full-Screen Photo Lightbox Modal */}
+      {lightboxImage && (
+        <div
+          className="fixed inset-0 z-[110] bg-black/85 backdrop-blur-xs flex flex-col items-center justify-center p-4 animate-in fade-in duration-150"
+          onClick={() => setLightboxImage(null)}
+        >
+          <div
+            className="flex items-center justify-between w-full max-w-4xl mb-3 px-2"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <span className="text-white text-[13px] font-medium truncate">
+              {lightboxImage.fileName || "Photo"}
+            </span>
+            <div className="flex items-center gap-2">
+              <a
+                href={
+                  lightboxImage.url.startsWith("blob:")
+                    ? lightboxImage.url
+                    : `${lightboxImage.url}${lightboxImage.url.includes("?") ? "&" : "?"}download=1&name=${encodeURIComponent(
+                        lightboxImage.fileName || "Photo.jpg"
+                      )}`
+                }
+                download={lightboxImage.fileName || "Photo.jpg"}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/15 hover:bg-white/25 text-white text-[12px] font-semibold transition-colors"
+              >
+                <Download className="w-4 h-4" />
+                Download
+              </a>
+              <button
+                type="button"
+                onClick={() => setLightboxImage(null)}
+                className="p-1.5 rounded-lg bg-white/15 hover:bg-white/25 text-white transition-colors cursor-pointer"
+                title="Close preview"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+          <img
+            src={lightboxImage.url}
+            alt={lightboxImage.fileName || "Photo preview"}
+            onClick={(e) => e.stopPropagation()}
+            className="max-w-full max-h-[82vh] object-contain rounded-xl shadow-2xl"
+          />
+        </div>
       )}
 
       {/* Book Audition Modal */}
