@@ -163,11 +163,36 @@ function getLocalTodayIso(): string {
   return `${y}-${m}-${day}`;
 }
 
+function isReviewerAllowedConversation(c: any): boolean {
+  if (!c) return false;
+  const sId = String(c.id || c.senderId || "");
+  const mId = String(c.metaSenderId || "");
+  if (sId === "38872315812412151" || mId === "38872315812412151") return true;
+  const target = "mohamed mahmoud";
+  const norm = (s: any) => (typeof s === "string" ? s.toLowerCase().trim() : "");
+  return norm(c.name).includes(target) || norm(c.leadName).includes(target) || norm(c.profileName).includes(target);
+}
+
 export function CRMProvider({ children }: { children: React.ReactNode }) {
-  const { isReadOnly, token } = useAuth();
+  const { isReadOnly, token, user } = useAuth();
+  const isMetaReviewer = Boolean(
+    user?.email && user.email.toLowerCase().trim() === "test@meta.com"
+  );
 
   // Hydrate instantly from cache so dashboard/reports/pipeline appear in 0ms (no loading spinner)
-  const [conversations, setConversations] = useState<Conversation[]>(getCachedConversations);
+  const [conversations, setConversations] = useState<Conversation[]>(() => {
+    const cached = getCachedConversations();
+    if (typeof window !== "undefined" && user?.email?.toLowerCase().trim() === "test@meta.com") {
+      return cached.filter(isReviewerAllowedConversation);
+    }
+    return cached;
+  });
+
+  useEffect(() => {
+    if (isMetaReviewer) {
+      setConversations((prev) => prev.filter(isReviewerAllowedConversation));
+    }
+  }, [isMetaReviewer]);
   const [loading, setLoading] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
     try {
@@ -369,13 +394,19 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     // Fix B: skip this poll cycle if a drag is in progress or we're in the post-drop quiet window
     if (pollPausedRef.current) return;
     try {
-      const res = await fetch(`${API}/messages?slim=1`);
+      const headers: Record<string, string> = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetch(`${API}/messages?slim=1`, { headers });
       const json = await res.json();
       if (json.success && Array.isArray(json.data)) {
         const now = Date.now();
         const currentActiveId = activeChatIdRef.current;
 
-        const parsed: Conversation[] = json.data.map((c: any) => {
+        const rawList = isMetaReviewer
+          ? json.data.filter(isReviewerAllowedConversation)
+          : json.data;
+
+        const parsed: Conversation[] = rawList.map((c: any) => {
           const meta = normalizeConversationMeta(c);
           const pending = pendingPatchesRef.current.get(meta.id);
           if (pending) {
@@ -398,7 +429,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         });
 
         setConversations(parsed);
-        persistConversationsCache(parsed);
+        if (!isMetaReviewer) {
+          persistConversationsCache(parsed);
+        }
       }
     } catch (err) {
       console.error("CRMContext: failed to fetch conversations", err);
@@ -408,15 +441,19 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         setLoading(false);
       }
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [normalizeConversationMeta]);
+  }, [normalizeConversationMeta, isMetaReviewer, token]);
   // NOTE: activeChatId intentionally excluded — we use the ref instead
   // so this callback is stable and the polling interval never restarts on chat selection.
 
   // ── Fetch full messages for the active chat only ──
   const fetchActiveChat = useCallback(async (chatId: string) => {
+    if (isMetaReviewer && !isReviewerAllowedConversation({ id: chatId })) {
+      return;
+    }
     try {
-      const res = await fetch(`${API}/messages/${chatId}`);
+      const headers: Record<string, string> = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetch(`${API}/messages/${chatId}`, { headers });
       const json = await res.json();
       if (json.success && json.data) {
         const serverMessages = normalizeMessages(json.data.messages);
@@ -508,6 +545,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           try {
             const payload = JSON.parse(event.data);
             if (!payload || !payload.type) return;
+
+            if (isMetaReviewer && payload.data) {
+              const cId = payload.data.conversationId;
+              const cName = payload.data.conversation?.name;
+              if (!isReviewerAllowedConversation({ id: cId, name: cName })) {
+                return;
+              }
+            }
 
             if (payload.type === "message" && payload.data) {
               const { conversationId, conversation: remoteConv, message } = payload.data;
@@ -887,6 +932,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     };
   }, [activeChatId, fetchActiveChat]);
 
+  // Scoped view for Meta Reviewer test account (test@meta.com)
+  const visibleConversations = useMemo(() => {
+    if (isMetaReviewer) {
+      return conversations.filter(isReviewerAllowedConversation);
+    }
+    return conversations;
+  }, [conversations, isMetaReviewer]);
+
   // Compute live badges across all pages
   const badgeCounts = useMemo<BadgeCounts>(() => {
     const today = getLocalTodayIso();
@@ -896,7 +949,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     let auditions = 0;
     let followUps = 0;
 
-    conversations.forEach((c) => {
+    visibleConversations.forEach((c) => {
       // 1. Inbox badge: total unread messages
       if (c.unreadCount && c.unreadCount > 0) {
         inbox += c.unreadCount;
@@ -929,7 +982,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     });
 
     return { inbox, leads, auditions, followUps };
-  }, [conversations]);
+  }, [visibleConversations]);
 
   // Instant optimistic update across all pages + background PATCH
   const patchConversation = useCallback(
@@ -1295,7 +1348,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   return (
     <CRMContext.Provider
       value={{
-        conversations,
+        conversations: visibleConversations,
         loading,
         badgeCounts,
         assignableAgents,

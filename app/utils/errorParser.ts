@@ -44,6 +44,7 @@ export function formatMetaErrorMessage(errorInput: unknown): ParsedMetaError {
       : typeof parsed === "string"
       ? parsed
       : "";
+  const lowerMsg = rawMsg.toLowerCase();
 
   // 1. Recipient unavailable on Messenger (Error 551 / Subcode 1545041)
   if (
@@ -63,7 +64,34 @@ export function formatMetaErrorMessage(errorInput: unknown): ParsedMetaError {
     };
   }
 
-  // 2. 24-hour policy window (Error 10 / Subcode 2018001)
+  // 2. 7-day Human Agent window expired
+  if (lowerMsg.includes("7 days") || lowerMsg.includes("seven days")) {
+    return {
+      title: "7-day reply window expired",
+      message:
+        "More than 7 days have passed since the customer's last message. Meta's maximum 7-day Human Agent window has closed.",
+      actionHint: "Wait for the customer to send a new message, or reach out to them via WhatsApp or phone call.",
+      code: 10,
+      subcode: 2018001,
+    };
+  }
+
+  // 3. Human Agent tag permission required in Meta Developer Portal
+  if (
+    lowerMsg.includes("human agent") ||
+    lowerMsg.includes("human_agent")
+  ) {
+    return {
+      title: "Human Agent permission required (7-day window)",
+      message:
+        "To reply outside 24 hours (up to 7 days), your Meta App must be approved for the 'Human Agent' feature in Meta Developer Console.",
+      actionHint: "Go to Meta Developer Console > App Review > Permissions and Features > request Advanced Access for 'Human Agent'.",
+      code: 10,
+      subcode: 2018001,
+    };
+  }
+
+  // 4. 24-hour policy window (Error 10 / Subcode 2018001)
   if (
     code === 10 ||
     subcode === 2018001 ||
@@ -74,8 +102,8 @@ export function formatMetaErrorMessage(errorInput: unknown): ParsedMetaError {
     return {
       title: "24-hour reply window expired",
       message:
-        "More than 24 hours have passed since the customer's last message. Meta restricts replies outside the 24-hour window.",
-      actionHint: "Wait for the customer to send a new message or reply through Meta Business Suite.",
+        "More than 24 hours have passed since the customer's last message. Standard replies are restricted outside 24 hours.",
+      actionHint: "Request the 'Human Agent' feature in Meta Developer Console to enable 7-day replies, or reply via Meta Business Suite.",
       code: 10,
       subcode: 2018001,
     };
