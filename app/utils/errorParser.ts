@@ -64,6 +64,23 @@ export function formatMetaErrorMessage(errorInput: unknown): ParsedMetaError {
     };
   }
 
+  // 1b. Another app / Meta Business Suite is controlling the thread (Subcode 2018300)
+  if (
+    subcode === 2018300 ||
+    lowerMsg.includes("another app is controlling") ||
+    lowerMsg.includes("holds control of this conversation")
+  ) {
+    return {
+      title: "Another app is controlling this thread",
+      message:
+        "Meta blocked this reply because another app or Meta Business Suite currently holds thread control for this conversation.",
+      actionHint:
+        "Open Meta Business Suite Inbox and click 'Move to Done' on this conversation, or set Tchaikovsky CRM as Primary Receiver in Facebook Page Settings > Advanced Messaging.",
+      code: code || 10,
+      subcode: 2018300,
+    };
+  }
+
   // 2. 7-day Human Agent window expired
   if (lowerMsg.includes("7 days") || lowerMsg.includes("seven days")) {
     return {
