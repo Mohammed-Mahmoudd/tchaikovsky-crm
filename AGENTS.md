@@ -250,9 +250,26 @@ This CRM holds personal data, including data about children.
 - Delete files or data
 - Change authentication or permissions
 - Do a large refactor
+- Send, edit or delete anything that reaches a real person or real production data (see "Live systems and real customers" below)
+
+### Live systems and real customers (strict rule)
+
+Messages sent through Meta (Messenger, Instagram, WhatsApp), email or SMS cannot be unsent, edited or recalled once delivered. Treat every send as permanent and visible to a real customer.
+
+- **Never send a test message to a real lead or customer.** This includes "quick checks", diagnostics, connectivity tests and probing API behaviour. Do not call `POST /me/messages`, `/reply`, `mark_seen`, typing indicators, reactions, `take/pass/request/release_thread_control`, or any equivalent against a real recipient ID.
+- **Do not change live state of real conversations** (thread control, assignments, pipeline, read status, deletion) for diagnosis. Read-only calls (GET, logs, thread_owner lookups) are allowed.
+- **Diagnose read-only first.** Use logs, error responses already captured, and GET endpoints. If a send is required to reproduce a problem, stop and ask the user.
+- **Allowed test recipients only:** the user's own designated test account (for example the Facebook Tester "Mohamed Mahmoud", `test@meta.com` staff scope). Confirm the recipient with the user before the first send in a session. Never pick a recipient from the production inbox on your own.
+- **Ask before any production side effect.** Before running a script against the production server or database (SSH, `deploy.sh`, writes, `$pull`, `updateOne`, deletes), state exactly what it will do and which records it touches, then wait for approval. Read-only queries do not need approval.
+- **No destructive cleanup without approval.** If a mistake reaches production, report it immediately and plainly, explain what cannot be undone, and ask before attempting any fix or database change.
+- **Prefer safe alternatives:** run the backend locally with `MESSAGING_DRY_RUN=true` (blocks every outbound text, media, edit, reaction and thread-control call before it reaches Meta or WhatsApp, and stores nothing), a staging or test Page, mocked Graph API responses in tests, or the Meta Graph API Explorer under the user's control. Never set `MESSAGING_DRY_RUN` to true on the production server without the user's approval, because it stops staff from replying.
+- **Secrets:** do not print access tokens, passwords or connection strings in output, commits or docs. Mask them (`EAA...`).
 
 ### Never:
 
+### Never:
+
+- Send a message, reaction or any other action to a real customer, lead or student for testing or diagnosis
 - Hardcode colors, fonts or one-off styles outside the theme
 - Ship a screen that was only checked at desktop width
 - Use fixed pixel widths or hover-only interactions for essential features

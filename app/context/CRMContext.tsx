@@ -163,14 +163,19 @@ function getLocalTodayIso(): string {
   return `${y}-${m}-${day}`;
 }
 
+// Conversations the Meta App Review account (test@meta.com) is allowed to see.
+// Mohamed Mahmoud = Facebook Messenger tester, human__mohammed = Instagram tester.
+const REVIEWER_ALLOWED_IDS = ["38872315812412151", "980963625060203"];
+const REVIEWER_ALLOWED_NAMES = ["mohamed mahmoud", "human__mohammed"];
+
 function isReviewerAllowedConversation(c: any): boolean {
   if (!c) return false;
   const sId = String(c.id || c.senderId || "");
   const mId = String(c.metaSenderId || "");
-  if (sId === "38872315812412151" || mId === "38872315812412151") return true;
-  const target = "mohamed mahmoud";
+  if (REVIEWER_ALLOWED_IDS.includes(sId) || REVIEWER_ALLOWED_IDS.includes(mId)) return true;
   const norm = (s: any) => (typeof s === "string" ? s.toLowerCase().trim() : "");
-  return norm(c.name).includes(target) || norm(c.leadName).includes(target) || norm(c.profileName).includes(target);
+  const fields = [norm(c.name), norm(c.leadName), norm(c.profileName)];
+  return REVIEWER_ALLOWED_NAMES.some((target) => fields.some((f) => f.includes(target)));
 }
 
 export function CRMProvider({ children }: { children: React.ReactNode }) {
