@@ -617,7 +617,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
       const replyPayload = replyingTo
         ? {
             id: replyingTo.id,
-            text: replyingTo.text,
+            text: replyingTo.text || (replyingTo.attachments?.length ? "Attachment" : "Message"),
             senderName: replyingTo.senderName,
             isIncoming: replyingTo.isIncoming,
           }

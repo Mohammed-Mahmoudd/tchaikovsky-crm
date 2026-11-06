@@ -489,6 +489,27 @@ export default function InboxPage() {
       setSendError(null);
       setReplyingTo(null);
 
+      // 0ms Synchronous Threaded Reply context resolution: ensure text, author and direction are 100% complete immediately
+      let resolvedReplyTo = replyTo;
+      if (replyTo) {
+        const refMsg = activeConv.messages.find((m) => m.id === replyTo.id);
+        const quoteAuthor =
+          replyTo.senderName ||
+          (replyTo.isIncoming !== false
+            ? refMsg?.senderName || activeConv.leadName || activeConv.profileName || activeConv.name || "Customer"
+            : "You");
+        const quoteText =
+          replyTo.text && replyTo.text !== "Attachment"
+            ? replyTo.text
+            : refMsg?.text || (refMsg?.attachments?.length ? "Attachment" : replyTo.text || "Message");
+        resolvedReplyTo = {
+          id: replyTo.id,
+          text: quoteText,
+          senderName: quoteAuthor,
+          isIncoming: replyTo.isIncoming !== undefined ? replyTo.isIncoming : Boolean(refMsg?.isIncoming),
+        };
+      }
+
       // 1. Insert 0ms optimistic message(s) so photos/files/text appear in the thread immediately
       const now = Date.now();
       const timeStr = new Date(now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -525,7 +546,7 @@ export default function InboxPage() {
             isIncoming: false,
             status: "pending" as const,
             senderName: user?.name || "Staff",
-            replyTo: idx === 0 && replyTo ? replyTo : undefined,
+            replyTo: idx === 0 && resolvedReplyTo ? resolvedReplyTo : undefined,
           };
         });
         addOptimisticMessages(chatId, optimisticMsgs);
@@ -542,7 +563,7 @@ export default function InboxPage() {
             isIncoming: false,
             status: "pending" as const,
             senderName: user?.name || "Staff",
-            replyTo: replyTo || undefined,
+            replyTo: resolvedReplyTo || undefined,
           },
         ]);
       }
@@ -563,7 +584,7 @@ export default function InboxPage() {
             text: textToSend,
             channel: activeConv.channel,
             attachments: serverAttachments,
-            replyTo: replyTo || undefined,
+            replyTo: resolvedReplyTo || undefined,
           }),
         });
         if (res.ok) {
@@ -576,7 +597,7 @@ export default function InboxPage() {
                   ...json.data,
                   text: textToSend.trim(),
                   senderName: json.senderName || user?.name,
-                  replyTo: replyTo || json.data.replyTo,
+                  replyTo: resolvedReplyTo || json.data.replyTo,
                 },
               ]
             : undefined;

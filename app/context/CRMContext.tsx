@@ -730,6 +730,15 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
               // 2. If this is the currently active chat, append the message in real-time
               if (currentActiveId === conversationId && message) {
+                const formattedReplyTo = message.replyTo
+                  ? {
+                      id: String(message.replyTo.id || message.replyTo.messageId),
+                      text: message.replyTo.text || "",
+                      senderName: message.replyTo.senderName || undefined,
+                      isIncoming: Boolean(message.replyTo.isIncoming),
+                    }
+                  : undefined;
+
                 const formattedMsg: Message = {
                   id: message.messageId,
                   text: message.text || "",
@@ -744,13 +753,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   isEdited: Boolean(message.isEdited),
                   editedAt: message.editedAt || undefined,
                   reactions: Array.isArray(message.reactions) ? message.reactions : [],
+                  replyTo: formattedReplyTo,
                 };
 
                 const cached = messagesCacheRef.current.get(conversationId) || [];
                 const existingIdx = cached.findIndex((m) => m.id === formattedMsg.id);
                 let updatedMessages: Message[];
                 if (existingIdx >= 0) {
-                  // Merge upgraded fields (e.g. attachment URL or senderName) into existing message
+                  // Merge upgraded fields (e.g. attachment URL, replyTo or senderName) into existing message
                   updatedMessages = cached.map((m, idx) =>
                     idx === existingIdx
                       ? {
@@ -761,9 +771,33 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                               ? formattedMsg.attachments
                               : m.attachments,
                           senderName: formattedMsg.senderName || m.senderName,
+                          replyTo: formattedMsg.replyTo || m.replyTo,
                         }
                       : m
                   );
+                } else if (isOutgoing) {
+                  // If this is an outgoing message we sent, reconcile with any in-flight optimistic temp message
+                  const tempIdx = cached.findIndex(
+                    (m) => m.id.startsWith("temp_") && m.status === "pending"
+                  );
+                  if (tempIdx >= 0) {
+                    const tempMsg = cached[tempIdx];
+                    const mergedReplyTo = formattedMsg.replyTo || tempMsg.replyTo;
+                    updatedMessages = cached.map((m, idx) =>
+                      idx === tempIdx
+                        ? {
+                            ...m,
+                            ...formattedMsg,
+                            replyTo: mergedReplyTo,
+                            status: "sent",
+                          }
+                        : m
+                    );
+                  } else {
+                    updatedMessages = [...cached, formattedMsg].sort(
+                      (a, b) => (a.timestamp || 0) - (b.timestamp || 0)
+                    );
+                  }
                 } else {
                   // Keep chronological order even if an older message arrives late
                   updatedMessages = [...cached, formattedMsg].sort(
@@ -1714,11 +1748,25 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           isIncoming: false,
           status: "sent",
           senderName: rm.senderName || undefined,
-          replyTo: rm.replyTo || undefined,
+          replyTo: rm.replyTo
+            ? {
+                id: String(rm.replyTo.id || rm.replyTo.messageId),
+                text: rm.replyTo.text || "",
+                senderName: rm.replyTo.senderName || undefined,
+                isIncoming: Boolean(rm.replyTo.isIncoming),
+              }
+            : undefined,
         }));
         const existingIds = new Set(withoutTemp.map((m) => m.id));
         const toAdd = normalizedConfirmed.filter((m) => !existingIds.has(m.id));
-        nextMessages = [...withoutTemp, ...toAdd].sort(
+        const mergedExisting = withoutTemp.map((m) => {
+          const match = normalizedConfirmed.find((c) => c.id === m.id);
+          if (match && !m.replyTo && match.replyTo) {
+            return { ...m, replyTo: match.replyTo };
+          }
+          return m;
+        });
+        nextMessages = [...mergedExisting, ...toAdd].sort(
           (a, b) => (a.timestamp || 0) - (b.timestamp || 0)
         );
       }
