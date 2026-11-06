@@ -4,7 +4,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useTheme } from './ThemeProvider';
-import { useAuth, canAccessRoute } from './AuthProvider';
+import { useAuth, canAccessRoute, normalizeRole } from './AuthProvider';
 import {
   Search,
   X,
@@ -327,7 +327,7 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
               onClick={onCloseMobile}
             />
           )}
-          {canAccessRoute(user?.role, '/profile') && (
+          {normalizeRole(user?.role) !== 'chairman' && canAccessRoute(user?.role, '/profile') && (
             <NavItem
               href="/profile"
               icon={<User className="w-[17px] h-[17px]" />}

@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState, useMemo, useCallback, useEffect } from 'react';
+import React, { useState, useMemo, useCallback, useEffect, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useCRM, Conversation, ActivityLogEntry } from '../context/CRMContext';
 import {
   ChevronLeft,
@@ -279,6 +280,21 @@ function getStageBadgeStyle(stage?: string): React.CSSProperties {
   };
 }
 
+function getChannelColor(channel?: string): string {
+  if (!channel) return '#0084FF';
+  const norm = channel.trim().toLowerCase();
+  if (norm.includes('wa') || norm.includes('whats')) {
+    return '#25D366';
+  }
+  if (norm.includes('ig') || norm.includes('insta')) {
+    return '#E1306C';
+  }
+  if (norm.includes('fb') || norm.includes('mess') || norm.includes('face')) {
+    return '#0084FF';
+  }
+  return '#0084FF';
+}
+
 function getInitials(name: string): string {
   if (!name) return '?';
   const parts = name.trim().split(/\s+/);
@@ -407,15 +423,24 @@ function getNaturalActionPhrase(act: EnrichedActivity): string {
   }
 }
 
-export default function TeamActivitiesPage() {
+function TeamActivitiesPageInner() {
   const { conversations, assignableAgents, teamMembers, loading, openChat } = useCRM();
+  const searchParams = useSearchParams();
+  const urlAgent = searchParams.get('agent') || searchParams.get('officer');
 
   // Date filter state
   const [filterMode, setFilterMode] = useState<'all' | 'day' | 'week'>('all');
   const [currentDate, setCurrentDate] = useState<Date>(() => getDayStart(new Date()));
 
-  // Selected agent in the right sidebar (empty initially; resolves to most active agent staffList[0])
-  const [selectedAgent, setSelectedAgent] = useState<string>('');
+  // Selected agent in the right sidebar (empty initially; resolves to urlAgent or most active agent staffList[0])
+  const [selectedAgent, setSelectedAgent] = useState<string>(() => (urlAgent || '').trim());
+
+  // Update selected agent if query param changes
+  useEffect(() => {
+    if (urlAgent && urlAgent.trim()) {
+      setSelectedAgent(urlAgent.trim());
+    }
+  }, [urlAgent]);
 
   // Main view mode: 'timeline' | 'funnel' | 'leads'
   const [mainTab, setMainTab] = useState<'timeline' | 'funnel' | 'leads'>('timeline');
@@ -958,9 +983,17 @@ export default function TeamActivitiesPage() {
     });
   }, [staffList, agentRoleFilter, agentSearch]);
 
-  // Active agent fallback: either selectedAgent or the most active agent in staffList (staffList[0])
+  // Active agent fallback: either selectedAgent (exact or partial match in staffList) or most active agent (staffList[0])
   const effectiveAgent = useMemo(() => {
-    if (selectedAgent && staffList.some((s) => s.name.toLowerCase() === selectedAgent.toLowerCase())) {
+    if (selectedAgent) {
+      const clean = selectedAgent.trim().toLowerCase();
+      const exact = staffList.find((s) => s.name.toLowerCase() === clean);
+      if (exact) return exact.name;
+      const partial = staffList.find((s) => {
+        const sName = s.name.toLowerCase();
+        return sName.includes(clean) || clean.includes(sName);
+      });
+      if (partial) return partial.name;
       return selectedAgent;
     }
     return staffList[0]?.name || '';
@@ -975,7 +1008,16 @@ export default function TeamActivitiesPage() {
 
   const selectedStaffObj = useMemo(() => {
     if (!effectiveAgent) return null;
-    return staffList.find((s) => s.name.toLowerCase() === effectiveAgent.toLowerCase()) || staffList[0] || null;
+    const clean = effectiveAgent.trim().toLowerCase();
+    return (
+      staffList.find((s) => s.name.toLowerCase() === clean) ||
+      staffList.find((s) => {
+        const sName = s.name.toLowerCase();
+        return sName.includes(clean) || clean.includes(sName);
+      }) ||
+      staffList[0] ||
+      null
+    );
   }, [staffList, effectiveAgent]);
 
   const selectedMetrics = useMemo(() => {
@@ -1151,12 +1193,20 @@ export default function TeamActivitiesPage() {
     const stageMap: Record<string, number> = {};
     const channelMap: Record<string, number> = {};
 
+    const channelCounts: Record<"WhatsApp" | "Instagram" | "Messenger", number> = {
+      WhatsApp: 0,
+      Instagram: 0,
+      Messenger: 0,
+    };
+
     allLeads.forEach((c) => {
       const s = (c.pipeline || 'New').trim();
       stageMap[s] = (stageMap[s] || 0) + 1;
 
-      const ch = (c.channel || 'Direct').trim();
-      channelMap[ch] = (channelMap[ch] || 0) + 1;
+      const ch = (c.channel || '').toLowerCase();
+      if (ch.includes('wa') || ch.includes('whatsapp')) channelCounts.WhatsApp += 1;
+      else if (ch.includes('ig') || ch.includes('instagram')) channelCounts.Instagram += 1;
+      else if (ch.includes('fb') || ch.includes('messenger') || ch.includes('facebook')) channelCounts.Messenger += 1;
     });
 
     const orderedStages = ['New', 'Contacted', 'Audition Booked', 'Attended', 'Enrolled', 'Unqualified', 'Lost'];
@@ -1172,13 +1222,14 @@ export default function TeamActivitiesPage() {
         percentage: total > 0 ? Math.round(((stageMap[s] || 0) / total) * 100) : 0,
       }));
 
-    const channels = Object.entries(channelMap)
-      .map(([channel, count]) => ({
-        channel,
-        count,
-        percentage: total > 0 ? Math.round((count / total) * 100) : 0,
-      }))
-      .sort((a, b) => b.count - a.count);
+    const channelTotal =
+      channelCounts.WhatsApp + channelCounts.Instagram + channelCounts.Messenger || total || 1;
+
+    const channels = (['WhatsApp', 'Instagram', 'Messenger'] as const).map((channel) => ({
+      channel,
+      count: channelCounts[channel],
+      percentage: channelTotal > 0 ? Math.round((channelCounts[channel] / channelTotal) * 100) : 0,
+    }));
 
     return { stages, channels, total };
   }, [conversations, effectiveAgent]);
@@ -2178,36 +2229,32 @@ export default function TeamActivitiesPage() {
                           </div>
 
                           {/* Channels Stack */}
-                          <div className="space-y-2.5 my-3.5">
+                          <div className="space-y-4 my-3.5">
                             {channels.length === 0 ? (
                               <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>No channel data available.</p>
                             ) : (
-                              channels.map((ch) => (
-                                <div key={ch.channel} className="space-y-1">
-                                  <div className="flex items-center justify-between text-[11px]">
-                                    <span className="font-semibold text-[var(--text-primary)]">{ch.channel}</span>
-                                    <span style={{ color: 'var(--text-secondary)' }}>
-                                      <strong>{ch.count}</strong> leads ({ch.percentage}%)
-                                    </span>
+                              channels.map((ch) => {
+                                const channelColor = getChannelColor(ch.channel);
+                                return (
+                                  <div key={ch.channel} className="space-y-1.5">
+                                    <div className="flex items-center justify-between text-[12px] font-medium">
+                                      <span style={{ color: 'var(--text-primary)' }}>{ch.channel}</span>
+                                      <span style={{ color: 'var(--text-secondary)' }}>
+                                        {ch.count} leads ({ch.percentage}%)
+                                      </span>
+                                    </div>
+                                    <div className="w-full h-2 rounded-full overflow-hidden" style={{ background: 'var(--bg-pill)' }}>
+                                      <div
+                                        className="h-full rounded-full transition-all"
+                                        style={{
+                                          width: `${ch.percentage}%`,
+                                          background: channelColor,
+                                        }}
+                                      />
+                                    </div>
                                   </div>
-                                  <div className="h-1.5 w-full rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
-                                    <div
-                                      className="h-full rounded-full transition-all"
-                                      style={{
-                                        width: `${ch.percentage}%`,
-                                        background:
-                                          ch.channel.toLowerCase().includes('whats')
-                                            ? '#25D366'
-                                            : ch.channel.toLowerCase().includes('insta')
-                                            ? '#E1306C'
-                                            : ch.channel.toLowerCase().includes('mess')
-                                            ? '#0084FF'
-                                            : 'var(--text-primary)',
-                                      }}
-                                    />
-                                  </div>
-                                </div>
-                              ))
+                                );
+                              })
                             )}
                           </div>
                         </div>
@@ -2528,5 +2575,13 @@ export default function TeamActivitiesPage() {
         </div>
       </aside>
     </div>
+  );
+}
+
+export default function TeamActivitiesPage() {
+  return (
+    <Suspense fallback={null}>
+      <TeamActivitiesPageInner />
+    </Suspense>
   );
 }

@@ -75,7 +75,7 @@ type Conversation = {
 // Removed dummy data
 
 import { useCRM } from "./context/CRMContext";
-import { useAuth } from "./components/AuthProvider";
+import { useAuth, canAccessRoute } from "./components/AuthProvider";
 import { formatLastMessageTime } from "./utils/time";
 import MessageTemplate, { parseTemplateAttachment } from "./components/MessageTemplate";
 import InstagramMedia from "./components/InstagramMedia";
@@ -264,6 +264,7 @@ export default function InboxPage() {
   const canSendMessages = !isReadOnly;
   const canAssignToSelf = !isReadOnly && isAdmission && (!isAssigned || isAssignedToMe);
   const canEditAgent = !isReadOnly && (isChairman || canAssignToSelf);
+  const canViewTeamActivity = isChairman || canAccessRoute(user?.role, "/team-performance");
 
   // Audition booking modal state
   const [showAuditionModal, setShowAuditionModal] = useState(false);
@@ -1869,15 +1870,15 @@ export default function InboxPage() {
                   <span className="text-[10px] font-semibold text-[#34C759]">Assigned to you</span>
                 )}
               </div>
-              <div className="rounded-[6px] p-2.5 flex items-center justify-between" style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)" }}>
-                <span className="text-[12px] font-medium" style={{ color: "var(--text-primary)" }}>
+              <div className="rounded-[6px] p-2.5 flex items-center justify-between gap-2" style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)" }}>
+                <span className="text-[12px] font-medium truncate" style={{ color: "var(--text-primary)" }}>
                   {activeConv.agent || "Unassigned"}
                 </span>
                 {!isReadOnly && !isAssigned && isAdmission && user?.name && (
                   <button
                     type="button"
                     onClick={() => patchConversation(activeConv.id, { agent: user.name })}
-                    className="text-[11px] font-semibold text-[#0066FF] hover:underline cursor-pointer"
+                    className="text-[11px] font-semibold text-[#0066FF] hover:underline cursor-pointer shrink-0"
                   >
                     Assign to me →
                   </button>
@@ -1886,11 +1887,21 @@ export default function InboxPage() {
                   <button
                     type="button"
                     onClick={() => patchConversation(activeConv.id, { agent: "Unassigned" })}
-                    className="text-[11px] font-medium hover:underline cursor-pointer"
+                    className="text-[11px] font-medium hover:underline cursor-pointer shrink-0"
                     style={{ color: "var(--text-secondary)" }}
                   >
                     Unassign
                   </button>
+                )}
+                {isAssigned && canViewTeamActivity && (
+                  <Link
+                    href={`/team-performance?agent=${encodeURIComponent(activeConv.agent)}`}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold rounded text-[#0066FF] bg-[#0066FF]/10 hover:bg-[#0066FF]/20 transition-colors shrink-0 cursor-pointer"
+                    title={`View ${activeConv.agent} in Team Activities`}
+                  >
+                    <span>View</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </Link>
                 )}
               </div>
             </div>
