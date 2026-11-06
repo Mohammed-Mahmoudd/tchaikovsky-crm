@@ -16,6 +16,8 @@ import {
   Settings,
   Sun,
   Moon,
+  Activity,
+  User,
 } from 'lucide-react';
 
 import { useCRM } from '../context/CRMContext';
@@ -316,6 +318,24 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
               onClick={onCloseMobile}
             />
           )}
+          {canAccessRoute(user?.role, '/team-performance') && (
+            <NavItem
+              href="/team-performance"
+              icon={<Activity className="w-[17px] h-[17px]" />}
+              label="Team Activities"
+              active={pathname === '/team-performance'}
+              onClick={onCloseMobile}
+            />
+          )}
+          {canAccessRoute(user?.role, '/profile') && (
+            <NavItem
+              href="/profile"
+              icon={<User className="w-[17px] h-[17px]" />}
+              label="Profile"
+              active={pathname === '/profile'}
+              onClick={onCloseMobile}
+            />
+          )}
           {canAccessRoute(user?.role, '/settings') && (
             <NavItem
               href="/settings"
@@ -342,21 +362,48 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
             </span>
           </button>
 
-          <div className="mb-3 px-1">
-            <p className="text-[13px] font-medium leading-snug truncate" style={{ color: 'var(--text-primary)' }}>
-              {user?.name || 'User'}
-            </p>
-            <div className="flex items-center gap-1.5 mt-0.5">
-              <p className="text-[11px] truncate font-medium" style={{ color: 'var(--text-secondary)' }}>
-                {roleDisplayName}
+          <Link
+            href="/profile"
+            onClick={onCloseMobile}
+            className={`mb-3 p-1.5 flex items-center gap-2.5 rounded-lg transition-colors cursor-pointer ${
+              pathname === '/profile' ? 'bg-[var(--bg-selected)]' : 'hover:bg-[var(--bg-hover)]'
+            }`}
+          >
+            {user?.avatar ? (
+              <img
+                src={user.avatar}
+                alt={user.name || 'User'}
+                className="w-8 h-8 rounded-full object-cover shrink-0 shadow-xs"
+                style={{ border: '1px solid var(--border-input)' }}
+              />
+            ) : (
+              <div
+                className="w-8 h-8 rounded-full flex items-center justify-center font-semibold text-[13px] shrink-0"
+                style={{
+                  background: 'var(--bg-pill)',
+                  border: '1px solid var(--border-input)',
+                  color: 'var(--text-secondary)',
+                }}
+              >
+                {(user?.name || 'U').charAt(0).toUpperCase()}
+              </div>
+            )}
+            <div className="min-w-0 flex-1">
+              <p className="text-[13px] font-medium leading-snug truncate" style={{ color: 'var(--text-primary)' }}>
+                {user?.name || 'User'}
               </p>
-              {isReadOnly && (
-                <span className="text-[9px] font-bold px-1.5 py-0.2 rounded text-[#FF9500] bg-[rgba(255,149,0,0.12)] shrink-0">
-                  View Only
-                </span>
-              )}
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <p className="text-[11px] truncate font-medium" style={{ color: 'var(--text-secondary)' }}>
+                  {roleDisplayName}
+                </p>
+                {isReadOnly && (
+                  <span className="text-[9px] font-bold px-1.5 py-0.2 rounded text-[#FF9500] bg-[rgba(255,149,0,0.12)] shrink-0">
+                    View Only
+                  </span>
+                )}
+              </div>
             </div>
-          </div>
+          </Link>
 
           <button
             onClick={logout}

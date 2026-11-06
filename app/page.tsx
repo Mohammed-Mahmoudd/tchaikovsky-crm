@@ -13,6 +13,7 @@ import {
   AlertCircle,
   SmilePlus,
   Pencil,
+  Reply,
   Copy,
   Check,
   CheckCheck,
@@ -278,6 +279,13 @@ export default function InboxPage() {
 
   // WhatsApp Message Edit & Reaction UI state
   const [editingMessage, setEditingMessage] = useState<{ id: string; text: string } | null>(null);
+  const [replyingTo, setReplyingTo] = useState<{
+    id: string;
+    text: string;
+    senderName?: string;
+    isIncoming?: boolean;
+    attachments?: any[];
+  } | null>(null);
   const [activeReactionMenu, setActiveReactionMenu] = useState<{
     msgId: string;
     style: React.CSSProperties;
@@ -296,6 +304,19 @@ export default function InboxPage() {
     timestamp: number;
   } | null>(null);
   const dragDepthRef = useRef(0);
+
+  // Smooth-scroll viewport to referenced original message and flash highlight ring
+  const scrollToMessage = useCallback((targetId: string) => {
+    if (!targetId) return;
+    const el = document.getElementById(`msg-${targetId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("ring-2", "ring-[#0066FF]", "transition-all", "duration-300");
+      setTimeout(() => {
+        el.classList.remove("ring-2", "ring-[#0066FF]");
+      }, 2000);
+    }
+  }, []);
 
   // Compute clamped fixed coordinates so reaction bars & emoji pickers NEVER clip under the header or edges
   const computeReactionBarStyle = useCallback((anchorRect: DOMRect, isIncoming: boolean): React.CSSProperties => {
@@ -346,10 +367,11 @@ export default function InboxPage() {
     return { top, left };
   }, []);
 
-  // Clear delivery error and active message menus when switching chats
+  // Clear delivery error, reply context and active message menus when switching chats
   useEffect(() => {
     setSendError(null);
     setEditingMessage(null);
+    setReplyingTo(null);
     setActiveReactionMenu(null);
     setFullEmojiMenu(null);
   }, [activeChatId]);
@@ -412,8 +434,47 @@ export default function InboxPage() {
     }
   }, [activeChatId, activeConv?.messages?.length]);
 
+  // Context-aware scroll anchor: preserves reading position for top messages, and keeps bottom in view
+  const isNearBottomRef = useRef(true);
+
+  const handleChatScroll = useCallback(() => {
+    if (!chatScrollContainerRef.current) return;
+    if (activeReactionMenu) setActiveReactionMenu(null);
+    if (fullEmojiMenu) setFullEmojiMenu(null);
+
+    const c = chatScrollContainerRef.current;
+    isNearBottomRef.current = c.scrollHeight - c.scrollTop - c.clientHeight <= 140;
+  }, [activeReactionMenu, fullEmojiMenu]);
+
+  useEffect(() => {
+    if (!chatScrollContainerRef.current) return;
+
+    const timer = setTimeout(() => {
+      if (replyingTo?.id) {
+        if (isNearBottomRef.current) {
+          // If the user was already watching the latest messages at the bottom, keep bottom in view
+          messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        } else {
+          // If the user replied to an older message at the top/middle, anchor to THAT message so it never jumps
+          const targetEl = document.getElementById(`msg-${replyingTo.id}`);
+          if (targetEl) {
+            targetEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+          }
+        }
+      } else if (isNearBottomRef.current) {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }
+    }, 60);
+
+    return () => clearTimeout(timer);
+  }, [replyingTo]);
+
   const handleSendReply = useCallback(
-    async (textToSend: string, attachments?: OutgoingAttachmentPayload[]): Promise<boolean> => {
+    async (
+      textToSend: string,
+      attachments?: OutgoingAttachmentPayload[],
+      replyTo?: { id: string; text: string; senderName?: string; isIncoming?: boolean }
+    ): Promise<boolean> => {
       const hasText = Boolean(textToSend && textToSend.trim());
       const hasAttachments = Boolean(attachments && attachments.length > 0);
       if (isReadOnly || (!hasText && !hasAttachments) || !activeConv || !canSendMessages) return false;
@@ -426,6 +487,7 @@ export default function InboxPage() {
       }
 
       setSendError(null);
+      setReplyingTo(null);
 
       // 1. Insert 0ms optimistic message(s) so photos/files/text appear in the thread immediately
       const now = Date.now();
@@ -463,6 +525,7 @@ export default function InboxPage() {
             isIncoming: false,
             status: "pending" as const,
             senderName: user?.name || "Staff",
+            replyTo: idx === 0 && replyTo ? replyTo : undefined,
           };
         });
         addOptimisticMessages(chatId, optimisticMsgs);
@@ -479,6 +542,7 @@ export default function InboxPage() {
             isIncoming: false,
             status: "pending" as const,
             senderName: user?.name || "Staff",
+            replyTo: replyTo || undefined,
           },
         ]);
       }
@@ -499,6 +563,7 @@ export default function InboxPage() {
             text: textToSend,
             channel: activeConv.channel,
             attachments: serverAttachments,
+            replyTo: replyTo || undefined,
           }),
         });
         if (res.ok) {
@@ -511,6 +576,7 @@ export default function InboxPage() {
                   ...json.data,
                   text: textToSend.trim(),
                   senderName: json.senderName || user?.name,
+                  replyTo: replyTo || json.data.replyTo,
                 },
               ]
             : undefined;
@@ -587,6 +653,43 @@ export default function InboxPage() {
       setCopiedMsgId((prev) => (prev === messageId ? null : prev));
     }, 1500);
   }, []);
+
+  const handleStartReply = useCallback(
+    (msg: Message) => {
+      if (!activeConv || !canSendMessages || isReadOnly) return;
+      setActiveReactionMenu(null);
+      setFullEmojiMenu(null);
+      setEditingMessage(null);
+      const isIncoming = Boolean(msg.isIncoming);
+      const quoteAuthor = isIncoming
+        ? activeConv.leadName || activeConv.profileName || activeConv.name || "Customer"
+        : "You";
+
+      setReplyingTo({
+        id: msg.id,
+        text: msg.text || (msg.attachments?.length ? "Attachment" : ""),
+        senderName: quoteAuthor,
+        isIncoming,
+        attachments: msg.attachments,
+      });
+
+      // Clear any accidental text selection caused by double clicking
+      if (typeof window !== "undefined") {
+        window.getSelection()?.removeAllRanges();
+      }
+
+      // Smooth micro-pulse for 0ms tactile visual feedback on the quoted bubble
+      const el = document.getElementById(`msg-${msg.id}`);
+      if (el) {
+        const bubble = (el.querySelector("[data-msg-bubble]") || el) as HTMLElement;
+        bubble.classList.add("scale-[0.985]", "ring-2", "ring-[#0066FF]/60", "transition-all", "duration-100");
+        setTimeout(() => {
+          bubble.classList.remove("scale-[0.985]", "ring-2", "ring-[#0066FF]/60");
+        }, 180);
+      }
+    },
+    [activeConv, canSendMessages, isReadOnly]
+  );
 
   const handleSelectConv = (id: string) => {
     setActiveChatId(id);
@@ -921,10 +1024,7 @@ export default function InboxPage() {
             {/* Chat Messages */}
             <div
               ref={chatScrollContainerRef}
-              onScroll={() => {
-                if (activeReactionMenu) setActiveReactionMenu(null);
-                if (fullEmojiMenu) setFullEmojiMenu(null);
-              }}
+              onScroll={handleChatScroll}
               className="flex-1 overflow-y-auto p-4 md:p-6 flex flex-col gap-4"
             >
               {(() => {
@@ -975,8 +1075,10 @@ export default function InboxPage() {
                     showPlainText &&
                     activeConv.channel === "WA" &&
                     (!msg.timestamp || Date.now() - msg.timestamp <= FIFTEEN_MINUTES_MS);
+                  const canReplyToThisMessage = !isReadOnly;
                   const canReactToThisMessage = !isReadOnly && activeConv.channel === "WA";
                   const isEditingThis = editingMessage?.id === msg.id;
+                  const isReplyingToThis = replyingTo?.id === msg.id;
                   const isReactionOpen = activeReactionMenu?.msgId === msg.id;
                   const isFullPickerOpen = fullEmojiMenu?.msgId === msg.id;
                   const reactions = msg.reactions || [];
@@ -1007,9 +1109,24 @@ export default function InboxPage() {
                   return (
                     <div
                       key={msg.id}
-                      className={`group relative flex flex-col ${msg.isIncoming ? "items-start" : "items-end"} ${
-                        groupedReactions.length > 0 ? "mb-2" : ""
-                      }`}
+                      id={`msg-${msg.id}`}
+                      onDoubleClick={(e) => {
+                        if (!canReplyToThisMessage) return;
+                        const targetEl = e.target as HTMLElement | null;
+                        // Ignore if user double-clicked inside the message bubble, buttons, links or menus
+                        if (
+                          targetEl?.closest(
+                            "[data-msg-bubble], button, a, audio, video, img, input, textarea, select, [data-no-row-reply]"
+                          )
+                        ) {
+                          return;
+                        }
+                        handleStartReply(msg);
+                      }}
+                      className={`group relative flex flex-col w-full py-0.5 select-none ${
+                        msg.isIncoming ? "items-start" : "items-end"
+                      } ${groupedReactions.length > 0 ? "mb-2" : ""}`}
+                      title={canReplyToThisMessage ? "Double-click row to reply" : undefined}
                     >
                       {!msg.isIncoming && msg.senderName && (
                         <span
@@ -1096,7 +1213,8 @@ export default function InboxPage() {
 
                         {/* Message Bubble */}
                         <div
-                          className={`relative ${
+                          data-msg-bubble
+                          className={`relative select-text ${
                             hasTemplateAttachment || shouldRenderFallbackCard || hasSharedPostAttachment
                               ? "max-w-[88%] sm:max-w-[300px] p-2 sm:p-2.5"
                               : "max-w-[85%] md:max-w-[460px] lg:max-w-[540px] px-4 py-3"
@@ -1109,6 +1227,76 @@ export default function InboxPage() {
                             boxShadow: "var(--shadow-card)",
                           }}
                         >
+                          {/* Threaded Quoted Message Card */}
+                          {msg.replyTo && (() => {
+                            const referencedMsg = msg.replyTo.id
+                              ? activeConv.messages.find((m) => m.id === msg.replyTo!.id)
+                              : null;
+                            const isQuotingIncoming = referencedMsg
+                              ? referencedMsg.isIncoming
+                              : msg.replyTo.isIncoming !== false &&
+                                msg.replyTo.senderName !== "You" &&
+                                msg.replyTo.senderName !== "Staff";
+
+                            const authorName = isQuotingIncoming
+                              ? (referencedMsg
+                                  ? referencedMsg.senderName || activeConv.leadName || activeConv.profileName || activeConv.name || "Customer"
+                                  : msg.replyTo.senderName || activeConv.leadName || activeConv.profileName || activeConv.name || "Customer")
+                              : "You";
+                            const quoteText =
+                              msg.replyTo.text && msg.replyTo.text !== "Attachment"
+                                ? msg.replyTo.text
+                                : referencedMsg?.text || (referencedMsg?.attachments?.length ? "Attachment" : msg.replyTo.text || "Message");
+
+                            return (
+                              <div
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  scrollToMessage(msg.replyTo!.id);
+                                }}
+                                className="mb-2 px-2.5 py-1.5 rounded-lg cursor-pointer transition-all hover:opacity-90 select-none flex flex-col gap-0.5 border-s-[3px] text-left"
+                                style={{
+                                  background: msg.isIncoming
+                                    ? "rgba(0,0,0,0.06)"
+                                    : "rgba(255,255,255,0.18)",
+                                  borderInlineStartColor:
+                                    activeConv.channel === "WA"
+                                      ? "#25D366"
+                                      : activeConv.channel === "IG"
+                                      ? "#E1306C"
+                                      : "#0066FF",
+                                }}
+                                title="Click to view quoted message"
+                              >
+                                <p
+                                  className="text-[11px] font-semibold leading-tight truncate"
+                                  style={{
+                                    color:
+                                      activeConv.channel === "WA"
+                                        ? (msg.isIncoming ? "#128C7E" : "var(--text-chat-outgoing)")
+                                        : activeConv.channel === "IG"
+                                        ? "#E1306C"
+                                        : "#0066FF",
+                                  }}
+                                >
+                                  {authorName}
+                                </p>
+                                <p
+                                  className="text-[12px] line-clamp-2 break-words leading-snug"
+                                  style={{
+                                    color: msg.isIncoming
+                                      ? "var(--text-chat-incoming)"
+                                      : "var(--text-chat-outgoing)",
+                                    opacity: 0.92,
+                                  }}
+                                  dir="auto"
+                                >
+                                  {quoteText}
+                                </p>
+                              </div>
+                            );
+                          })()}
+
                           {/* Media attachments (photos, files/documents, voice notes, video) */}
                           {msg.attachments && msg.attachments.length > 0 && (
                             <div className="flex flex-col gap-2 mb-1.5">
@@ -1417,10 +1605,10 @@ export default function InboxPage() {
                           )}
                         </div>
 
-                        {/* WhatsApp Hover Action Bar (React, Edit, Copy) */}
+                        {/* Unified Hover Action Bar (Reply, Edit, Copy, React) */}
                         <div
                           className={`flex items-center gap-0.5 px-1 py-0.5 rounded-full border shadow-xs transition-opacity shrink-0 ${
-                            isReactionOpen || isFullPickerOpen || isEditingThis
+                            isReactionOpen || isFullPickerOpen || isEditingThis || isReplyingToThis
                               ? "opacity-100"
                               : "opacity-0 group-hover:opacity-100 focus-within:opacity-100"
                           }`}
@@ -1429,6 +1617,22 @@ export default function InboxPage() {
                             borderColor: "var(--border-main)",
                           }}
                         >
+                          {/* Threaded Reply (WA, IG, FB) */}
+                          {canReplyToThisMessage && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleStartReply(msg);
+                              }}
+                              title="Reply to message"
+                              className="p-1.5 rounded-full border border-transparent hover:border-[#0066FF] transition-colors cursor-pointer"
+                              style={{ color: isReplyingToThis ? "#0066FF" : "var(--text-secondary)" }}
+                            >
+                              <Reply className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+
                           {canReactToThisMessage && (
                             <button
                               type="button"
@@ -1457,6 +1661,7 @@ export default function InboxPage() {
                             </button>
                           )}
 
+                          {/* WhatsApp In-Place Message Edit (<15m) — Only on WhatsApp */}
                           {canEditThisMessage && (
                             <button
                               type="button"
@@ -1464,6 +1669,7 @@ export default function InboxPage() {
                                 e.stopPropagation();
                                 setActiveReactionMenu(null);
                                 setFullEmojiMenu(null);
+                                setReplyingTo(null);
                                 setEditingMessage({ id: msg.id, text: msg.text });
                               }}
                               title="Edit message"
@@ -1500,7 +1706,7 @@ export default function InboxPage() {
                   );
                 });
               })()}
-              <div ref={messagesEndRef} />
+              <div ref={messagesEndRef} className="h-3 shrink-0" />
             </div>
 
             {/* Delivery error banner */}
@@ -1559,6 +1765,9 @@ export default function InboxPage() {
               editingMessage={editingMessage}
               onCancelEdit={() => setEditingMessage(null)}
               onSaveEdit={handleSaveEditMessage}
+              replyingTo={replyingTo}
+              onCancelReply={() => setReplyingTo(null)}
+              onJumpToMessage={scrollToMessage}
               externalDroppedFiles={droppedFilesForInput}
             />
           </>

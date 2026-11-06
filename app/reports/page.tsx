@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useMemo } from 'react';
-import { useCRM } from '../context/CRMContext';
+import { useCRM, Conversation } from '../context/CRMContext';
 import {
   TrendingUp,
   Users,
@@ -12,6 +12,7 @@ import {
   ChevronRight,
   Calendar,
   X,
+  MessageSquare,
 } from 'lucide-react';
 
 type CampaignStats = {
@@ -23,6 +24,8 @@ type CampaignStats = {
   cashIn: number;
   unqualified: number;
 };
+
+type BreakdownModalType = 'booked' | 'converted' | 'cash' | null;
 
 function addDays(date: Date, days: number) {
   const d = new Date(date);
@@ -44,6 +47,27 @@ function formatRangeLabel(start: Date, end: Date) {
   return `${start.toLocaleDateString('en-US', opts)}${yr} – ${end.toLocaleDateString('en-US', opts)}${endYr}`;
 }
 
+function formatDayLabel(d: Date) {
+  return d.toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+function getDayStart(from: Date) {
+  const d = new Date(from);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function getDayEnd(from: Date) {
+  const d = new Date(from);
+  d.setHours(23, 59, 59, 999);
+  return d;
+}
+
 function getWeekStart(from: Date) {
   const d = new Date(from);
   const day = d.getDay();
@@ -61,31 +85,153 @@ function getWeekEnd(start: Date) {
   return d;
 }
 
+function getCreatedTime(c: Conversation): number {
+  if (c.createdAt) {
+    const t = new Date(c.createdAt).getTime();
+    if (!isNaN(t)) return t;
+  }
+  return c.lastMessageAt || (c.updatedAt ? new Date(c.updatedAt).getTime() : 0);
+}
+
+function getUpdatedTime(c: Conversation): number {
+  if (c.updatedAt) {
+    const t = new Date(c.updatedAt).getTime();
+    if (!isNaN(t)) return t;
+  }
+  return getCreatedTime(c);
+}
+
+function isBookedLead(c: Conversation): boolean {
+  return ['Audition Booked', 'Attended', 'Enrolled'].includes(c.pipeline);
+}
+
+function isAttendedLead(c: Conversation): boolean {
+  return ['Attended', 'Enrolled'].includes(c.pipeline);
+}
+
+function isConvertedLead(c: Conversation): boolean {
+  return (
+    c.pipeline === 'Enrolled' ||
+    c.auditionOutcome === 'registered' ||
+    (Number(c.cashIn) || 0) > 0
+  );
+}
+
+function getBookedTime(c: Conversation): number | null {
+  if (!isBookedLead(c)) return null;
+
+  const explicit =
+    c.auditionBookedAt ||
+    (typeof c.source === 'object' && c.source?.auditionBookedAt ? c.source.auditionBookedAt : undefined);
+  if (explicit) {
+    const t = new Date(explicit).getTime();
+    if (!isNaN(t)) return t;
+  }
+
+  if (c.pipeline === 'Audition Booked') {
+    const upd = getUpdatedTime(c);
+    // If an auditionDate is explicitly set in the past relative to updatedAt (e.g. a past audition was later viewed/read),
+    // cap the booking timestamp at the end of auditionDate so past auditions do not appear booked after they occurred.
+    if (c.auditionDate && /^\d{4}-\d{2}-\d{2}$/.test(c.auditionDate)) {
+      const [y, m, d] = c.auditionDate.split('-').map(Number);
+      if (y >= 2020) {
+        const auditionDayEnd = new Date(y, m - 1, d, 23, 59, 59, 999).getTime();
+        if (upd > auditionDayEnd) {
+          return Math.min(getCreatedTime(c), auditionDayEnd);
+        }
+      }
+    }
+    return upd;
+  }
+
+  return getCreatedTime(c);
+}
+
+function getAttendedTime(c: Conversation): number | null {
+  if (!isAttendedLead(c)) return null;
+
+  const explicit =
+    c.attendedAt ||
+    (typeof c.source === 'object' && c.source?.attendedAt ? c.source.attendedAt : undefined);
+  if (explicit) {
+    const t = new Date(explicit).getTime();
+    if (!isNaN(t)) return t;
+  }
+
+  if (c.auditionDate && /^\d{4}-\d{2}-\d{2}$/.test(c.auditionDate)) {
+    const [y, m, d] = c.auditionDate.split('-').map(Number);
+    if (y >= 2020) {
+      return new Date(y, m - 1, d, 12, 0, 0, 0).getTime();
+    }
+  }
+
+  return getUpdatedTime(c);
+}
+
+function getConvertedTime(c: Conversation): number | null {
+  if (!isConvertedLead(c)) return null;
+
+  const explicit =
+    c.enrolledAt ||
+    c.paidAt ||
+    (typeof c.source === 'object' ? c.source?.enrolledAt || c.source?.paidAt : undefined);
+  if (explicit) {
+    const t = new Date(explicit).getTime();
+    if (!isNaN(t)) return t;
+  }
+
+  return getUpdatedTime(c);
+}
+
+function getCampaignName(c: Conversation): string {
+  if (typeof c.source === 'object' && c.source?.campaign) {
+    return c.source.campaign;
+  }
+  if (typeof c.source === 'string' && c.source.trim() && c.source.trim() !== 'direct') {
+    return c.source.trim();
+  }
+  return 'Organic / Direct';
+}
+
+function getDisplayName(c: Conversation): string {
+  return c.leadName || c.profileName || c.name || c.phone || c.id;
+}
+
 export default function ReportsPage() {
-  const { conversations, loading } = useCRM();
-  const [showCashBreakdown, setShowCashBreakdown] = useState(false);
+  const { conversations, loading, openChat } = useCRM();
+  const [activeModal, setActiveModal] = useState<BreakdownModalType>(null);
 
-  // Filter state
-  const [filterMode, setFilterMode] = useState<'week' | 'all'>('all');
-  const [currentDate, setCurrentDate] = useState<Date>(() => getWeekStart(new Date()));
+  // Filter state: 'all' | 'day' | 'week'
+  const [filterMode, setFilterMode] = useState<'all' | 'day' | 'week'>('all');
+  const [currentDate, setCurrentDate] = useState<Date>(() => getDayStart(new Date()));
 
-  const weekStart = useMemo(() => getWeekStart(currentDate), [currentDate]);
-  const weekEnd = useMemo(() => getWeekEnd(weekStart), [weekStart]);
-
+  const todayStart = useMemo(() => getDayStart(new Date()), []);
+  const yesterdayStart = useMemo(() => addDays(todayStart, -1), [todayStart]);
   const thisWeekStart = useMemo(() => getWeekStart(new Date()), []);
   const lastWeekStart = useMemo(() => addDays(thisWeekStart, -7), [thisWeekStart]);
 
-  const isThisWeek = weekStart.getTime() === thisWeekStart.getTime();
-  const isLastWeek = weekStart.getTime() === lastWeekStart.getTime();
+  const dayStart = useMemo(() => getDayStart(currentDate), [currentDate]);
+  const dayEnd = useMemo(() => getDayEnd(currentDate), [currentDate]);
+  const weekStart = useMemo(() => getWeekStart(currentDate), [currentDate]);
+  const weekEnd = useMemo(() => getWeekEnd(weekStart), [weekStart]);
 
-  const prevWeek = () => {
-    setCurrentDate(d => addDays(d, -7));
-    setFilterMode('week');
+  const isToday = filterMode === 'day' && dayStart.getTime() === todayStart.getTime();
+  const isYesterday = filterMode === 'day' && dayStart.getTime() === yesterdayStart.getTime();
+  const isThisWeek = filterMode === 'week' && weekStart.getTime() === thisWeekStart.getTime();
+  const isLastWeek = filterMode === 'week' && weekStart.getTime() === lastWeekStart.getTime();
+
+  const goAllTime = () => {
+    setFilterMode('all');
   };
 
-  const nextWeek = () => {
-    setCurrentDate(d => addDays(d, 7));
-    setFilterMode('week');
+  const goToday = () => {
+    setCurrentDate(todayStart);
+    setFilterMode('day');
+  };
+
+  const goYesterday = () => {
+    setCurrentDate(yesterdayStart);
+    setFilterMode('day');
   };
 
   const goThisWeek = () => {
@@ -98,24 +244,23 @@ export default function ReportsPage() {
     setFilterMode('week');
   };
 
-  const goAllTime = () => {
-    setFilterMode('all');
+  const stepPrev = () => {
+    if (filterMode === 'day') {
+      setCurrentDate(d => addDays(d, -1));
+    } else {
+      setCurrentDate(d => addDays(d, -7));
+      setFilterMode('week');
+    }
   };
 
-  // Filter conversations by selected period
-  const filteredConversations = useMemo(() => {
-    if (filterMode === 'all') return conversations;
-
-    const startMs = weekStart.getTime();
-    const endMs = weekEnd.getTime();
-
-    return conversations.filter((c) => {
-      const time = c.createdAt
-        ? new Date(c.createdAt).getTime()
-        : (c.lastMessageAt || (c.updatedAt ? new Date(c.updatedAt).getTime() : 0));
-      return time >= startMs && time <= endMs;
-    });
-  }, [conversations, filterMode, weekStart, weekEnd]);
+  const stepNext = () => {
+    if (filterMode === 'day') {
+      setCurrentDate(d => addDays(d, 1));
+    } else {
+      setCurrentDate(d => addDays(d, 7));
+      setFilterMode('week');
+    }
+  };
 
   const {
     totalLeads,
@@ -128,41 +273,90 @@ export default function ReportsPage() {
     attendedPct,
     enrolledPct,
     campaignRows,
+    bookedBreakdownList,
+    convertedBreakdownList,
     cashBreakdownList,
   } = useMemo(() => {
-    const total = filteredConversations.length;
-    const booked = filteredConversations.filter(c => ['Audition Booked', 'Attended', 'Enrolled'].includes(c.pipeline)).length;
-    const att = filteredConversations.filter(c => ['Attended', 'Enrolled'].includes(c.pipeline)).length;
-    const enr = filteredConversations.filter(c => c.pipeline === 'Enrolled').length;
-    const totalCash = filteredConversations.reduce((acc, c) => acc + (Number(c.cashIn) || 0), 0);
+    const startMs = filterMode === 'day' ? dayStart.getTime() : weekStart.getTime();
+    const endMs = filterMode === 'day' ? dayEnd.getTime() : weekEnd.getTime();
+
+    const inPeriod = (ts: number | null): boolean => {
+      if (ts === null) return false;
+      if (filterMode === 'all') return true;
+      return ts >= startMs && ts <= endMs;
+    };
+
+    const leadsInPeriod = conversations.filter(c =>
+      filterMode === 'all' ? true : inPeriod(getCreatedTime(c))
+    );
+    const bookedInPeriod = conversations.filter(c =>
+      filterMode === 'all' ? isBookedLead(c) : inPeriod(getBookedTime(c))
+    );
+    const attendedInPeriod = conversations.filter(c =>
+      filterMode === 'all' ? isAttendedLead(c) : inPeriod(getAttendedTime(c))
+    );
+    const convertedInPeriod = conversations.filter(c =>
+      filterMode === 'all' ? isConvertedLead(c) : inPeriod(getConvertedTime(c))
+    );
+    const paidInPeriod = convertedInPeriod.filter(c => (Number(c.cashIn) || 0) > 0);
+
+    const total = leadsInPeriod.length;
+    const booked = bookedInPeriod.length;
+    const att = attendedInPeriod.length;
+    const enr = convertedInPeriod.length;
+    const totalCash = paidInPeriod.reduce((acc, c) => acc + (Number(c.cashIn) || 0), 0);
 
     const bPct = total > 0 ? `${Math.round((booked / total) * 100)}%` : '0%';
     const aPct = booked > 0 ? `${Math.round((att / booked) * 100)}%` : '0%';
     const ePct = total > 0 ? `${Math.round((enr / total) * 100)}%` : '0%';
     const avgCash = enr > 0 ? Math.round(totalCash / enr) : 0;
 
-    // Build cash breakdown list (who paid and how much)
-    const breakdown = filteredConversations
-      .filter(c => (Number(c.cashIn) || 0) > 0)
+    // 1. Auditions Booked breakdown list
+    const bookedList = bookedInPeriod
       .map(c => ({
-        name: c.name || c.phone || c.id,
+        id: c.id,
+        name: getDisplayName(c),
         phone: c.phone || '',
         pipeline: c.pipeline,
+        auditionDate: c.auditionDate || c.followUpDate || '',
+        branch: c.branch || '',
+        agent: c.agent || 'Unassigned',
+        campaign: getCampaignName(c),
+        bookedAt: getBookedTime(c) || 0,
+      }))
+      .sort((a, b) => b.bookedAt - a.bookedAt);
+
+    // 2. Converted (Enrolled / Paid) breakdown list
+    const convertedList = convertedInPeriod
+      .map(c => ({
+        id: c.id,
+        name: getDisplayName(c),
+        phone: c.phone || '',
+        pipeline: c.pipeline,
+        auditionOutcome: c.auditionOutcome || '',
+        agent: c.agent || 'Unassigned',
+        campaign: getCampaignName(c),
+        cashIn: Number(c.cashIn) || 0,
+        convertedAt: getConvertedTime(c) || 0,
+      }))
+      .sort((a, b) => b.cashIn - a.cashIn || b.convertedAt - a.convertedAt);
+
+    // 3. Cash In breakdown list (who paid and how much)
+    const cashList = paidInPeriod
+      .map(c => ({
+        id: c.id,
+        name: getDisplayName(c),
+        phone: c.phone || '',
+        pipeline: c.pipeline,
+        agent: c.agent || 'Unassigned',
+        campaign: getCampaignName(c),
         cashIn: Number(c.cashIn) || 0,
       }))
       .sort((a, b) => b.cashIn - a.cashIn);
 
-    // Aggregate by campaign
+    // Aggregate by campaign across the selected period
     const campaignMap: Record<string, CampaignStats> = {};
-
-    filteredConversations.forEach((c) => {
-      let campName = "Organic / Direct";
-      if (typeof c.source === "object" && c.source?.campaign) {
-        campName = c.source.campaign;
-      } else if (typeof c.source === "string" && c.source.trim()) {
-        campName = c.source;
-      }
-
+    const ensureCampaign = (campName: string): CampaignStats => {
       if (!campaignMap[campName]) {
         campaignMap[campName] = {
           campaign: campName,
@@ -174,17 +368,36 @@ export default function ReportsPage() {
           unqualified: 0,
         };
       }
+      return campaignMap[campName];
+    };
 
-      const entry = campaignMap[campName];
+    leadsInPeriod.forEach(c => {
+      const entry = ensureCampaign(getCampaignName(c));
       entry.leads += 1;
-      if (['Audition Booked', 'Attended', 'Enrolled'].includes(c.pipeline)) entry.booked += 1;
-      if (['Attended', 'Enrolled'].includes(c.pipeline)) entry.attended += 1;
-      if (c.pipeline === 'Enrolled') entry.enrolled += 1;
-      if (c.pipeline === 'Lost' || c.pipeline === 'Unqualified') entry.unqualified += 1;
+      if (c.pipeline === 'Lost' || c.pipeline === 'Unqualified') {
+        entry.unqualified += 1;
+      }
+    });
+
+    bookedInPeriod.forEach(c => {
+      const entry = ensureCampaign(getCampaignName(c));
+      entry.booked += 1;
+    });
+
+    attendedInPeriod.forEach(c => {
+      const entry = ensureCampaign(getCampaignName(c));
+      entry.attended += 1;
+    });
+
+    convertedInPeriod.forEach(c => {
+      const entry = ensureCampaign(getCampaignName(c));
+      entry.enrolled += 1;
       entry.cashIn += Number(c.cashIn) || 0;
     });
 
-    const rows = Object.values(campaignMap).sort((a, b) => b.leads - a.leads);
+    const rows = Object.values(campaignMap).sort(
+      (a, b) => b.leads - a.leads || b.enrolled - a.enrolled || b.booked - a.booked
+    );
 
     return {
       totalLeads: total,
@@ -197,9 +410,36 @@ export default function ReportsPage() {
       attendedPct: aPct,
       enrolledPct: ePct,
       campaignRows: rows,
-      cashBreakdownList: breakdown,
+      bookedBreakdownList: bookedList,
+      convertedBreakdownList: convertedList,
+      cashBreakdownList: cashList,
     };
-  }, [filteredConversations]);
+  }, [conversations, filterMode, dayStart, dayEnd, weekStart, weekEnd]);
+
+  const periodBadgeLabel = useMemo(() => {
+    if (filterMode === 'day') {
+      if (isToday) return 'Today';
+      if (isYesterday) return 'Yesterday';
+      return 'Daily View';
+    }
+    if (filterMode === 'week') {
+      if (isThisWeek) return 'This Week';
+      if (isLastWeek) return 'Last Week';
+      return 'Weekly View';
+    }
+    return null;
+  }, [filterMode, isToday, isYesterday, isThisWeek, isLastWeek]);
+
+  const periodDescription = useMemo(() => {
+    if (filterMode === 'day') {
+      const prefix = isToday ? 'Today · ' : isYesterday ? 'Yesterday · ' : '';
+      return `${prefix}${formatDayLabel(dayStart)}`;
+    }
+    if (filterMode === 'week') {
+      return formatRangeLabel(weekStart, weekEnd);
+    }
+    return 'All Time';
+  }, [filterMode, isToday, isYesterday, dayStart, weekStart, weekEnd]);
 
   return (
     <div className="flex flex-col h-full min-h-0" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
@@ -213,19 +453,19 @@ export default function ReportsPage() {
             <h1 className="text-[15px] font-bold leading-none mb-0.5" style={{ color: 'var(--text-primary)' }}>
               Reports & Analytics
             </h1>
-            {filterMode === 'week' && (
+            {periodBadgeLabel && (
               <span
                 className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full"
                 style={{ background: 'var(--bg-selected)', color: '#0066FF' }}
               >
-                {isThisWeek ? 'This Week' : isLastWeek ? 'Last Week' : 'Weekly View'}
+                {periodBadgeLabel}
               </span>
             )}
           </div>
           <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-            {filterMode === 'week' ? (
+            {filterMode !== 'all' ? (
               <>
-                Conversion metrics for <strong style={{ color: 'var(--text-primary)' }}>{formatRangeLabel(weekStart, weekEnd)}</strong> ({filteredConversations.length} of {conversations.length} leads)
+                Conversion metrics for <strong style={{ color: 'var(--text-primary)' }}>{periodDescription}</strong> ({totalLeads} new lead{totalLeads !== 1 ? 's' : ''} · {auditionsBooked} booked · {enrolled} converted)
               </>
             ) : (
               <>
@@ -238,7 +478,7 @@ export default function ReportsPage() {
         {/* Filter Controls */}
         <div className="flex items-center gap-2 flex-wrap">
           {/* Quick Presets */}
-          <div className="flex items-center gap-1 p-0.5 rounded-[8px]" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
+          <div className="flex items-center gap-1 p-0.5 rounded-[8px] flex-wrap" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
             <button
               onClick={goAllTime}
               className="h-[24px] px-2.5 text-[11px] font-semibold rounded-[6px] transition-colors cursor-pointer"
@@ -250,9 +490,29 @@ export default function ReportsPage() {
               All Time
             </button>
             <button
+              onClick={goToday}
+              className="h-[24px] px-2.5 text-[11px] font-semibold rounded-[6px] transition-colors cursor-pointer"
+              style={isToday
+                ? { background: '#0066FF', color: '#fff' }
+                : { background: 'transparent', color: 'var(--text-secondary)' }
+              }
+            >
+              Today
+            </button>
+            <button
+              onClick={goYesterday}
+              className="h-[24px] px-2.5 text-[11px] font-semibold rounded-[6px] transition-colors cursor-pointer"
+              style={isYesterday
+                ? { background: '#0066FF', color: '#fff' }
+                : { background: 'transparent', color: 'var(--text-secondary)' }
+              }
+            >
+              Yesterday
+            </button>
+            <button
               onClick={goThisWeek}
               className="h-[24px] px-2.5 text-[11px] font-semibold rounded-[6px] transition-colors cursor-pointer"
-              style={filterMode === 'week' && isThisWeek
+              style={isThisWeek
                 ? { background: '#0066FF', color: '#fff' }
                 : { background: 'transparent', color: 'var(--text-secondary)' }
               }
@@ -262,7 +522,7 @@ export default function ReportsPage() {
             <button
               onClick={goLastWeek}
               className="h-[24px] px-2.5 text-[11px] font-semibold rounded-[6px] transition-colors cursor-pointer"
-              style={filterMode === 'week' && isLastWeek
+              style={isLastWeek
                 ? { background: '#0066FF', color: '#fff' }
                 : { background: 'transparent', color: 'var(--text-secondary)' }
               }
@@ -271,15 +531,15 @@ export default function ReportsPage() {
             </button>
           </div>
 
-          {/* Week Stepper / Date Picker */}
-          {filterMode === 'week' && (
+          {/* Day / Week Stepper & Date Picker */}
+          {filterMode !== 'all' && (
             <div className="flex items-center gap-1">
               <button
-                onClick={prevWeek}
+                onClick={stepPrev}
                 className="h-[28px] w-[28px] flex items-center justify-center rounded-[6px] transition-colors cursor-pointer hover:opacity-80"
                 style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}
-                title="Previous Week"
-                aria-label="Previous Week"
+                title={filterMode === 'day' ? 'Previous Day' : 'Previous Week'}
+                aria-label={filterMode === 'day' ? 'Previous Day' : 'Previous Week'}
               >
                 <ChevronLeft className="w-4 h-4" />
               </button>
@@ -287,18 +547,20 @@ export default function ReportsPage() {
               <div
                 className="h-[28px] px-2.5 flex items-center gap-1.5 text-[11px] font-medium rounded-[6px]"
                 style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
-                title={`Week: ${formatRangeLabel(weekStart, weekEnd)}`}
+                title={periodDescription}
               >
                 <Calendar className="w-3.5 h-3.5 text-blue-500 shrink-0" />
-                <span className="whitespace-nowrap">{formatRangeLabel(weekStart, weekEnd)}</span>
+                <span className="whitespace-nowrap">
+                  {filterMode === 'day' ? formatDayLabel(dayStart) : formatRangeLabel(weekStart, weekEnd)}
+                </span>
               </div>
 
               <button
-                onClick={nextWeek}
+                onClick={stepNext}
                 className="h-[28px] w-[28px] flex items-center justify-center rounded-[6px] transition-colors cursor-pointer hover:opacity-80"
                 style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}
-                title="Next Week"
-                aria-label="Next Week"
+                title={filterMode === 'day' ? 'Next Day' : 'Next Week'}
+                aria-label={filterMode === 'day' ? 'Next Day' : 'Next Week'}
               >
                 <ChevronRight className="w-4 h-4" />
               </button>
@@ -312,7 +574,6 @@ export default function ReportsPage() {
                     const picked = new Date(y, m - 1, d);
                     picked.setHours(0, 0, 0, 0);
                     setCurrentDate(picked);
-                    setFilterMode('week');
                   }
                 }}
                 className="h-[28px] text-[11px] font-medium rounded-[6px] px-2 outline-none cursor-pointer transition-colors"
@@ -321,7 +582,7 @@ export default function ReportsPage() {
                   border: '1px solid var(--border-input)',
                   color: 'var(--text-primary)',
                 }}
-                title="Select date to jump to week"
+                title={filterMode === 'day' ? 'Select date' : 'Select date to jump to week'}
               />
             </div>
           )}
@@ -350,6 +611,8 @@ export default function ReportsPage() {
             subValue={bookedPct}
             subLabel="of leads"
             icon={<CalendarCheck className="w-4 h-4 text-emerald-500" />}
+            onClick={() => setActiveModal('booked')}
+            clickHint="View booked"
           />
           <KpiCard
             title="Attended"
@@ -359,41 +622,38 @@ export default function ReportsPage() {
             icon={<TrendingUp className="w-4 h-4 text-cyan-500" />}
           />
           <KpiCard
-            title="Enrolled Students"
+            title="Converted (Paid)"
             value={enrolled.toString()}
             subValue={enrolledPct}
             subLabel="conversion"
             icon={<Award className="w-4 h-4 text-purple-500" />}
+            onClick={() => setActiveModal('converted')}
+            clickHint="View converted"
           />
           <KpiCard
             title="Total Cash In"
             value={totalCashIn.toLocaleString()}
             subValue={avgCashPerEnrolled > 0 ? avgCashPerEnrolled.toLocaleString() : undefined}
-            subLabel={avgCashPerEnrolled > 0 ? "avg / enrolled" : undefined}
+            subLabel={avgCashPerEnrolled > 0 ? "avg / converted" : undefined}
             icon={<Banknote className="w-4 h-4 text-emerald-500" />}
-            onClick={() => setShowCashBreakdown(true)}
+            onClick={() => setActiveModal('cash')}
             clickHint="View breakdown"
           />
         </div>
 
         {/* Campaign Breakdown Table */}
         <div className="rounded-xl overflow-hidden shadow-sm mb-6" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}>
-          <div className="px-4 py-3 border-b flex items-center justify-between" style={{ borderColor: 'var(--border-main)' }}>
-            <h2 className="text-[13px] font-bold" style={{ color: 'var(--text-primary)' }}>Campaign Performance Breakdown</h2>
-            <span className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>{campaignRows.length} Campaign{campaignRows.length !== 1 ? 's' : ''}</span>
-          </div>
-
           <div className="overflow-x-auto w-full" style={{ WebkitOverflowScrolling: 'touch' }}>
             {campaignRows.length === 0 ? (
               <div className="p-8 text-center">
                 <p className="text-[13px] font-medium" style={{ color: 'var(--text-secondary)' }}>
                   {loading
                     ? "Calculating metrics..."
-                    : filterMode === 'week'
-                      ? `No conversation campaign data recorded for ${formatRangeLabel(weekStart, weekEnd)}.`
+                    : filterMode !== 'all'
+                      ? `No conversation campaign data recorded for ${periodDescription}.`
                       : "No conversation campaign data recorded yet."}
                 </p>
-                {!loading && filterMode === 'week' && (
+                {!loading && filterMode !== 'all' && (
                   <button
                     onClick={goAllTime}
                     className="mt-3 text-[11px] font-semibold px-3 py-1.5 rounded-[6px] transition-colors cursor-pointer"
@@ -411,9 +671,9 @@ export default function ReportsPage() {
                     <th className="py-2.5 px-4 text-right">Leads</th>
                     <th className="py-2.5 px-4 text-right">Booked</th>
                     <th className="py-2.5 px-4 text-right">Attended</th>
-                    <th className="py-2.5 px-4 text-right">Enrolled</th>
+                    <th className="py-2.5 px-4 text-right">Converted</th>
                     <th className="py-2.5 px-4 text-right">Cash In</th>
-                    <th className="py-2.5 px-4 text-right">Lead → Enrol</th>
+                    <th className="py-2.5 px-4 text-right">Lead → Conv</th>
                     <th className="py-2.5 px-4 text-right">Lost / Unqualified</th>
                   </tr>
                 </thead>
@@ -440,11 +700,212 @@ export default function ReportsPage() {
         </div>
       </div>
 
-      {/* Cash Breakdown Modal */}
-      {showCashBreakdown && (
+      {/* Auditions Booked Breakdown Modal */}
+      {activeModal === 'booked' && (
         <div
           className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
-          onClick={() => setShowCashBreakdown(false)}
+          onClick={() => setActiveModal(null)}
+        >
+          <div className="absolute inset-0" style={{ background: 'rgba(0,0,0,0.35)' }} />
+          <div
+            className="relative w-full sm:max-w-[560px] max-h-[85vh] flex flex-col rounded-t-2xl sm:rounded-xl overflow-hidden"
+            style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)', boxShadow: 'var(--shadow-card)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="px-5 py-3.5 flex items-center justify-between shrink-0" style={{ borderBottom: '1px solid var(--border-main)' }}>
+              <div>
+                <h2 className="text-[14px] font-bold" style={{ color: 'var(--text-primary)' }}>Auditions Booked</h2>
+                <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                  {bookedBreakdownList.length} audition{bookedBreakdownList.length !== 1 ? 's' : ''} booked · <strong style={{ color: 'var(--text-primary)' }}>{periodDescription}</strong>
+                </p>
+              </div>
+              <button
+                onClick={() => setActiveModal(null)}
+                className="h-7 w-7 flex items-center justify-center rounded-md transition-colors cursor-pointer"
+                style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)', border: '1px solid var(--border-input)' }}
+                aria-label="Close"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
+              {bookedBreakdownList.length === 0 ? (
+                <div className="p-8 text-center">
+                  <CalendarCheck className="w-7 h-7 mx-auto mb-2" style={{ color: 'var(--text-muted)' }} />
+                  <p className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                    No auditions booked for {periodDescription}
+                  </p>
+                </div>
+              ) : (
+                <div className="divide-y" style={{ borderColor: 'var(--border-main)' }}>
+                  {bookedBreakdownList.map((entry, idx) => (
+                    <div
+                      key={`${entry.id}-${idx}`}
+                      className="px-5 py-2.5 flex items-center justify-between gap-3"
+                      style={{ background: idx % 2 === 0 ? 'transparent' : 'var(--bg-table-alt)' }}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div
+                          className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold"
+                          style={{ background: 'var(--bg-selected)', color: '#0066FF' }}
+                        >
+                          {(entry.name || '?').charAt(0).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-[12px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{entry.name}</p>
+                          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                            {entry.phone && (
+                              <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{entry.phone}</span>
+                            )}
+                            <span
+                              className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded"
+                              style={{ background: 'var(--bg-selected)', color: '#0066FF' }}
+                            >
+                              {entry.pipeline}
+                            </span>
+                            {entry.auditionDate && (
+                              <span className="text-[10px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                                Audition: {entry.auditionDate}
+                              </span>
+                            )}
+                            {entry.branch && (
+                              <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                · {entry.branch}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveModal(null);
+                          openChat(entry.id);
+                        }}
+                        className="h-7 px-2.5 rounded-md text-[11px] font-semibold flex items-center gap-1 shrink-0 transition-colors cursor-pointer"
+                        style={{ background: 'var(--bg-pill)', color: '#0066FF', border: '1px solid var(--border-input)' }}
+                      >
+                        <MessageSquare className="w-3 h-3" />
+                        Chat
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Converted (Paid / Enrolled) Breakdown Modal */}
+      {activeModal === 'converted' && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+          onClick={() => setActiveModal(null)}
+        >
+          <div className="absolute inset-0" style={{ background: 'rgba(0,0,0,0.35)' }} />
+          <div
+            className="relative w-full sm:max-w-[560px] max-h-[85vh] flex flex-col rounded-t-2xl sm:rounded-xl overflow-hidden"
+            style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)', boxShadow: 'var(--shadow-card)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="px-5 py-3.5 flex items-center justify-between shrink-0" style={{ borderBottom: '1px solid var(--border-main)' }}>
+              <div>
+                <h2 className="text-[14px] font-bold" style={{ color: 'var(--text-primary)' }}>Converted (Paid) Leads</h2>
+                <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                  {convertedBreakdownList.length} converted student{convertedBreakdownList.length !== 1 ? 's' : ''} · Total Cash: <strong style={{ color: 'var(--text-primary)' }}>{totalCashIn.toLocaleString()} SAR</strong> ({periodDescription})
+                </p>
+              </div>
+              <button
+                onClick={() => setActiveModal(null)}
+                className="h-7 w-7 flex items-center justify-center rounded-md transition-colors cursor-pointer"
+                style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)', border: '1px solid var(--border-input)' }}
+                aria-label="Close"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
+              {convertedBreakdownList.length === 0 ? (
+                <div className="p-8 text-center">
+                  <Award className="w-7 h-7 mx-auto mb-2" style={{ color: 'var(--text-muted)' }} />
+                  <p className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                    No converted leads recorded for {periodDescription}
+                  </p>
+                </div>
+              ) : (
+                <div className="divide-y" style={{ borderColor: 'var(--border-main)' }}>
+                  {convertedBreakdownList.map((entry, idx) => (
+                    <div
+                      key={`${entry.id}-${idx}`}
+                      className="px-5 py-2.5 flex items-center justify-between gap-3"
+                      style={{ background: idx % 2 === 0 ? 'transparent' : 'var(--bg-table-alt)' }}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div
+                          className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold"
+                          style={{ background: 'var(--bg-selected)', color: '#0066FF' }}
+                        >
+                          {(entry.name || '?').charAt(0).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-[12px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{entry.name}</p>
+                          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                            {entry.phone && (
+                              <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{entry.phone}</span>
+                            )}
+                            <span
+                              className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded"
+                              style={{ background: 'var(--bg-selected)', color: '#0066FF' }}
+                            >
+                              {entry.pipeline === 'Enrolled' ? 'Enrolled' : 'Paid'}
+                            </span>
+                            <span className="text-[10px]" style={{ color: 'var(--text-secondary)' }}>
+                              {entry.campaign}
+                            </span>
+                            {entry.agent && entry.agent !== 'Unassigned' && (
+                              <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                · {entry.agent}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2.5 shrink-0">
+                        {entry.cashIn > 0 && (
+                          <span className="text-[12px] font-bold" style={{ color: 'var(--text-primary)' }}>
+                            {entry.cashIn.toLocaleString()} <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>SAR</span>
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveModal(null);
+                            openChat(entry.id);
+                          }}
+                          className="h-7 px-2.5 rounded-md text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                          style={{ background: 'var(--bg-pill)', color: '#0066FF', border: '1px solid var(--border-input)' }}
+                        >
+                          <MessageSquare className="w-3 h-3" />
+                          Chat
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cash Breakdown Modal */}
+      {activeModal === 'cash' && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+          onClick={() => setActiveModal(null)}
         >
           {/* Backdrop */}
           <div className="absolute inset-0" style={{ background: 'rgba(0,0,0,0.35)' }} />
@@ -460,11 +921,11 @@ export default function ReportsPage() {
               <div>
                 <h2 className="text-[14px] font-bold" style={{ color: 'var(--text-primary)' }}>Cash In Breakdown</h2>
                 <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                  {cashBreakdownList.length} payment{cashBreakdownList.length !== 1 ? 's' : ''} · Total: <strong style={{ color: 'var(--text-primary)' }}>{totalCashIn.toLocaleString()} SAR</strong>
+                  {cashBreakdownList.length} payment{cashBreakdownList.length !== 1 ? 's' : ''} · Total: <strong style={{ color: 'var(--text-primary)' }}>{totalCashIn.toLocaleString()} SAR</strong> ({periodDescription})
                 </p>
               </div>
               <button
-                onClick={() => setShowCashBreakdown(false)}
+                onClick={() => setActiveModal(null)}
                 className="h-7 w-7 flex items-center justify-center rounded-md transition-colors cursor-pointer"
                 style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)', border: '1px solid var(--border-input)' }}
                 aria-label="Close"
@@ -478,13 +939,13 @@ export default function ReportsPage() {
               {cashBreakdownList.length === 0 ? (
                 <div className="p-8 text-center">
                   <Banknote className="w-7 h-7 mx-auto mb-2" style={{ color: 'var(--text-muted)' }} />
-                  <p className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>No payments recorded yet</p>
+                  <p className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>No payments recorded for {periodDescription}</p>
                 </div>
               ) : (
                 <div className="divide-y" style={{ borderColor: 'var(--border-main)' }}>
                   {cashBreakdownList.map((entry, idx) => (
                     <div
-                      key={`${entry.name}-${idx}`}
+                      key={`${entry.id}-${idx}`}
                       className="px-5 py-2.5 flex items-center justify-between gap-3"
                       style={{ background: idx % 2 === 0 ? 'transparent' : 'var(--bg-table-alt)' }}
                     >

@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { Sidebar } from "./Sidebar";
 import { useAuth, canAccessRoute, getDefaultRouteForRole } from "./AuthProvider";
 import { CRMProvider } from "../context/CRMContext";
+import { AvatarPromptAlert } from "./AvatarPromptAlert";
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -83,6 +84,9 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <CRMProvider>
       <div className="flex flex-col h-[100dvh] flex-1 overflow-hidden">
+        {/* Profile picture requirement prompt (top alert bar & login modal) */}
+        <AvatarPromptAlert />
+
         <div className="flex flex-1 overflow-hidden relative flex-col md:flex-row min-h-0">
           {/* Mobile Header — high z-index so nothing can cover the burger button */}
           <div

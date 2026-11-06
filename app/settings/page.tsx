@@ -11,7 +11,38 @@ interface TeamMember {
   name: string;
   email: string;
   role: Role;
+  avatar?: string;
   active: boolean;
+}
+
+function resizeImageToAvatar(file: File, maxWidth = 256, maxHeight = 256): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Failed to read image file"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Failed to decode image"));
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = maxWidth;
+        canvas.height = maxHeight;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(String(reader.result));
+          return;
+        }
+
+        const size = Math.min(img.width, img.height);
+        const startX = (img.width - size) / 2;
+        const startY = (img.height - size) / 2;
+
+        ctx.drawImage(img, startX, startY, size, size, 0, 0, maxWidth, maxHeight);
+        resolve(canvas.toDataURL("image/jpeg", 0.85));
+      };
+      img.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 export default function SettingsPage() {
@@ -20,6 +51,12 @@ export default function SettingsPage() {
   // Profile state
   const [nameSaving, setNameSaving] = useState(false);
   const [nameStatus, setNameStatus] = useState<string | null>(null);
+
+  // Avatar state (Chairman only)
+  const isChairman = normalizeRole(user?.role) === "chairman";
+  const [avatarSaving, setAvatarSaving] = useState(false);
+  const [avatarStatus, setAvatarStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Password state
   const [newPassword, setNewPassword] = useState("");
@@ -45,9 +82,11 @@ export default function SettingsPage() {
   const [editEmail, setEditEmail] = useState("");
   const [editRole, setEditRole] = useState<Role>("admission_officer");
   const [editActive, setEditActive] = useState(true);
+  const [editAvatar, setEditAvatar] = useState("");
   const [editPassword, setEditPassword] = useState("");
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
+  const editFileInputRef = useRef<HTMLInputElement>(null);
 
   // Delete confirmation state
   const [deletingMember, setDeletingMember] = useState<TeamMember | null>(null);
@@ -278,6 +317,73 @@ export default function SettingsPage() {
     }
   };
 
+  // Upload or update profile picture (Chairman only)
+  const handleAvatarFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+
+    if (!file.type.startsWith("image/")) {
+      setAvatarStatus({ ok: false, msg: "Please select an image file (JPEG, PNG, WebP)." });
+      return;
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      setAvatarStatus({ ok: false, msg: "Image file is too large. Maximum size is 10MB." });
+      return;
+    }
+
+    setAvatarSaving(true);
+    setAvatarStatus(null);
+
+    try {
+      const resizedBase64 = await resizeImageToAvatar(file, 256, 256);
+      const res = await authFetch("/crm-api/auth/profile", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: displayName.trim(), avatar: resizedBase64 }),
+      });
+      const data = await res.json();
+      if (data.success && data.user) {
+        const savedAvatar = data.user.avatar || resizedBase64;
+        updateCurrentUser({ avatar: savedAvatar });
+        setAvatarStatus({ ok: true, msg: "Profile picture updated successfully!" });
+        setTimeout(() => setAvatarStatus(null), 3500);
+      } else {
+        setAvatarStatus({ ok: false, msg: data.error || "Failed to update profile picture." });
+      }
+    } catch {
+      setAvatarStatus({ ok: false, msg: "Network error. Unable to reach server." });
+    } finally {
+      setAvatarSaving(false);
+    }
+  };
+
+  // Remove profile picture (Chairman only)
+  const handleRemoveAvatar = async () => {
+    setAvatarSaving(true);
+    setAvatarStatus(null);
+    try {
+      const res = await authFetch("/crm-api/auth/profile", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: displayName.trim(), avatar: "" }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        updateCurrentUser({ avatar: "" });
+        setAvatarStatus({ ok: true, msg: "Profile picture removed." });
+        setTimeout(() => setAvatarStatus(null), 3000);
+      } else {
+        setAvatarStatus({ ok: false, msg: data.error || "Failed to remove profile picture." });
+      }
+    } catch {
+      setAvatarStatus({ ok: false, msg: "Network error. Unable to reach server." });
+    } finally {
+      setAvatarSaving(false);
+    }
+  };
+
   // Change password
   const handleChangePassword = async () => {
     setPwStatus(null);
@@ -364,6 +470,7 @@ export default function SettingsPage() {
     setEditEmail(member.email);
     setEditRole(normalizeRole(member.role));
     setEditActive(member.active);
+    setEditAvatar(member.avatar || "");
     setEditPassword("");
     setEditError(null);
   };
@@ -404,11 +511,13 @@ export default function SettingsPage() {
         role: Role;
         active: boolean;
         password?: string;
+        avatar?: string;
       } = {
         name: trimmedName,
         email: trimmedEmail,
         role: editRole,
         active: editActive,
+        avatar: editAvatar,
       };
 
       if (editPassword.trim()) {
@@ -430,6 +539,7 @@ export default function SettingsPage() {
                   name: data.user.name,
                   email: data.user.email,
                   role: data.user.role,
+                  avatar: data.user.avatar !== undefined ? data.user.avatar : editAvatar,
                   active: data.user.active,
                 }
               : m
@@ -442,6 +552,7 @@ export default function SettingsPage() {
             name: data.user.name,
             email: data.user.email,
             role: data.user.role,
+            avatar: data.user.avatar !== undefined ? data.user.avatar : editAvatar,
           });
         }
 
@@ -658,6 +769,88 @@ export default function SettingsPage() {
           Signed in as {user?.email || "user@tchaikovsky.com"} · {roleLabel}
         </p>
 
+        {/* Profile picture */}
+        <div className="mb-4">
+          <label className="block text-[11px] font-medium mb-1.5" style={{ color: "var(--text-primary)" }}>
+            Profile picture
+          </label>
+          <div className="flex items-center gap-3.5">
+            <div className="relative shrink-0">
+              {user?.avatar ? (
+                <img
+                  src={user.avatar}
+                  alt={displayName || "Profile picture"}
+                  className="w-14 h-14 rounded-full object-cover shadow-xs"
+                  style={{ border: "1px solid var(--border-input)" }}
+                />
+              ) : (
+                <div
+                  className="w-14 h-14 rounded-full flex items-center justify-center font-semibold text-[16px] shadow-xs"
+                  style={{
+                    background: "var(--bg-pill)",
+                    border: "1px solid var(--border-input)",
+                    color: "var(--text-secondary)",
+                  }}
+                >
+                  {(displayName || user?.name || "U").charAt(0).toUpperCase()}
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={handleAvatarFileSelect}
+                />
+                <button
+                  type="button"
+                  disabled={avatarSaving}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="h-[28px] px-3 text-[12px] font-medium rounded-[6px] transition-colors cursor-pointer disabled:opacity-50"
+                  style={{
+                    background: "var(--bg-card)",
+                    border: "1px solid var(--border-main)",
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  {avatarSaving ? "Saving…" : user?.avatar ? "Change photo" : "Upload photo"}
+                </button>
+
+                {user?.avatar && (
+                  <button
+                    type="button"
+                    disabled={avatarSaving}
+                    onClick={handleRemoveAvatar}
+                    className="h-[28px] px-3 text-[12px] font-medium rounded-[6px] transition-colors cursor-pointer text-[#FF3B30] hover:bg-[rgba(255,59,48,0.06)] disabled:opacity-50"
+                    style={{
+                      border: "1px solid var(--border-input)",
+                      background: "transparent",
+                    }}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+              <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                JPG, PNG, or WebP. Automatically optimized.
+              </p>
+              {avatarStatus && (
+                <p
+                  className={`text-[11px] font-medium ${
+                    avatarStatus.ok ? "text-[#0066FF]" : "text-[#FF3B30]"
+                  }`}
+                >
+                  {avatarStatus.msg}
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+
         {/* Display name */}
         <div className="mb-4">
           <label className="block text-[11px] font-medium mb-1.5" style={{ color: "var(--text-primary)" }}>
@@ -768,31 +961,52 @@ export default function SettingsPage() {
                 className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 py-3"
                 style={{ borderBottom: "1px solid var(--border-main)" }}
               >
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <p className="text-[13px] font-medium leading-tight truncate" style={{ color: "var(--text-primary)" }}>
-                      {member.name}
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  {member.avatar ? (
+                    <img
+                      src={member.avatar}
+                      alt={member.name}
+                      className="w-8 h-8 rounded-full object-cover shrink-0 shadow-xs"
+                      style={{ border: "1px solid var(--border-input)" }}
+                    />
+                  ) : (
+                    <div
+                      className="w-8 h-8 rounded-full flex items-center justify-center font-semibold text-[11px] shrink-0"
+                      style={{
+                        background: "var(--bg-pill)",
+                        border: "1px solid var(--border-input)",
+                        color: "var(--text-secondary)",
+                      }}
+                    >
+                      {member.name.charAt(0).toUpperCase()}
+                    </div>
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <p className="text-[13px] font-medium leading-tight truncate" style={{ color: "var(--text-primary)" }}>
+                        {member.name}
+                      </p>
+                      {isSelf && (
+                        <span
+                          className="text-[10px] px-1.5 py-0.5 rounded-[4px] font-medium"
+                          style={{ background: "rgba(0, 102, 255, 0.08)", color: "#0066FF" }}
+                        >
+                          You
+                        </span>
+                      )}
+                      {!member.active && (
+                        <span
+                          className="text-[10px] px-1.5 py-0.5 rounded-[4px] font-medium"
+                          style={{ background: "var(--bg-pill)", color: "var(--text-secondary)" }}
+                        >
+                          Deactivated
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] truncate mt-0.5" style={{ color: "var(--text-secondary)" }}>
+                      {member.email} · <span>{getRoleDisplayName(member.role)}</span>
                     </p>
-                    {isSelf && (
-                      <span
-                        className="text-[10px] px-1.5 py-0.5 rounded-[4px] font-medium"
-                        style={{ background: "rgba(0, 102, 255, 0.08)", color: "#0066FF" }}
-                      >
-                        You
-                      </span>
-                    )}
-                    {!member.active && (
-                      <span
-                        className="text-[10px] px-1.5 py-0.5 rounded-[4px] font-medium"
-                        style={{ background: "var(--bg-pill)", color: "var(--text-secondary)" }}
-                      >
-                        Deactivated
-                      </span>
-                    )}
                   </div>
-                  <p className="text-[11px] truncate mt-0.5" style={{ color: "var(--text-secondary)" }}>
-                    {member.email} · <span>{getRoleDisplayName(member.role)}</span>
-                  </p>
                 </div>
 
                 {/* Actions */}
@@ -1489,6 +1703,79 @@ export default function SettingsPage() {
 
             {/* Modal form */}
             <form onSubmit={handleSaveEdit} className="px-5 py-4 space-y-3.5">
+              {/* Profile picture (Chairman only) */}
+              {isChairman && (
+                <div>
+                  <label className="block text-[11px] font-medium mb-1.5" style={{ color: "var(--text-primary)" }}>
+                    Profile picture
+                  </label>
+                  <div className="flex items-center gap-3">
+                    {editAvatar ? (
+                      <img
+                        src={editAvatar}
+                        alt={editName || "User"}
+                        className="w-12 h-12 rounded-full object-cover shadow-xs shrink-0"
+                        style={{ border: "1px solid var(--border-input)" }}
+                      />
+                    ) : (
+                      <div
+                        className="w-12 h-12 rounded-full flex items-center justify-center font-semibold text-[14px] shrink-0"
+                        style={{
+                          background: "var(--bg-pill)",
+                          border: "1px solid var(--border-input)",
+                          color: "var(--text-secondary)",
+                        }}
+                      >
+                        {(editName || "U").charAt(0).toUpperCase()}
+                      </div>
+                    )}
+                    <div className="flex items-center gap-2">
+                      <input
+                        ref={editFileInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          e.target.value = "";
+                          if (!file.type.startsWith("image/")) return;
+                          try {
+                            const b64 = await resizeImageToAvatar(file, 256, 256);
+                            setEditAvatar(b64);
+                          } catch {}
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => editFileInputRef.current?.click()}
+                        className="h-[26px] px-2.5 text-[11px] font-medium rounded-[6px] transition-colors cursor-pointer"
+                        style={{
+                          background: "var(--bg-card)",
+                          border: "1px solid var(--border-main)",
+                          color: "var(--text-primary)",
+                        }}
+                      >
+                        {editAvatar ? "Change photo" : "Upload photo"}
+                      </button>
+                      {editAvatar && (
+                        <button
+                          type="button"
+                          onClick={() => setEditAvatar("")}
+                          className="h-[26px] px-2.5 text-[11px] font-medium rounded-[6px] transition-colors cursor-pointer text-[#FF3B30] hover:bg-[rgba(255,59,48,0.06)]"
+                          style={{
+                            border: "1px solid var(--border-input)",
+                            background: "transparent",
+                          }}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Name */}
               <div>
                 <label className="block text-[11px] font-medium mb-1" style={{ color: "var(--text-primary)" }}>

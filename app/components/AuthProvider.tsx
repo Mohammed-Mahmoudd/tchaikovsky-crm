@@ -53,6 +53,7 @@ export function canManageTeamRole(role?: string): boolean {
 
 export function canAccessRoute(role: string | undefined, pathname: string): boolean {
   if (pathname === "/login") return true;
+  if (pathname === "/profile") return true;
   const norm = normalizeRole(role);
 
   if (norm === "chairman" || norm === "marketing") {
@@ -68,7 +69,7 @@ export function canAccessRoute(role: string | undefined, pathname: string): bool
   }
 
   if (norm === "admission_officer") {
-    return pathname !== "/reports";
+    return pathname !== "/reports" && pathname !== "/team-performance";
   }
 
   return true;
@@ -94,6 +95,7 @@ export interface AuthUser {
   name: string;
   email: string;
   role: Role;
+  avatar?: string;
 }
 
 interface AuthContextValue {
@@ -171,10 +173,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (!ignore) {
           if (data.success && data.user) {
             setToken(stored);
-            setUser(data.user);
-            try {
-              localStorage.setItem(USER_KEY, JSON.stringify(data.user));
-            } catch {}
+            setUser((prev) => {
+              const updated = {
+                ...data.user,
+                avatar: data.user.avatar !== undefined ? data.user.avatar : (prev?.avatar || ""),
+              };
+              try {
+                localStorage.setItem(USER_KEY, JSON.stringify(updated));
+              } catch {}
+              return updated;
+            });
           } else {
             localStorage.removeItem(TOKEN_KEY);
             localStorage.removeItem(USER_KEY);

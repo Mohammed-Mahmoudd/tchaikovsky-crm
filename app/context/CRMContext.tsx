@@ -14,6 +14,13 @@ export type MessageReaction = {
   timestamp?: number;
 };
 
+export type MessageReplyTo = {
+  id: string;
+  text: string;
+  senderName?: string;
+  isIncoming?: boolean;
+};
+
 export type Message = {
   id: string;
   text: string;
@@ -30,6 +37,7 @@ export type Message = {
   isEdited?: boolean;
   editedAt?: number;
   reactions?: MessageReaction[];
+  replyTo?: MessageReplyTo;
 };
 
 export type Conversation = {
@@ -57,6 +65,10 @@ export type Conversation = {
     adset?: string;
     ad?: string;
     cashIn?: number;
+    auditionBookedAt?: string;
+    attendedAt?: string;
+    enrolledAt?: string;
+    paidAt?: string;
     [key: string]: any;
   }
   | string;
@@ -66,6 +78,13 @@ export type Conversation = {
   followUpCompleted?: boolean;
   followUpCompletedAt?: string;
   auditionDate?: string;
+  auditionBookedAt?: string;
+  attendedAt?: string;
+  enrolledAt?: string;
+  paidAt?: string;
+  bookedBy?: string;
+  attendedBy?: string;
+  enrolledBy?: string;
   formAnswers?: {
     instrument?: string;
     studentAge?: string;
@@ -76,11 +95,37 @@ export type Conversation = {
   branch?: string;
   auditionOutcome?: string;
   followUpTags?: string[];
+  activityLog?: ActivityLogEntry[];
   messages: Message[];
   createdAt?: string;
   updatedAt?: string;
   lastMessageAt?: number;
+  lastMessageText?: string;
+  lastMessageDirection?: "incoming" | "outgoing";
+  lastOutgoingAt?: number;
   lastSeenAt?: number;
+};
+
+export type ActivityLogEntry = {
+  id: string;
+  type:
+    | "message_sent"
+    | "lead_assigned"
+    | "stage_changed"
+    | "audition_booked"
+    | "audition_outcome"
+    | "followup_scheduled"
+    | "followup_completed"
+    | "cash_recorded"
+    | "note_updated"
+    | "branch_changed";
+  actor: string;
+  actorRole?: string;
+  summary: string;
+  detail?: string;
+  fromValue?: string;
+  toValue?: string;
+  timestamp: number;
 };
 
 export type BadgeCounts = {
@@ -90,13 +135,14 @@ export type BadgeCounts = {
   followUps: number;
 };
 
-export type AssignableAgent = { name: string; role: string };
+export type AssignableAgent = { name: string; role: string; email?: string; avatar?: string; active?: boolean };
 
 type CRMContextType = {
   conversations: Conversation[];
   loading: boolean;
   badgeCounts: BadgeCounts;
   assignableAgents: AssignableAgent[];
+  teamMembers: AssignableAgent[];
   activeChatId: string | null;
   setActiveChatId: (id: string | null) => void;
   openChat: (id: string) => void;
@@ -211,6 +257,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   });
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [assignableAgents, setAssignableAgents] = useState<AssignableAgent[]>([]);
+  const [teamMembers, setTeamMembers] = useState<AssignableAgent[]>([]);
   const [searchQuery, setSearchQuery] = useState<string>("");
 
   // ── Refs for stable closures (never cause re-creation of callbacks) ──
@@ -236,19 +283,60 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   }, []);
   const router = useRouter();
 
-  // ── Fetch assignable agents once on mount (cached 60s on backend, ~0ms on hit) ──
+  // ── Fetch assignable agents and full team list once on mount (cached 60s on backend, ~0ms on hit) ──
   useEffect(() => {
     let ignore = false;
     const fetchAgents = async () => {
       try {
-        let res = await fetch(`${API}/messages/agents`);
+        const mergedMap = new Map<string, AssignableAgent>();
+        const addMember = (m: any) => {
+          if (!m || !m.name) return;
+          if (m.active === false) return;
+          const cleanName = String(m.name).trim();
+          if (!cleanName) return;
+          const key = cleanName.toLowerCase();
+          mergedMap.set(key, {
+            name: cleanName,
+            role: String(m.role || "admission_officer").toLowerCase().trim(),
+            email: m.email ? String(m.email) : undefined,
+            avatar: m.avatar ? String(m.avatar) : undefined,
+            active: m.active !== false,
+          });
+        };
+
+        // 1. Fetch public/all agents endpoint
+        let res = await fetch(`${API}/messages/agents?all=1`);
         if (!res.ok) {
-          res = await fetch(`${API}/agents`);
+          res = await fetch(`${API}/agents?all=1`);
         }
-        const data = await res.json();
-        if (!ignore && data.success && Array.isArray(data.data)) {
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && Array.isArray(data.data)) {
+            data.data.forEach(addMember);
+          }
+        }
+
+        // 2. If authenticated (e.g. Chairman), also fetch full users list so all roles (Enrollment Director, Finance, Marketing, etc.) are included even before backend restart
+        if (token) {
+          try {
+            const usersRes = await fetch(`${API}/auth/users`, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (usersRes.ok) {
+              const usersData = await usersRes.json();
+              if (usersData.success && Array.isArray(usersData.users)) {
+                usersData.users.forEach(addMember);
+              }
+            }
+          } catch {}
+        }
+
+        if (!ignore && mergedMap.size > 0) {
+          const allMembers = Array.from(mergedMap.values());
+          setTeamMembers(allMembers);
+
           const allowedRoles = ["chairman", "owner", "manager", "admission_officer", "agent"];
-          const filtered = data.data.filter((a: AssignableAgent) =>
+          const filtered = allMembers.filter((a: AssignableAgent) =>
             allowedRoles.includes((a.role || "").toLowerCase().trim())
           );
           setAssignableAgents(filtered);
@@ -259,7 +347,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     };
     fetchAgents();
     return () => { ignore = true; };
-  }, []);
+  }, [token]);
 
   // ── Messages cache: lives outside React state so slim polls never touch it ──
   const messagesCacheRef = useRef<Map<string, Message[]>>(new Map());
@@ -347,8 +435,37 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       followUpCompleted: Boolean(c.followUpCompleted),
       followUpCompletedAt: safeDateIso(c.followUpCompletedAt),
       auditionDate: safeDateIso(c.auditionDate) || (c.pipeline === "Audition Booked" ? safeDateIso(c.followUpDate) : ""),
+      auditionBookedAt: c.auditionBookedAt || (typeof c.source === "object" && c.source?.auditionBookedAt ? String(c.source.auditionBookedAt) : undefined),
+      attendedAt: c.attendedAt || (typeof c.source === "object" && c.source?.attendedAt ? String(c.source.attendedAt) : undefined),
+      enrolledAt: c.enrolledAt || (typeof c.source === "object" && c.source?.enrolledAt ? String(c.source.enrolledAt) : undefined),
+      paidAt: c.paidAt || (typeof c.source === "object" && c.source?.paidAt ? String(c.source.paidAt) : undefined),
+      bookedBy: c.bookedBy || (typeof c.source === "object" && c.source?.bookedBy ? String(c.source.bookedBy) : undefined),
+      attendedBy: c.attendedBy || (typeof c.source === "object" && c.source?.attendedBy ? String(c.source.attendedBy) : undefined),
+      enrolledBy: c.enrolledBy || (typeof c.source === "object" && c.source?.enrolledBy ? String(c.source.enrolledBy) : undefined),
       auditionOutcome: c.auditionOutcome || "",
       followUpTags: Array.isArray(c.followUpTags) ? c.followUpTags : [],
+      activityLog: (() => {
+        const topLog = Array.isArray(c.activityLog) ? c.activityLog : [];
+        const srcLog = typeof c.source === "object" && Array.isArray(c.source?.activityLog) ? c.source.activityLog : [];
+        if (topLog.length === 0 && srcLog.length === 0) return [];
+        const byId = new Map<string, ActivityLogEntry>();
+        [...srcLog, ...topLog].forEach((entry: any) => {
+          if (entry && entry.id && entry.type) {
+            byId.set(String(entry.id), {
+              id: String(entry.id),
+              type: entry.type,
+              actor: String(entry.actor || "Staff"),
+              actorRole: entry.actorRole ? String(entry.actorRole) : undefined,
+              summary: String(entry.summary || ""),
+              detail: entry.detail ? String(entry.detail) : undefined,
+              fromValue: entry.fromValue ? String(entry.fromValue) : undefined,
+              toValue: entry.toValue ? String(entry.toValue) : undefined,
+              timestamp: Number(entry.timestamp) || Date.now(),
+            });
+          }
+        });
+        return Array.from(byId.values()).sort((a, b) => b.timestamp - a.timestamp);
+      })(),
       branch: c.branch || "",
       formAnswers: c.formAnswers || {},
       cashIn: (() => {
@@ -365,6 +482,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       createdAt: c.createdAt,
       updatedAt: c.updatedAt,
       lastMessageAt: c.lastMessageAt || (c.updatedAt ? new Date(c.updatedAt).getTime() : undefined) || (c.createdAt ? new Date(c.createdAt).getTime() : undefined),
+      lastMessageText: c.lastMessageText ? String(c.lastMessageText) : undefined,
+      lastMessageDirection: c.lastMessageDirection === "outgoing" ? "outgoing" : c.lastMessageDirection === "incoming" ? "incoming" : undefined,
+      lastOutgoingAt: c.lastOutgoingAt ? Number(c.lastOutgoingAt) : undefined,
       lastSeenAt: c.lastSeenAt,
     };
   }, []);
@@ -388,6 +508,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       isEdited: Boolean(m.isEdited),
       editedAt: m.editedAt || undefined,
       reactions: Array.isArray(m.reactions) ? m.reactions : [],
+      replyTo: m.replyTo
+        ? {
+            id: String(m.replyTo.id || m.replyTo.messageId),
+            text: m.replyTo.text || "",
+            senderName: m.replyTo.senderName || undefined,
+            isIncoming: Boolean(m.replyTo.isIncoming),
+          }
+        : undefined,
     }));
   }, []);
 
@@ -997,7 +1125,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      const patchPayload = { ...updates };
+      const nowIso = new Date().toISOString();
+      const patchPayload: Record<string, any> = { ...updates };
 
       if (updates.cashIn !== undefined) {
         const numCash = Number(updates.cashIn) || 0;
@@ -1006,26 +1135,269 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             localStorage.setItem(`crm_cash_${id}`, String(numCash));
           } catch {}
         }
-        // Also attach cashIn inside source object so current remote MongoDB persists it immediately
-        setConversations((prev) => {
-          const current = prev.find((conv) => conv.id === id);
-          const currentSource = current?.source;
-          const sourceObj = typeof currentSource === "object" && currentSource !== null
-            ? { ...currentSource, cashIn: numCash }
-            : { campaign: currentSource && currentSource !== "direct" ? currentSource : "Direct", cashIn: numCash };
-          patchPayload.source = sourceObj;
-          const next = prev.map((c) => (c.id === id ? { ...c, ...updates, source: sourceObj } : c));
-          persistConversationsCache(next);
-          return next;
-        });
-      } else {
-        // 2. Instant optimistic update
-        setConversations((prev) => {
-          const next = prev.map((c) => (c.id === id ? { ...c, ...updates } : c));
-          persistConversationsCache(next);
-          return next;
-        });
       }
+
+      // Stamp activity timestamps (booked, attended, enrolled, paid) both top-level and inside `source`
+      // so remote MongoDB persists them immediately without requiring a schema migration.
+      const isBooking =
+        updates.pipeline === "Audition Booked" ||
+        updates.auditionOutcome === "booked" ||
+        (Boolean(updates.auditionDate) && updates.pipeline === undefined);
+      const isAttending =
+        updates.pipeline === "Attended" ||
+        updates.auditionOutcome === "schedule-followup" ||
+        updates.auditionOutcome === "paid-trial";
+      const isEnrolling =
+        updates.pipeline === "Enrolled" ||
+        updates.auditionOutcome === "registered";
+      const isPaying =
+        updates.cashIn !== undefined && (Number(updates.cashIn) || 0) > 0;
+
+      const needsSourceSync =
+        updates.cashIn !== undefined || isBooking || isAttending || isEnrolling || isPaying;
+
+      setConversations((prev) => {
+        const current = prev.find((conv) => conv.id === id);
+        const enrichedUpdates: Record<string, any> = { ...updates };
+        const nowTs = Date.now();
+        const actorName = (user?.name || current?.agent || "Staff").trim();
+        const actorRole = user?.role || "";
+        const generatedActivities: ActivityLogEntry[] = [];
+
+        if (current) {
+          if (updates.agent !== undefined && updates.agent !== current.agent) {
+            const prevAg = current.agent || "Unassigned";
+            const nextAg = String(updates.agent || "Unassigned");
+            generatedActivities.push({
+              id: `act_${nowTs}_agent`,
+              type: "lead_assigned",
+              actor: actorName,
+              actorRole,
+              summary: nextAg === "Unassigned" ? "Unassigned lead" : `Assigned to ${nextAg}`,
+              detail: prevAg !== "Unassigned" ? `Previously ${prevAg}` : "Claimed from unassigned",
+              fromValue: prevAg,
+              toValue: nextAg,
+              timestamp: nowTs,
+            });
+          }
+
+          if (updates.pipeline !== undefined && updates.pipeline !== current.pipeline) {
+            const prevPipe = current.pipeline || "New";
+            const nextPipe = String(updates.pipeline);
+            const isBook = nextPipe === "Audition Booked";
+            generatedActivities.push({
+              id: `act_${nowTs}_pipe`,
+              type: isBook ? "audition_booked" : "stage_changed",
+              actor: actorName,
+              actorRole,
+              summary: isBook ? "Booked Audition" : `Moved stage to ${nextPipe}`,
+              detail: `${prevPipe} → ${nextPipe}`,
+              fromValue: prevPipe,
+              toValue: nextPipe,
+              timestamp: nowTs,
+            });
+          }
+
+          if (
+            updates.auditionDate !== undefined &&
+            updates.auditionDate &&
+            updates.auditionDate !== (current.auditionDate || "") &&
+            updates.pipeline !== "Audition Booked"
+          ) {
+            generatedActivities.push({
+              id: `act_${nowTs}_auddate`,
+              type: "audition_booked",
+              actor: actorName,
+              actorRole,
+              summary: `Scheduled audition for ${updates.auditionDate}`,
+              detail: String(updates.branch || current.branch || ""),
+              fromValue: current.auditionDate || "",
+              toValue: String(updates.auditionDate),
+              timestamp: nowTs,
+            });
+          }
+
+          if (
+            updates.auditionOutcome !== undefined &&
+            updates.auditionOutcome &&
+            updates.auditionOutcome !== (current.auditionOutcome || "")
+          ) {
+            const outcomeLabels: Record<string, string> = {
+              registered: "Registered (Enrolled)",
+              "paid-trial": "Paid Trial",
+              "schedule-followup": "Attended · Follow-up",
+              "joining-later": "Joining Later",
+              "no-show": "No-Show",
+              booked: "Booked",
+            };
+            const label = outcomeLabels[String(updates.auditionOutcome)] || String(updates.auditionOutcome);
+            generatedActivities.push({
+              id: `act_${nowTs}_outcome`,
+              type: "audition_outcome",
+              actor: actorName,
+              actorRole,
+              summary: `Marked audition outcome: ${label}`,
+              detail: String(updates.branch || current.branch || ""),
+              fromValue: current.auditionOutcome || "",
+              toValue: String(updates.auditionOutcome),
+              timestamp: nowTs,
+            });
+          }
+
+          if (updates.followUpCompleted === true && !current.followUpCompleted) {
+            generatedActivities.push({
+              id: `act_${nowTs}_fudone`,
+              type: "followup_completed",
+              actor: actorName,
+              actorRole,
+              summary: "Completed follow-up task",
+              detail: String(current.followUpNote || updates.followUpNote || ""),
+              fromValue: "Pending",
+              toValue: "Completed",
+              timestamp: nowTs,
+            });
+          } else if (
+            (updates.followUpDate !== undefined || updates.followUpNote !== undefined) &&
+            updates.followUpCompleted !== true
+          ) {
+            const prevDateStr = current.followUpDate || "";
+            const nextDateStr = updates.followUpDate !== undefined ? String(updates.followUpDate || "") : prevDateStr;
+            const nextNote = updates.followUpNote !== undefined ? String(updates.followUpNote || "") : (current.followUpNote || "");
+            if ((nextDateStr && nextDateStr !== prevDateStr) || (nextNote && nextNote !== (current.followUpNote || ""))) {
+              generatedActivities.push({
+                id: `act_${nowTs}_fusched`,
+                type: "followup_scheduled",
+                actor: actorName,
+                actorRole,
+                summary: nextDateStr ? `Scheduled follow-up for ${nextDateStr}` : "Updated follow-up note",
+                detail: nextNote,
+                fromValue: prevDateStr,
+                toValue: nextDateStr,
+                timestamp: nowTs,
+              });
+            }
+          }
+
+          if (updates.cashIn !== undefined) {
+            const prevCash = Number(current.cashIn) || 0;
+            const nextCash = Number(updates.cashIn) || 0;
+            if (nextCash > 0 && nextCash !== prevCash) {
+              generatedActivities.push({
+                id: `act_${nowTs}_cash`,
+                type: "cash_recorded",
+                actor: actorName,
+                actorRole,
+                summary: `Recorded payment: ${nextCash.toLocaleString()} EGP`,
+                detail: prevCash > 0 ? `Updated from ${prevCash.toLocaleString()} EGP` : "Payment logged",
+                fromValue: String(prevCash),
+                toValue: String(nextCash),
+                timestamp: nowTs,
+              });
+            }
+          }
+
+          if (
+            updates.branch !== undefined &&
+            updates.branch &&
+            updates.branch !== (current.branch || "")
+          ) {
+            generatedActivities.push({
+              id: `act_${nowTs}_branch`,
+              type: "branch_changed",
+              actor: actorName,
+              actorRole,
+              summary: `Set branch to ${updates.branch}`,
+              detail: current.branch ? `Previously ${current.branch}` : "",
+              fromValue: current.branch || "",
+              toValue: String(updates.branch),
+              timestamp: nowTs,
+            });
+          }
+
+          if (
+            updates.notes !== undefined &&
+            updates.notes &&
+            String(updates.notes).trim() !== (current.notes || "").trim()
+          ) {
+            const cleanNote = String(updates.notes).trim().slice(0, 140);
+            generatedActivities.push({
+              id: `act_${nowTs}_note`,
+              type: "note_updated",
+              actor: actorName,
+              actorRole,
+              summary: "Updated lead notes",
+              detail: cleanNote,
+              fromValue: "",
+              toValue: cleanNote,
+              timestamp: nowTs,
+            });
+          }
+        }
+
+        if (needsSourceSync || generatedActivities.length > 0) {
+          const currentSource = current?.source;
+          const baseSource =
+            typeof currentSource === "object" && currentSource !== null
+              ? { ...currentSource }
+              : {
+                  campaign:
+                    typeof currentSource === "string" && currentSource.trim() && currentSource !== "direct"
+                      ? currentSource
+                      : "Organic / Direct",
+                };
+
+          if (generatedActivities.length > 0) {
+            const existingLog = Array.isArray(current?.activityLog) ? current.activityLog : [];
+            const nextLog = [...generatedActivities, ...existingLog].slice(0, 120);
+            baseSource.activityLog = nextLog;
+            enrichedUpdates.activityLog = nextLog;
+          }
+
+          if (updates.cashIn !== undefined) {
+            const numCash = Number(updates.cashIn) || 0;
+            baseSource.cashIn = numCash;
+            if (numCash > 0 && numCash !== (current?.cashIn || 0)) {
+              baseSource.paidAt = nowIso;
+              baseSource.enrolledBy = actorName;
+              enrichedUpdates.paidAt = nowIso;
+              enrichedUpdates.enrolledBy = actorName;
+              patchPayload.paidAt = nowIso;
+              patchPayload.enrolledBy = actorName;
+            }
+          }
+          if (isBooking && current?.pipeline !== "Audition Booked") {
+            baseSource.auditionBookedAt = nowIso;
+            baseSource.bookedBy = actorName;
+            enrichedUpdates.auditionBookedAt = nowIso;
+            enrichedUpdates.bookedBy = actorName;
+            patchPayload.auditionBookedAt = nowIso;
+            patchPayload.bookedBy = actorName;
+          }
+          if (isAttending && current?.pipeline !== "Attended") {
+            baseSource.attendedAt = nowIso;
+            baseSource.attendedBy = actorName;
+            enrichedUpdates.attendedAt = nowIso;
+            enrichedUpdates.attendedBy = actorName;
+            patchPayload.attendedAt = nowIso;
+            patchPayload.attendedBy = actorName;
+          }
+          if (isEnrolling && current?.pipeline !== "Enrolled") {
+            baseSource.enrolledAt = nowIso;
+            baseSource.enrolledBy = actorName;
+            enrichedUpdates.enrolledAt = nowIso;
+            enrichedUpdates.enrolledBy = actorName;
+            patchPayload.enrolledAt = nowIso;
+            patchPayload.enrolledBy = actorName;
+          }
+
+          patchPayload.source = baseSource;
+          enrichedUpdates.source = baseSource;
+        }
+
+        const next = prev.map((c) => (c.id === id ? { ...c, ...enrichedUpdates } : c));
+        persistConversationsCache(next);
+        return next;
+      });
 
       // Fix A: raise TTL to 30s
       pendingPatchesRef.current.set(id, {
@@ -1093,11 +1465,19 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     [isReadOnly, token, normalizeConversationMeta]
   );
 
-  // Mark as read in UI and backend
+  // Mark as read in UI and backend (only PATCH if unreadCount was actually > 0 so updatedAt is never clobbered)
   const markConversationAsRead = useCallback(async (id: string) => {
+    let hadUnread = false;
     setConversations((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, unreadCount: 0 } : c))
+      prev.map((c) => {
+        if (c.id === id) {
+          if ((c.unreadCount || 0) > 0) hadUnread = true;
+          return { ...c, unreadCount: 0 };
+        }
+        return c;
+      })
     );
+    if (!hadUnread) return;
     try {
       await fetch(`${API}/messages/${id}`, {
         method: "PATCH",
@@ -1334,6 +1714,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           isIncoming: false,
           status: "sent",
           senderName: rm.senderName || undefined,
+          replyTo: rm.replyTo || undefined,
         }));
         const existingIds = new Set(withoutTemp.map((m) => m.id));
         const toAdd = normalizedConfirmed.filter((m) => !existingIds.has(m.id));
@@ -1343,8 +1724,42 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       }
 
       messagesCacheRef.current.set(chatId, nextMessages);
+      const newestConfirmed =
+        Array.isArray(confirmedRawMessages) && confirmedRawMessages.length > 0
+          ? confirmedRawMessages[confirmedRawMessages.length - 1]
+          : null;
+
       setConversations((prev) =>
-        prev.map((c) => (c.id === chatId ? { ...c, messages: nextMessages } : c))
+        prev.map((c) => {
+          if (c.id !== chatId) return c;
+          let nextLog = c.activityLog || [];
+          if (newestConfirmed && newestConfirmed.senderName) {
+            const msgTs = newestConfirmed.timestamp || Date.now();
+            const msgId = `msg_${newestConfirmed.message_id || newestConfirmed.messageId || msgTs}`;
+            if (!nextLog.some((a) => a.id === msgId)) {
+              const chLabel = c.channel === "WA" ? "WhatsApp" : c.channel === "IG" ? "Instagram" : "Messenger";
+              nextLog = [
+                {
+                  id: msgId,
+                  type: "message_sent" as const,
+                  actor: String(newestConfirmed.senderName),
+                  summary: `Sent ${chLabel} reply`,
+                  detail: String(newestConfirmed.text || "").slice(0, 140),
+                  timestamp: msgTs,
+                },
+                ...nextLog,
+              ].slice(0, 120);
+            }
+          }
+          return {
+            ...c,
+            messages: nextMessages,
+            lastOutgoingAt: newestConfirmed?.timestamp || Date.now(),
+            lastMessageDirection: "outgoing",
+            lastMessageText: newestConfirmed?.text || c.lastMessageText,
+            activityLog: nextLog,
+          };
+        })
       );
     },
     []
@@ -1357,6 +1772,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         loading,
         badgeCounts,
         assignableAgents,
+        teamMembers,
         activeChatId,
         setActiveChatId,
         openChat,

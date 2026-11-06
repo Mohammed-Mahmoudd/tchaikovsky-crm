@@ -4,6 +4,7 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMe
 import {
   Smile,
   Pencil,
+  Reply,
   X,
   Check,
   Paperclip,
@@ -221,6 +222,14 @@ async function preUploadFile(
   };
 }
 
+export type ActiveReplyContext = {
+  id: string;
+  text: string;
+  senderName?: string;
+  isIncoming?: boolean;
+  attachments?: any[];
+};
+
 interface ChatInputBarProps {
   chatId: string;
   /** Conversation channel — controls formatting support (WhatsApp) vs plain text (IG / FB) */
@@ -235,10 +244,17 @@ interface ChatInputBarProps {
   isUnassigned: boolean;
   isAdmission: boolean;
   onAssignToMe?: () => void;
-  onSendMessage: (text: string, attachments?: OutgoingAttachmentPayload[]) => Promise<boolean>;
+  onSendMessage: (
+    text: string,
+    attachments?: OutgoingAttachmentPayload[],
+    replyTo?: { id: string; text: string; senderName?: string; isIncoming?: boolean }
+  ) => Promise<boolean>;
   editingMessage?: { id: string; text: string } | null;
   onCancelEdit?: () => void;
   onSaveEdit?: (messageId: string, newText: string) => Promise<boolean>;
+  replyingTo?: ActiveReplyContext | null;
+  onCancelReply?: () => void;
+  onJumpToMessage?: (id: string) => void;
   externalDroppedFiles?: { files: File[]; timestamp: number } | null;
 }
 
@@ -259,6 +275,9 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   editingMessage,
   onCancelEdit,
   onSaveEdit,
+  replyingTo,
+  onCancelReply,
+  onJumpToMessage,
   externalDroppedFiles,
 }: ChatInputBarProps) {
   // Local state completely isolated from parent page — typing does NOT re-render chat or sidebar
@@ -325,6 +344,18 @@ export const ChatInputBar = React.memo(function ChatInputBar({
       }, 10);
     }
   }, [editingMessage]);
+
+  // Focus input when entering Threaded Reply mode
+  useEffect(() => {
+    if (replyingTo) {
+      setShowAttachMenu(false);
+      setTimeout(() => {
+        if (inputRef.current) {
+          inputRef.current.focus();
+        }
+      }, 10);
+    }
+  }, [replyingTo]);
 
   const enqueueFiles = useCallback(
     (files: FileList | File[], forceDocument = false) => {
@@ -583,7 +614,18 @@ export const ChatInputBar = React.memo(function ChatInputBar({
 
       // Instagram / Messenger render plain text only — strip WhatsApp markup so no raw * _ ~ leak through
       const outgoing = supportsFormatting ? trimmed : stripWhatsAppMarkup(trimmed);
-      const success = await onSendMessage(outgoing, readyPayloads);
+      const replyPayload = replyingTo
+        ? {
+            id: replyingTo.id,
+            text: replyingTo.text,
+            senderName: replyingTo.senderName,
+            isIncoming: replyingTo.isIncoming,
+          }
+        : undefined;
+
+      onCancelReply?.();
+
+      const success = await onSendMessage(outgoing, readyPayloads, replyPayload);
       setIsSending(false);
 
       if (!success) {
@@ -607,6 +649,8 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     editingMessage,
     onSaveEdit,
     handleCancelEditMode,
+    replyingTo,
+    onCancelReply,
     onSendMessage,
     supportsFormatting,
   ]);
@@ -633,6 +677,11 @@ export const ChatInputBar = React.memo(function ChatInputBar({
       if (editingMessage) {
         e.preventDefault();
         handleCancelEditMode();
+        return;
+      }
+      if (replyingTo) {
+        e.preventDefault();
+        onCancelReply?.();
         return;
       }
       if (showAttachMenu) {
@@ -724,6 +773,66 @@ export const ChatInputBar = React.memo(function ChatInputBar({
           }
         }}
       />
+
+      {/* Threaded Reply Preview Banner (WA, IG, FB) */}
+      {!editingMessage && replyingTo && (
+        <div
+          className="rounded-lg px-3 py-1.5 mb-2 flex items-center justify-between gap-2.5 border border-[var(--border-main)] border-s-[3px] animate-in fade-in slide-in-from-bottom-1 duration-150"
+          style={{
+            background: "var(--bg-pill)",
+            borderInlineStartColor:
+              channel === "WA" ? "#25D366" : channel === "IG" ? "#E1306C" : "#0066FF",
+          }}
+        >
+          <div
+            onClick={() => {
+              if (replyingTo.id && onJumpToMessage) {
+                onJumpToMessage(replyingTo.id);
+              }
+            }}
+            className="flex items-center gap-2 min-w-0 flex-1 cursor-pointer select-none group/replyBanner"
+            title="Click to view quoted message in conversation"
+          >
+            <Reply
+              className="w-3.5 h-3.5 shrink-0 transition-transform group-hover/replyBanner:-translate-y-0.5"
+              style={{
+                color:
+                  channel === "WA" ? "#25D366" : channel === "IG" ? "#E1306C" : "#0066FF",
+              }}
+            />
+            <div className="min-w-0 flex-1">
+              <p
+                className="text-[11px] font-semibold leading-tight flex items-center gap-1.5 truncate"
+                style={{
+                  color:
+                    channel === "WA" ? "#25D366" : channel === "IG" ? "#E1306C" : "#0066FF",
+                }}
+              >
+                <span>
+                  {replyingTo.isIncoming
+                    ? `Replying to ${replyingTo.senderName || "Lead"}`
+                    : "Replying to yourself"}
+                </span>
+              </p>
+              <p
+                className="text-[11px] truncate mt-0.5"
+                style={{ color: "var(--text-primary)" }}
+              >
+                {replyingTo.text || (replyingTo.attachments?.length ? "Attachment" : "Message")}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onCancelReply}
+            title="Cancel reply (Esc)"
+            className="p-1 rounded-md hover:bg-black/5 dark:hover:bg-white/10 transition-colors shrink-0 cursor-pointer"
+            style={{ color: "var(--text-secondary)" }}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* WhatsApp Edit Message Banner */}
       {editingMessage && (
