@@ -1742,12 +1742,24 @@ function SlotCard({
               <p className="text-[11px] font-semibold leading-tight truncate" style={{ color: 'var(--text-primary)' }}>{slot.name}</p>
             )}
             <p className="text-[9px] mt-0.5 text-red-500/80 font-medium">Slot unavailable</p>
-            {slot.agent && slot.agent !== 'Unassigned' && (
-              <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded mt-1 max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
-                <User className="w-2 h-2 shrink-0 text-red-500 opacity-70" />
-                <span className="truncate" style={{ color: 'var(--text-muted)' }}>
-                  Agent: <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>{slot.agent}</span>
-                </span>
+            {(slot.branch || (slot.agent && slot.agent !== 'Unassigned')) && (
+              <div className="flex flex-col items-start gap-1 mt-1">
+                {slot.branch && (
+                  <div
+                    className="inline-flex items-center gap-1 text-[8px] font-normal px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight"
+                    style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}
+                    title={slot.branch}
+                  >
+                    <MapPin className="w-2 h-2 shrink-0 text-red-500 opacity-70" />
+                    <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{slot.branch}</span>
+                  </div>
+                )}
+                {slot.agent && slot.agent !== 'Unassigned' && (
+                  <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
+                    <User className="w-2 h-2 shrink-0 text-red-500 opacity-70" />
+                    <span className="truncate" style={{ color: 'var(--text-primary)' }}>{slot.agent}</span>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1805,12 +1817,24 @@ function SlotCard({
             </button>
           )}
         </div>
-        {slot.agent && (
-          <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded mt-0.5 max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
-            <User className="w-2 h-2 shrink-0 text-[#0066FF] opacity-70" />
-            <span className="truncate" style={{ color: 'var(--text-muted)' }}>
-              Agent: <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>{slot.agent}</span>
-            </span>
+        {(slot.branch || slot.agent) && (
+          <div className="flex flex-col items-start gap-1 mt-0.5">
+            {slot.branch && (
+              <div
+                className="inline-flex items-center gap-1 text-[8px] font-normal px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight"
+                style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}
+                title={slot.branch}
+              >
+                <MapPin className="w-2 h-2 shrink-0 text-[#0066FF] opacity-70" />
+                <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{slot.branch}</span>
+              </div>
+            )}
+            {slot.agent && (
+              <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
+                <User className="w-2 h-2 shrink-0 text-[#0066FF] opacity-70" />
+                <span className="truncate" style={{ color: 'var(--text-primary)' }}>{slot.agent}</span>
+              </div>
+            )}
           </div>
         )}
         <p className="text-[10px] mt-1 text-[#0066FF] font-medium">
@@ -1862,12 +1886,22 @@ function SlotCard({
           </div>
         </div>
 
-        {/* Agent Name inside booking slot */}
-        <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded mt-1 max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
-          <User className="w-2 h-2 shrink-0 text-[#0066FF] opacity-80" />
-          <span className="truncate" style={{ color: 'var(--text-muted)' }}>
-            Agent: <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>{slot.agent || 'Unassigned'}</span>
-          </span>
+        {/* Branch & Agent inside booking slot */}
+        <div className="flex flex-col items-start gap-1 mt-1">
+          {slot.branch && (
+            <div
+              className="inline-flex items-center gap-1 text-[8px] font-normal px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight"
+              style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}
+              title={slot.branch}
+            >
+              <MapPin className="w-2 h-2 shrink-0 text-[#0066FF] opacity-80" />
+              <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{slot.branch}</span>
+            </div>
+          )}
+          <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
+            <User className="w-2 h-2 shrink-0 text-[#0066FF] opacity-80" />
+            <span className="truncate" style={{ color: 'var(--text-primary)' }}>{slot.agent || 'Unassigned'}</span>
+          </div>
         </div>
 
         {slot.comment ? (
@@ -1942,12 +1976,21 @@ function SlotCard({
           )}
         </div>
 
-        {/* Agent Name inside registered slot */}
-        <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded mt-1 max-w-full truncate leading-tight bg-black/20 text-white">
-          <User className="w-2 h-2 shrink-0 opacity-80" />
-          <span className="truncate text-white/80">
-            Agent: <span className="font-semibold text-white">{slot.agent || 'Unassigned'}</span>
-          </span>
+        {/* Branch & Agent inside registered slot */}
+        <div className="flex flex-col items-start gap-1 mt-1">
+          {slot.branch && (
+            <div
+              className="inline-flex items-center gap-1 text-[8px] font-normal px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight bg-black/20 text-white"
+              title={slot.branch}
+            >
+              <MapPin className="w-2 h-2 shrink-0 opacity-80" />
+              <span className="truncate text-white/90">{slot.branch}</span>
+            </div>
+          )}
+          <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight bg-black/20 text-white">
+            <User className="w-2 h-2 shrink-0 opacity-80" />
+            <span className="truncate text-white">{slot.agent || 'Unassigned'}</span>
+          </div>
         </div>
 
         {slot.comment ? (
@@ -1998,12 +2041,22 @@ function SlotCard({
         )}
       </div>
 
-      {/* Agent Name inside outcome slot */}
-      <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded mt-1 max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
-        <User className="w-2 h-2 shrink-0 opacity-70" style={{ color: cfg.color }} />
-        <span className="truncate" style={{ color: 'var(--text-muted)' }}>
-          Agent: <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>{slot.agent || 'Unassigned'}</span>
-        </span>
+      {/* Branch & Agent inside outcome slot */}
+      <div className="flex flex-col items-start gap-1 mt-1">
+        {slot.branch && (
+          <div
+            className="inline-flex items-center gap-1 text-[8px] font-normal px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight"
+            style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}
+            title={slot.branch}
+          >
+            <MapPin className="w-2 h-2 shrink-0 opacity-70" style={{ color: cfg.color }} />
+            <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{slot.branch}</span>
+          </div>
+        )}
+        <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
+          <User className="w-2 h-2 shrink-0 opacity-70" style={{ color: cfg.color }} />
+          <span className="truncate" style={{ color: 'var(--text-primary)' }}>{slot.agent || 'Unassigned'}</span>
+        </div>
       </div>
 
       {slot.comment ? (

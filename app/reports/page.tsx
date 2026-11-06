@@ -677,7 +677,7 @@ export default function ReportsPage() {
                     <th className="py-2.5 px-4 text-right">Lost / Unqualified</th>
                   </tr>
                 </thead>
-                <tbody className="text-[12px] divide-y" style={{ color: 'var(--text-primary)', borderColor: 'var(--border-main)' }}>
+                <tbody className="text-[12px] divide-y divide-[var(--border-main)]" style={{ color: 'var(--text-primary)' }}>
                   {campaignRows.map((c, idx) => {
                     const convPct = c.leads > 0 ? `${Math.round((c.enrolled / c.leads) * 100)}%` : '0%';
                     return (
@@ -738,7 +738,7 @@ export default function ReportsPage() {
                   </p>
                 </div>
               ) : (
-                <div className="divide-y" style={{ borderColor: 'var(--border-main)' }}>
+                <div className="divide-y divide-[var(--border-main)]">
                   {bookedBreakdownList.map((entry, idx) => (
                     <div
                       key={`${entry.id}-${idx}`}
@@ -836,7 +836,7 @@ export default function ReportsPage() {
                   </p>
                 </div>
               ) : (
-                <div className="divide-y" style={{ borderColor: 'var(--border-main)' }}>
+                <div className="divide-y divide-[var(--border-main)]">
                   {convertedBreakdownList.map((entry, idx) => (
                     <div
                       key={`${entry.id}-${idx}`}
@@ -942,7 +942,7 @@ export default function ReportsPage() {
                   <p className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>No payments recorded for {periodDescription}</p>
                 </div>
               ) : (
-                <div className="divide-y" style={{ borderColor: 'var(--border-main)' }}>
+                <div className="divide-y divide-[var(--border-main)]">
                   {cashBreakdownList.map((entry, idx) => (
                     <div
                       key={`${entry.id}-${idx}`}

@@ -258,6 +258,11 @@ select option:disabled {
   background: rgba(127, 127, 127, 0.16);
   border-radius: 3px;
 }
+/* Ensure Tailwind divide-y defaults to theme-aware border color in both light and dark modes */
+.divide-y > :not(:last-child) {
+  border-color: var(--border-main);
+}
+
 .wa-ed-quote {
   color: var(--text-secondary);
 }
