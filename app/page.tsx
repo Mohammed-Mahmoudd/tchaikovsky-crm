@@ -305,16 +305,21 @@ export default function InboxPage() {
   } | null>(null);
   const dragDepthRef = useRef(0);
 
-  // Smooth-scroll viewport to referenced original message and flash highlight ring
+  // Smooth-scroll viewport to referenced original message and flash highlight the message bubble (WhatsApp / Telegram style)
   const scrollToMessage = useCallback((targetId: string) => {
     if (!targetId) return;
     const el = document.getElementById(`msg-${targetId}`);
     if (el) {
       el.scrollIntoView({ behavior: "smooth", block: "center" });
-      el.classList.add("ring-2", "ring-[#0066FF]", "transition-all", "duration-300");
-      setTimeout(() => {
-        el.classList.remove("ring-2", "ring-[#0066FF]");
-      }, 2000);
+      const bubble = (el.querySelector("[data-msg-bubble]") || el) as HTMLElement;
+      if (bubble) {
+        bubble.classList.remove("msg-jump-highlight");
+        void bubble.offsetWidth; // Force reflow to cleanly restart the animation if clicked repeatedly
+        bubble.classList.add("msg-jump-highlight");
+        setTimeout(() => {
+          bubble.classList.remove("msg-jump-highlight");
+        }, 1500);
+      }
     }
   }, []);
 
