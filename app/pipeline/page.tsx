@@ -827,10 +827,21 @@ export default function PipelinePage() {
 
   // Apply filters
   const filteredLeads = useMemo(() => {
-    const now = Date.now();
-    const oneDay = 24 * 60 * 60 * 1000;
-    const oneWeek = 7 * oneDay;
-    const oneMonth = 30 * oneDay;
+    // Calendar boundaries based on local date
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const todayStartMs = startOfToday.getTime();
+
+    // Saturday start (Saudi week: Sat-Fri)
+    const startOfWeek = new Date(startOfToday);
+    const day = startOfWeek.getDay();
+    const diffToSat = day === 6 ? 0 : day + 1;
+    startOfWeek.setDate(startOfWeek.getDate() - diffToSat);
+    const weekStartMs = startOfWeek.getTime();
+
+    const startOfMonth = new Date(startOfToday);
+    startOfMonth.setDate(1);
+    const monthStartMs = startOfMonth.getTime();
 
     return leads.filter((lead) => {
       if (filterCampaign !== "All campaigns" && lead.campaign !== filterCampaign) return false;
@@ -841,10 +852,9 @@ export default function PipelinePage() {
       }
       if (filterReceived !== "Any time") {
         if (!lead.rawCreatedAt) return false;
-        const diff = now - lead.rawCreatedAt;
-        if (filterReceived === "Today" && diff > oneDay) return false;
-        if (filterReceived === "This week" && diff > oneWeek) return false;
-        if (filterReceived === "This month" && diff > oneMonth) return false;
+        if (filterReceived === "Today" && lead.rawCreatedAt < todayStartMs) return false;
+        if (filterReceived === "This week" && lead.rawCreatedAt < weekStartMs) return false;
+        if (filterReceived === "This month" && lead.rawCreatedAt < monthStartMs) return false;
       }
       return true;
     });

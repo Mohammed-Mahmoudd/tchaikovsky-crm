@@ -202,7 +202,6 @@ export default function InboxPage() {
     setActiveChatId,
     assignableAgents,
     patchConversation,
-    markConversationAsRead,
     refresh,
     searchQuery,
     setSearchQuery,
@@ -226,9 +225,8 @@ export default function InboxPage() {
     if (activeChatId && activeChatId !== prevActiveChatId.current) {
       prevActiveChatId.current = activeChatId;
       setMobileView("chat");
-      markConversationAsRead(activeChatId);
     }
-  }, [activeChatId, markConversationAsRead]);
+  }, [activeChatId]);
 
   // ── Filter logic (memoized to avoid re-calculating on unrelated renders) ──
   const filteredConversations = useMemo(() => {
@@ -722,7 +720,6 @@ export default function InboxPage() {
     setActiveChatId(id);
     setMobileView("chat");
     setShowDetailsPanel(false);
-    markConversationAsRead(id);
   };
 
   const handleBackToList = () => {
@@ -1054,6 +1051,31 @@ export default function InboxPage() {
               onScroll={handleChatScroll}
               className="flex-1 overflow-y-auto p-4 md:p-6 flex flex-col gap-4"
             >
+              {activeConv.messages.length === 0 ? (
+                <div className="flex-1 flex flex-col items-center justify-center text-center px-4 py-12">
+                  <div
+                    className="max-w-sm w-full rounded-xl p-5"
+                    style={{ background: "var(--bg-card)", border: "1px solid var(--border-main)" }}
+                  >
+                    <p className="text-[13px] font-semibold mb-1" style={{ color: "var(--text-primary)" }}>
+                      {activeConv.leadName && activeConv.leadName !== activeConv.name
+                        ? `${activeConv.leadName} (${activeConv.name})`
+                        : activeConv.name}
+                    </p>
+                    <p className="text-[12px] leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+                      No messages in this conversation yet. Send a WhatsApp message below to start chatting with this lead.
+                    </p>
+                    {activeConv.notes && (
+                      <div
+                        className="mt-3 pt-3 text-left text-[11px] whitespace-pre-wrap"
+                        style={{ borderTop: "1px solid var(--border-main)", color: "var(--text-secondary)" }}
+                      >
+                        {activeConv.notes}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : null}
               {(() => {
                 const convPhone = extractPhoneFromConversation(activeConv);
                 return activeConv.messages.map((msg) => {

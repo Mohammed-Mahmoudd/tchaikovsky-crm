@@ -137,6 +137,57 @@ export type BadgeCounts = {
 
 export type AssignableAgent = { name: string; role: string; email?: string; avatar?: string; active?: boolean };
 
+export type CreateManualLeadInput = {
+  phone: string;
+  name?: string;
+  referralType?: string;
+  referredBy?: string;
+  agent?: string;
+  branch?: string;
+  notes?: string;
+  instrument?: string;
+};
+
+export type CreateManualLeadResult = {
+  ok: boolean;
+  conversationId: string;
+  existed: boolean;
+  error?: string;
+};
+
+const ARABIC_INDIC_DIGITS = "٠١٢٣٤٥٦٧٨٩";
+const PERSIAN_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
+
+export function normalizeWhatsAppPhone(raw: string): { digits: string; e164: string } | null {
+  if (!raw) return null;
+  const str = String(raw)
+    .replace(/[٠-٩]/g, (d) => String(ARABIC_INDIC_DIGITS.indexOf(d)))
+    .replace(/[۰-۹]/g, (d) => String(PERSIAN_DIGITS.indexOf(d)));
+  let d = str.replace(/\D/g, "");
+  if (!d) return null;
+
+  if (d.startsWith("00")) d = d.slice(2);
+
+  if (d.length === 11 && /^01[0125]/.test(d)) {
+    d = "20" + d.slice(1);
+  } else if (d.length === 10 && /^1[0125]/.test(d)) {
+    d = "20" + d;
+  } else if (d.length === 13 && /^2001[0125]/.test(d)) {
+    d = "20" + d.slice(3);
+  } else if (d.length === 10 && d.startsWith("05")) {
+    d = "966" + d.slice(1);
+  } else if (d.length === 9 && d.startsWith("5")) {
+    d = "966" + d;
+  } else if (d.length === 13 && d.startsWith("96605")) {
+    d = "966" + d.slice(4);
+  } else if (d.length === 13 && d.startsWith("97105")) {
+    d = "971" + d.slice(4);
+  }
+
+  if (d.length < 7 || d.length > 15) return null;
+  return { digits: d, e164: `+${d}` };
+}
+
 type CRMContextType = {
   conversations: Conversation[];
   loading: boolean;
@@ -147,6 +198,7 @@ type CRMContextType = {
   setActiveChatId: (id: string | null) => void;
   openChat: (id: string) => void;
   patchConversation: (id: string, updates: Partial<Record<string, any>>) => Promise<void>;
+  createManualLead: (input: CreateManualLeadInput) => Promise<CreateManualLeadResult>;
   markConversationAsRead: (id: string) => Promise<void>;
   refresh: () => Promise<void>;
   // Fix B: lets Pipeline pause the 3s poll during drag so it never races the PATCH
@@ -165,6 +217,28 @@ const CRMContext = createContext<CRMContextType | undefined>(undefined);
 
 const API = "/api";
 const CACHE_KEY = "crm_conversations_cache";
+const MANUAL_LEADS_KEY = "crm_manual_leads_v1";
+
+function getStoredManualLeads(): Record<string, Conversation> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(MANUAL_LEADS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        return parsed;
+      }
+    }
+  } catch {}
+  return {};
+}
+
+function persistManualLeads(map: Record<string, Conversation>) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(MANUAL_LEADS_KEY, JSON.stringify(map));
+  } catch {}
+}
 
 function getCachedConversations(): Conversation[] {
   if (typeof window === "undefined") return [];
@@ -222,6 +296,53 @@ function isReviewerAllowedConversation(c: any): boolean {
   const norm = (s: any) => (typeof s === "string" ? s.toLowerCase().trim() : "");
   const fields = [norm(c.name), norm(c.leadName), norm(c.profileName)];
   return REVIEWER_ALLOWED_NAMES.some((target) => fields.some((f) => f.includes(target)));
+}
+
+function isAutomatedTemplateMsg(m: Message): boolean {
+  if (m.senderName && m.senderName !== "Staff") return false;
+  const t = (m.text || "").trim();
+  if (
+    t === "Template" ||
+    t === "[Form / Template]" ||
+    t === "Form / Template" ||
+    /^Thanks,\s*you['’]re all set/i.test(t) ||
+    /Thank you for connecting with us/i.test(t) ||
+    /شكرًا، لقد أكملت/i.test(t)
+  ) {
+    return true;
+  }
+  if (Array.isArray(m.attachments) && m.attachments.length > 0) {
+    const first = m.attachments[0];
+    if (first && first.type === "template") {
+      const elements =
+        first.payload?.generic?.elements ||
+        first.payload?.button?.elements ||
+        first.payload?.elements ||
+        first.elements ||
+        [];
+      if (elements.length === 0) return true;
+      const firstTitle = elements[0]?.title || "";
+      if (/Thanks,\s*you['’]re all set|Thank you for connecting with us/i.test(firstTitle)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+export function computeUnreadFromMessages(messages?: Message[]): number {
+  if (!Array.isArray(messages) || messages.length === 0) return 0;
+  let count = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m) continue;
+    if (isAutomatedTemplateMsg(m)) continue;
+    if (!m.isIncoming) {
+      break;
+    }
+    count++;
+  }
+  return count;
 }
 
 export function CRMProvider({ children }: { children: React.ReactNode }) {
@@ -425,7 +546,18 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       agent: c.agent || "Unassigned",
       channel: (c.channel as Channel) || "FB",
       status: c.status || "Open",
-      unreadCount: c.unreadCount || 0,
+      unreadCount: (() => {
+        const rawUnread = Number(c.unreadCount) || 0;
+        if (rawUnread > 0) return rawUnread;
+        const hasText = Boolean(c.lastMessageText && String(c.lastMessageText).trim());
+        const isIncomingLast = c.lastMessageDirection === "incoming";
+        const lastMsgTs = Number(c.lastMessageAt) || 0;
+        const lastOutTs = Number(c.lastOutgoingAt) || 0;
+        if (hasText && isIncomingLast && (!lastOutTs || lastMsgTs > lastOutTs)) {
+          return 1;
+        }
+        return 0;
+      })(),
       windowLeft: "Active",
       pipeline: c.pipeline || "New",
       source: c.source || "direct",
@@ -522,6 +654,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   // Track pending optimistic updates so periodic background polling does not overwrite recently moved/updated leads
   const pendingPatchesRef = useRef<Map<string, { updates: Partial<Record<string, any>>; expiresAt: number }>>(new Map());
 
+  // Track recently created/opened manual leads so in-flight background polls can NEVER wipe them out before server sync settles
+  const recentlyCreatedRef = useRef<Map<string, { conv: Conversation; expiresAt: number }>>(new Map());
+  const deletedIdsRef = useRef<Set<string>>(new Set());
+
   // ── Slim bulk fetch — metadata only, never touches messages ──
   const fetchConversations = useCallback(async () => {
     // Fix B: skip this poll cycle if a drag is in progress or we're in the post-drop quiet window
@@ -533,38 +669,185 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       const json = await res.json();
       if (json.success && Array.isArray(json.data)) {
         const now = Date.now();
-        const currentActiveId = activeChatIdRef.current;
 
         const rawList = isMetaReviewer
           ? json.data.filter(isReviewerAllowedConversation)
           : json.data;
 
-        const parsed: Conversation[] = rawList.map((c: any) => {
-          const meta = normalizeConversationMeta(c);
-          const pending = pendingPatchesRef.current.get(meta.id);
-          if (pending) {
-            if (now > pending.expiresAt) {
-              pendingPatchesRef.current.delete(meta.id);
-            } else {
-              // Maintain optimistic updates so stale in-flight server poll data never reverts card position
-              return { ...meta, ...pending.updates, messages: messagesCacheRef.current.get(meta.id) || [] };
+        const parsed: Conversation[] = rawList
+          .filter((c: any) => !deletedIdsRef.current.has(String(c.senderId || c.id || "")))
+          .map((c: any) => {
+            const meta = normalizeConversationMeta(c);
+            const cachedMessages = messagesCacheRef.current.get(meta.id) || [];
+            const pending = pendingPatchesRef.current.get(meta.id);
+            if (pending) {
+              if (now > pending.expiresAt) {
+                pendingPatchesRef.current.delete(meta.id);
+              } else {
+                // Maintain optimistic updates so stale in-flight server poll data never reverts card position
+                const mergedMeta = {
+                  ...meta,
+                  ...pending.updates,
+                  lastMessageAt: Math.max(meta.lastMessageAt || 0, pending.updates.lastMessageAt || 0),
+                  messages: cachedMessages,
+                } as Conversation;
+                return mergedMeta;
+              }
+            }
+
+            // Always preserve cached messages — slim poll NEVER wipes them
+            const resolvedUnread =
+              cachedMessages.length > 0
+                ? computeUnreadFromMessages(cachedMessages)
+                : meta.unreadCount;
+            return {
+              ...meta,
+              unreadCount: resolvedUnread,
+              messages: cachedMessages,
+            } as Conversation;
+          });
+
+        // Merge any locally created manual leads or recently created leads not yet in the server response
+        if (!isMetaReviewer) {
+          const serverIds = new Set(parsed.map((c) => c.id));
+          const manualMap = getStoredManualLeads();
+          const manualKeys = Object.keys(manualMap);
+          if (manualKeys.length > 0) {
+            let manualChanged = false;
+            for (const mId of manualKeys) {
+              if (deletedIdsRef.current.has(mId)) {
+                delete manualMap[mId];
+                manualChanged = true;
+                continue;
+              }
+              const mConv = manualMap[mId];
+              const recentGuard = recentlyCreatedRef.current.get(mId);
+              const isStillProtected = Boolean(recentGuard && now <= recentGuard.expiresAt);
+              if (serverIds.has(mId)) {
+                // Only remove from local storage once the protection window has elapsed so overlapping stale polls never drop it
+                if (!isStillProtected) {
+                  delete manualMap[mId];
+                  manualChanged = true;
+                }
+              } else if (mConv) {
+                const pending = pendingPatchesRef.current.get(mId);
+                const effectiveConv =
+                  pending && now <= pending.expiresAt ? ({ ...mConv, ...pending.updates } as Conversation) : mConv;
+                parsed.unshift({
+                  ...effectiveConv,
+                  messages: messagesCacheRef.current.get(mId) || effectiveConv.messages || [],
+                });
+                serverIds.add(mId);
+              }
+            }
+            if (manualChanged) {
+              persistManualLeads(manualMap);
             }
           }
 
-          // Always preserve cached messages — slim poll NEVER wipes them
-          const cachedMessages = messagesCacheRef.current.get(meta.id) || [];
-          return {
-            ...meta,
-            // If this is the active chat, keep unreadCount at 0
-            unreadCount: meta.id === currentActiveId ? 0 : meta.unreadCount,
-            messages: cachedMessages,
-          } as Conversation;
-        });
-
-        setConversations(parsed);
-        if (!isMetaReviewer) {
-          persistConversationsCache(parsed);
+          // Also ensure any in-memory recentlyCreatedRef leads not yet in parsed stay at the top
+          for (const [rId, entry] of recentlyCreatedRef.current.entries()) {
+            if (now > entry.expiresAt || deletedIdsRef.current.has(rId)) {
+              recentlyCreatedRef.current.delete(rId);
+              continue;
+            }
+            if (!serverIds.has(rId)) {
+              const pending = pendingPatchesRef.current.get(rId);
+              const baseConv =
+                pending && now <= pending.expiresAt
+                  ? ({ ...entry.conv, ...pending.updates } as Conversation)
+                  : entry.conv;
+              parsed.unshift({
+                ...baseConv,
+                messages: messagesCacheRef.current.get(rId) || baseConv.messages || [],
+              });
+              serverIds.add(rId);
+            }
+          }
         }
+
+        // Keep conversations ordered newest-first after applying optimistic lastMessageAt updates
+        parsed.sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
+
+        setConversations((prev) => {
+          if (prev.length === 0) {
+            if (!isMetaReviewer) persistConversationsCache(parsed);
+            return parsed;
+          }
+
+          const prevById = new Map<string, Conversation>();
+          for (let i = 0; i < prev.length; i++) {
+            prevById.set(prev[i].id, prev[i]);
+          }
+
+          // Preserve any conversation from `prev` that is currently active or has an active optimistic guard
+          // if an in-flight poll resolved with a slightly older snapshot
+          const parsedIds = new Set(parsed.map((c) => c.id));
+          const currentActive = activeChatIdRef.current;
+          for (let i = 0; i < prev.length; i++) {
+            const oldC = prev[i];
+            if (parsedIds.has(oldC.id) || deletedIdsRef.current.has(oldC.id)) continue;
+            const hasRecentGuard =
+              (recentlyCreatedRef.current.get(oldC.id)?.expiresAt || 0) > now ||
+              (pendingPatchesRef.current.get(oldC.id)?.expiresAt || 0) > now ||
+              oldC.id === currentActive;
+            if (hasRecentGuard) {
+              parsed.unshift({
+                ...oldC,
+                messages: messagesCacheRef.current.get(oldC.id) || oldC.messages || [],
+              });
+              parsedIds.add(oldC.id);
+            }
+          }
+
+          parsed.sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
+
+          let anyChanged = prev.length !== parsed.length;
+          const merged = parsed.map((nextConv, idx) => {
+            const oldConv = prevById.get(nextConv.id);
+            if (!oldConv) {
+              anyChanged = true;
+              return nextConv;
+            }
+            if (prev[idx]?.id !== nextConv.id) {
+              anyChanged = true;
+            }
+            const isSame =
+              oldConv.updatedAt === nextConv.updatedAt &&
+              oldConv.lastMessageAt === nextConv.lastMessageAt &&
+              oldConv.lastMessageText === nextConv.lastMessageText &&
+              oldConv.unreadCount === nextConv.unreadCount &&
+              oldConv.pipeline === nextConv.pipeline &&
+              oldConv.agent === nextConv.agent &&
+              oldConv.status === nextConv.status &&
+              oldConv.name === nextConv.name &&
+              oldConv.leadName === nextConv.leadName &&
+              oldConv.phone === nextConv.phone &&
+              oldConv.branch === nextConv.branch &&
+              oldConv.auditionDate === nextConv.auditionDate &&
+              oldConv.auditionOutcome === nextConv.auditionOutcome &&
+              oldConv.followUpDate === nextConv.followUpDate &&
+              oldConv.followUpCompleted === nextConv.followUpCompleted &&
+              oldConv.cashIn === nextConv.cashIn &&
+              oldConv.notes === nextConv.notes &&
+              oldConv.messages === nextConv.messages;
+
+            if (isSame) {
+              return oldConv;
+            }
+            anyChanged = true;
+            return nextConv;
+          });
+
+          if (!anyChanged) {
+            return prev;
+          }
+
+          if (!isMetaReviewer) {
+            persistConversationsCache(merged);
+          }
+          return merged;
+        });
       }
     } catch (err) {
       console.error("CRMContext: failed to fetch conversations", err);
@@ -587,6 +870,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       const headers: Record<string, string> = {};
       if (token) headers["Authorization"] = `Bearer ${token}`;
       const res = await fetch(`${API}/messages/${chatId}`, { headers });
+      if (!res.ok) return;
       const json = await res.json();
       if (json.success && json.data) {
         const serverMessages = normalizeMessages(json.data.messages);
@@ -600,6 +884,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
         // Update the messages cache
         messagesCacheRef.current.set(chatId, newMessages);
+        const computedUnread = computeUnreadFromMessages(newMessages);
+        const pending = pendingPatchesRef.current.get(chatId);
+        const hasActivePending = Boolean(pending && Date.now() <= pending.expiresAt);
 
         // Merge into conversations state (touch active conversation's messages and metadata)
         setConversations((prev) =>
@@ -608,20 +895,30 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               ? {
                   ...c,
                   messages: newMessages,
-                  unreadCount: 0,
-                  lastMessageAt: json.data?.lastMessageAt || c.lastMessageAt,
-                  pipeline: json.data?.pipeline || c.pipeline,
-                  agent: json.data?.agent || c.agent,
-                  status: json.data?.status || c.status,
+                  unreadCount: computedUnread,
+                  lastMessageAt: Math.max(c.lastMessageAt || 0, json.data?.lastMessageAt || 0),
+                  pipeline: (hasActivePending && pending?.updates.pipeline) || json.data?.pipeline || c.pipeline,
+                  agent: (hasActivePending && pending?.updates.agent) || json.data?.agent || c.agent,
+                  status: (hasActivePending && pending?.updates.status) || json.data?.status || c.status,
                 }
               : c
           )
         );
+
+        if (!isReadOnly && (json.data?.unreadCount || 0) !== computedUnread) {
+          const patchHeaders: Record<string, string> = { "Content-Type": "application/json" };
+          if (token) patchHeaders["Authorization"] = `Bearer ${token}`;
+          fetch(`${API}/messages/${chatId}`, {
+            method: "PATCH",
+            headers: patchHeaders,
+            body: JSON.stringify({ unreadCount: computedUnread }),
+          }).catch(() => {});
+        }
       }
     } catch (err) {
       console.error("CRMContext: failed to fetch active chat", err);
     }
-  }, [normalizeMessages]);
+  }, [normalizeMessages, isMetaReviewer, token, isReadOnly]);
 
   // ── Reset state when auth token changes (e.g. after sign-out → sign-in) ──
   // Without this, remounting after login can leave stale empty data if the
@@ -644,6 +941,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         }
         messagesCacheRef.current.clear();
         pendingPatchesRef.current.clear();
+        recentlyCreatedRef.current.clear();
+        deletedIdsRef.current.clear();
         fetchConversations();
       } else {
         // Logged out: clear data and cache
@@ -651,6 +950,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         setActiveChatId(null);
         messagesCacheRef.current.clear();
         pendingPatchesRef.current.clear();
+        recentlyCreatedRef.current.clear();
+        deletedIdsRef.current.clear();
         initialLoadDone.current = false;
         setLoading(true);
         try {
@@ -697,11 +998,15 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               // 1. Update conversations list instantly
               setConversations((prev) => {
                 const idx = prev.findIndex((c) => c.id === conversationId);
-                const targetUnread = conversationId === currentActiveId || isOutgoing ? 0 : (remoteConv?.unreadCount ?? 1);
                 const targetPipeline = remoteConv?.pipeline || (isOutgoing ? "Contacted" : undefined);
 
                 if (idx >= 0) {
                   const existing = prev[idx];
+                  const targetUnread = isOutgoing
+                    ? 0
+                    : remoteConv?.unreadCount && remoteConv.unreadCount > 0
+                    ? remoteConv.unreadCount
+                    : (existing.unreadCount || 0) + 1;
                   const updated: Conversation = {
                     ...existing,
                     // Never move backwards (history-synced/late messages must not rewind it)
@@ -805,11 +1110,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   );
                 }
                 messagesCacheRef.current.set(conversationId, updatedMessages);
+                const nextUnread = isOutgoing ? 0 : computeUnreadFromMessages(updatedMessages);
 
                 setConversations((prev) =>
                   prev.map((c) =>
                     c.id === conversationId
-                      ? { ...c, messages: updatedMessages, unreadCount: 0 }
+                      ? { ...c, messages: updatedMessages, unreadCount: nextUnread }
                       : c
                   )
                 );
@@ -817,17 +1123,29 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             } else if (payload.type === "conversation_updated" && payload.data) {
               const { conversationId, conversation: remoteConv } = payload.data;
               if (!conversationId || !remoteConv) return;
+              if (deletedIdsRef.current.has(conversationId)) return;
               setConversations((prev) => {
                 const exists = prev.some((c) => c.id === conversationId);
                 if (!exists) {
                   return [{ ...normalizeConversationMeta(remoteConv), messages: [] }, ...prev];
                 }
+                const pending = pendingPatchesRef.current.get(conversationId);
+                const hasPending = Boolean(pending && Date.now() <= pending.expiresAt);
                 return prev.map((c) => {
                   if (c.id !== conversationId) return c;
+                  const norm = normalizeConversationMeta(remoteConv);
+                  const cachedMsgs = messagesCacheRef.current.get(conversationId) || c.messages || [];
                   return {
                     ...c,
-                    ...normalizeConversationMeta(remoteConv),
-                    messages: c.messages,
+                    ...norm,
+                    ...(hasPending ? pending?.updates : {}),
+                    lastMessageAt: Math.max(
+                      c.lastMessageAt || 0,
+                      norm.lastMessageAt || 0,
+                      hasPending ? pending?.updates.lastMessageAt || 0 : 0
+                    ),
+                    unreadCount: cachedMsgs.length > 0 ? computeUnreadFromMessages(cachedMsgs) : norm.unreadCount,
+                    messages: cachedMsgs,
                   };
                 });
               });
@@ -835,7 +1153,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               const { conversationId } = payload.data;
               if (conversationId) {
                 setConversations((prev) =>
-                  prev.map((c) => (c.id === conversationId ? { ...c, unreadCount: 0 } : c))
+                  prev.map((c) => {
+                    if (c.id !== conversationId) return c;
+                    const cachedMsgs = messagesCacheRef.current.get(conversationId) || c.messages || [];
+                    const computed = cachedMsgs.length > 0 ? computeUnreadFromMessages(cachedMsgs) : 0;
+                    return { ...c, unreadCount: computed };
+                  })
                 );
               }
             } else if (payload.type === "message_status" && payload.data) {
@@ -1098,6 +1421,97 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       clearTimeout(timer);
     };
   }, [activeChatId, fetchActiveChat]);
+
+  // ── Reconcile exact unread message counts for conversations opened without a staff reply ──
+  const reconciledUnreadRef = useRef<Set<string>>(new Set());
+  const syncStatesTriggeredRef = useRef(false);
+
+  useEffect(() => {
+    if (syncStatesTriggeredRef.current || isMetaReviewer) return;
+    syncStatesTriggeredRef.current = true;
+    fetch(`${API}/messages/sync-states`, { method: "POST" })
+      .then(() => fetchConversations())
+      .catch(() => {});
+  }, [isMetaReviewer, fetchConversations]);
+
+  useEffect(() => {
+    if (conversations.length === 0) return;
+
+    const candidates = conversations.filter((c) => {
+      const key = `${c.id}_${c.lastMessageAt || 0}`;
+      if (reconciledUnreadRef.current.has(key)) return false;
+      if ((messagesCacheRef.current.get(c.id)?.length || 0) > 0) {
+        reconciledUnreadRef.current.add(key);
+        return false;
+      }
+      return (
+        c.lastMessageDirection === "incoming" ||
+        c.pipeline === "New" ||
+        (c.unreadCount || 0) > 0
+      );
+    });
+
+    if (candidates.length === 0) return;
+
+    let cancelled = false;
+    const batch = candidates.slice(0, 6);
+    batch.forEach((c) => reconciledUnreadRef.current.add(`${c.id}_${c.lastMessageAt || 0}`));
+
+    (async () => {
+      const updatesMap = new Map<string, { messages: Message[]; unreadCount: number }>();
+      const headers: Record<string, string> = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+
+      await Promise.all(
+        batch.map(async (conv) => {
+          try {
+            const res = await fetch(`${API}/messages/${conv.id}`, { headers });
+            if (!res.ok) return;
+            const json = await res.json();
+            if (!json?.success || !json?.data) return;
+            const msgs = normalizeMessages(json.data.messages);
+            messagesCacheRef.current.set(conv.id, msgs);
+            const exactUnread = computeUnreadFromMessages(msgs);
+            updatesMap.set(conv.id, { messages: msgs, unreadCount: exactUnread });
+
+            if (!isReadOnly && (json.data.unreadCount || 0) !== exactUnread) {
+              fetch(`${API}/messages/${conv.id}`, {
+                method: "PATCH",
+                headers: { ...headers, "Content-Type": "application/json" },
+                body: JSON.stringify({ unreadCount: exactUnread }),
+              }).catch(() => {});
+            }
+          } catch {}
+        })
+      );
+
+      if (cancelled || updatesMap.size === 0) return;
+
+      setConversations((prev) => {
+        let changed = false;
+        const next = prev.map((c) => {
+          const item = updatesMap.get(c.id);
+          if (!item) return c;
+          if ((c.unreadCount || 0) === item.unreadCount && c.messages.length === item.messages.length) {
+            return c;
+          }
+          changed = true;
+          return {
+            ...c,
+            messages: item.messages,
+            unreadCount: item.unreadCount,
+          };
+        });
+        if (!changed) return prev;
+        if (!isMetaReviewer) persistConversationsCache(next);
+        return next;
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [conversations, token, normalizeMessages, isReadOnly, isMetaReviewer]);
 
   // Scoped view for Meta Reviewer test account (test@meta.com)
   const visibleConversations = useMemo(() => {
@@ -1433,11 +1847,23 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         return next;
       });
 
-      // Fix A: raise TTL to 30s
+      // Fix A: raise TTL to 30s and merge with any existing pending optimistic fields
+      const existingPending = pendingPatchesRef.current.get(id);
       pendingPatchesRef.current.set(id, {
-        updates: patchPayload,
+        updates: {
+          ...(existingPending ? existingPending.updates : {}),
+          ...patchPayload,
+        },
         expiresAt: Date.now() + 30000,
       });
+
+      const recentEntry = recentlyCreatedRef.current.get(id);
+      if (recentEntry) {
+        recentlyCreatedRef.current.set(id, {
+          conv: { ...recentEntry.conv, ...patchPayload } as Conversation,
+          expiresAt: Date.now() + 60000,
+        });
+      }
 
       // 3. Persist to API
       try {
@@ -1448,7 +1874,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           headers,
           body: JSON.stringify(patchPayload),
         });
-        const json = await res.json();
+        const json = await res.json().catch(() => null);
         if (json && json.success) {
           // Fix C: on confirmed write, immediately merge the server-confirmed data
           // into state so the next poll cannot revert it (the source of truth is now
@@ -1458,15 +1884,31 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             setConversations((prev) => {
               const next = prev.map((c) =>
                 c.id === id
-                  ? ({ ...confirmed, messages: c.messages } as Conversation) // keep loaded messages
+                  ? ({
+                      ...confirmed,
+                      lastMessageAt: Math.max(confirmed.lastMessageAt || 0, c.lastMessageAt || 0),
+                      pipeline:
+                        c.pipeline !== "New" && confirmed.pipeline === "New"
+                          ? c.pipeline
+                          : confirmed.pipeline,
+                      messages: c.messages,
+                    } as Conversation) // keep loaded messages & newer message timestamps
                   : c
               );
               persistConversationsCache(next);
               return next;
             });
           }
-          // Safe to clear the pending guard now — server confirmed the write
-          pendingPatchesRef.current.delete(id);
+          // Keep a short 5s post-write guard in case an older slim poll is already in-flight
+          const currentPending = pendingPatchesRef.current.get(id);
+          if (currentPending) {
+            pendingPatchesRef.current.set(id, {
+              updates: currentPending.updates,
+              expiresAt: Date.now() + 5000,
+            });
+          }
+        } else if (res.status === 404 && recentlyCreatedRef.current.has(id)) {
+          // Brand-new manual lead whose POST /api/messages/manual is still in-flight; keep optimistic state
         } else {
           // Server rejected the patch (e.g. 403 Forbidden or 409 Conflict): rollback
           pendingPatchesRef.current.delete(id);
@@ -1499,43 +1941,318 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     [isReadOnly, token, normalizeConversationMeta]
   );
 
-  // Mark as read in UI and backend (only PATCH if unreadCount was actually > 0 so updatedAt is never clobbered)
-  const markConversationAsRead = useCallback(async (id: string) => {
-    let hadUnread = false;
-    setConversations((prev) =>
-      prev.map((c) => {
-        if (c.id === id) {
-          if ((c.unreadCount || 0) > 0) hadUnread = true;
-          return { ...c, unreadCount: 0 };
-        }
-        return c;
-      })
-    );
-    if (!hadUnread) return;
-    try {
-      await fetch(`${API}/messages/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ unreadCount: 0 }),
-      });
-    } catch (err) {
-      console.error("Failed to mark as read:", err);
-    }
+  // Unread count is only cleared when a staff member replies (never on chat selection)
+  const markConversationAsRead = useCallback(async (_id: string) => {
+    // Intentionally a no-op on chat open so entering a conversation by mistake
+    // preserves the blue unread message count until a reply is sent.
   }, []);
 
   // 1-Click navigation from any page to open that user's chat in Inbox
   const openChat = useCallback(
     (id: string) => {
+      activeChatIdRef.current = id;
       setActiveChatId(id);
+      setSearchQuery("");
       router.push("/");
     },
     [router]
   );
 
+  // Instant 0ms manual WhatsApp lead creation (e.g. Student / Instructor referral)
+  const createManualLead = useCallback(
+    async (input: CreateManualLeadInput): Promise<CreateManualLeadResult> => {
+      if (isReadOnly) {
+        return { ok: false, conversationId: "", existed: false, error: "View-only account cannot create leads." };
+      }
+
+      const normalized = normalizeWhatsAppPhone(input.phone);
+      if (!normalized) {
+        return {
+          ok: false,
+          conversationId: "",
+          existed: false,
+          error: "Enter a valid WhatsApp phone number (e.g. 01012345678 or +201012345678).",
+        };
+      }
+
+      const { digits: senderId, e164: e164Phone } = normalized;
+      deletedIdsRef.current.delete(senderId);
+
+      const cleanName = (input.name || "").trim();
+      const cleanReferralType = (input.referralType || "").trim() || "Student Referral";
+      const cleanReferredBy = (input.referredBy || "").trim();
+      const cleanBranch = (input.branch || "").trim();
+      const cleanInstrument = (input.instrument || "").trim();
+      const rawNotes = (input.notes || "").trim();
+
+      const noteParts: string[] = [];
+      if (cleanReferredBy) {
+        noteParts.push(`Referred by: ${cleanReferredBy} (${cleanReferralType})`);
+      }
+      if (cleanInstrument) {
+        noteParts.push(`Instrument: ${cleanInstrument}`);
+      }
+      if (rawNotes) {
+        noteParts.push(rawNotes);
+      }
+      const combinedNotes = noteParts.join("\n");
+
+      const now = Date.now();
+      const nowIso = new Date(now).toISOString();
+      const actorName = (user?.name || input.agent || "Staff").trim();
+      const actorRole = user?.role || "";
+      const resolvedAgent = (input.agent || "").trim() || "Unassigned";
+
+      // Check if lead already exists in current conversations state
+      const existingConv = conversations.find(
+        (c) =>
+          c.id === senderId ||
+          c.phone === e164Phone ||
+          c.formPhone === senderId ||
+          (c.phone && normalizeWhatsAppPhone(c.phone)?.digits === senderId)
+      );
+
+      if (existingConv) {
+        const targetId = existingConv.id;
+        deletedIdsRef.current.delete(targetId);
+        const updates: Record<string, any> = {
+          lastMessageAt: Math.max(existingConv.lastMessageAt || 0, now),
+        };
+        if (cleanName && !existingConv.leadName) {
+          updates.leadName = cleanName;
+          updates.name = cleanName;
+        }
+        if (
+          resolvedAgent !== "Unassigned" &&
+          (!existingConv.agent || existingConv.agent === "Unassigned")
+        ) {
+          updates.agent = resolvedAgent;
+        }
+        if (cleanBranch && !existingConv.branch) {
+          updates.branch = cleanBranch;
+        }
+        if (combinedNotes) {
+          const prevNotes = (existingConv.notes || "").trim();
+          if (!prevNotes) {
+            updates.notes = combinedNotes;
+          } else if (!prevNotes.includes(combinedNotes)) {
+            updates.notes = `${prevNotes}\n${combinedNotes}`;
+          }
+        }
+        const mergedExisting: Conversation = {
+          ...existingConv,
+          ...updates,
+        };
+        recentlyCreatedRef.current.set(targetId, {
+          conv: mergedExisting,
+          expiresAt: Date.now() + 60000,
+        });
+        setConversations((prev) => {
+          const rest = prev.filter((c) => c.id !== targetId);
+          const next = [mergedExisting, ...rest];
+          persistConversationsCache(next);
+          return next;
+        });
+        if (Object.keys(updates).length > 0) {
+          patchConversation(targetId, updates);
+        }
+        return { ok: true, conversationId: targetId, existed: true };
+      }
+
+      // Build 0ms optimistic conversation
+      const initialActivities: ActivityLogEntry[] = [
+        {
+          id: `act_${now}_manual`,
+          type: "note_updated",
+          actor: actorName,
+          actorRole,
+          summary: `Added manual lead (${cleanReferralType})`,
+          detail: cleanReferredBy ? `Referred by ${cleanReferredBy}` : e164Phone,
+          fromValue: "",
+          toValue: cleanName || e164Phone,
+          timestamp: now,
+        },
+      ];
+
+      if (resolvedAgent !== "Unassigned") {
+        initialActivities.unshift({
+          id: `act_${now}_agent`,
+          type: "lead_assigned",
+          actor: actorName,
+          actorRole,
+          summary: `Assigned to ${resolvedAgent}`,
+          detail: "Assigned on manual lead creation",
+          fromValue: "Unassigned",
+          toValue: resolvedAgent,
+          timestamp: now + 1,
+        });
+      }
+
+      const sourceObj = {
+        campaign: cleanReferralType,
+        adset: cleanReferredBy ? `Referred by: ${cleanReferredBy}` : "Manual Lead",
+        ad: "WhatsApp Manual Lead",
+        activityLog: initialActivities,
+      };
+
+      const optimisticConv: Conversation = {
+        id: senderId,
+        name: e164Phone,
+        profileName: cleanName || undefined,
+        leadName: cleanName || undefined,
+        formPhone: senderId,
+        phone: e164Phone,
+        agent: resolvedAgent,
+        channel: "WA",
+        status: "Open",
+        unreadCount: 0,
+        windowLeft: "Active",
+        pipeline: "New",
+        source: sourceObj,
+        notes: combinedNotes,
+        branch: cleanBranch,
+        formAnswers: cleanInstrument ? { instrument: cleanInstrument } : {},
+        activityLog: initialActivities,
+        messages: [],
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        lastMessageAt: now,
+      };
+
+      // 1. Insert optimistically in 0ms and protect against in-flight background polls
+      const manualMap = getStoredManualLeads();
+      manualMap[senderId] = optimisticConv;
+      persistManualLeads(manualMap);
+
+      recentlyCreatedRef.current.set(senderId, {
+        conv: optimisticConv,
+        expiresAt: Date.now() + 60000,
+      });
+
+      pendingPatchesRef.current.set(senderId, {
+        updates: optimisticConv,
+        expiresAt: Date.now() + 30000,
+      });
+
+      setConversations((prev) => {
+        const rest = prev.filter((c) => c.id !== senderId);
+        const next = [optimisticConv, ...rest];
+        persistConversationsCache(next);
+        return next;
+      });
+
+      // 2. Persist to backend in background
+      try {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+
+        const res = await fetch(`${API}/messages/manual`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            phone: e164Phone,
+            name: cleanName || undefined,
+            referralType: cleanReferralType,
+            referredBy: cleanReferredBy || undefined,
+            agent: resolvedAgent,
+            branch: cleanBranch || undefined,
+            notes: rawNotes || undefined,
+            instrument: cleanInstrument || undefined,
+          }),
+        });
+
+        if (res.ok) {
+          const json = await res.json().catch(() => null);
+          if (json?.success && json?.data) {
+            const confirmed = normalizeConversationMeta(json.data);
+            const confirmedId = confirmed.id || senderId;
+            const cachedMsgs = messagesCacheRef.current.get(confirmedId) || [];
+            const existingPending = pendingPatchesRef.current.get(confirmedId);
+
+            const confirmedConv: Conversation = {
+              ...optimisticConv,
+              ...confirmed,
+              ...(existingPending ? existingPending.updates : {}),
+              lastMessageAt: Math.max(
+                confirmed.lastMessageAt || 0,
+                optimisticConv.lastMessageAt || 0,
+                existingPending?.updates.lastMessageAt || 0
+              ),
+              messages: cachedMsgs,
+            };
+
+            // Keep in manualMap and recentlyCreatedRef so any overlapping in-flight slim poll
+            // that started before the DB write completed can NEVER drop the conversation card!
+            const currentManual = getStoredManualLeads();
+            currentManual[confirmedId] = confirmedConv;
+            persistManualLeads(currentManual);
+
+            recentlyCreatedRef.current.set(confirmedId, {
+              conv: confirmedConv,
+              expiresAt: Date.now() + 60000,
+            });
+
+            pendingPatchesRef.current.set(confirmedId, {
+              updates: confirmedConv,
+              expiresAt: Date.now() + 15000,
+            });
+
+            setConversations((prev) => {
+              const existingIdx = prev.findIndex((c) => c.id === confirmedId || c.id === senderId);
+              let next: Conversation[];
+              if (existingIdx >= 0) {
+                const prevItem = prev[existingIdx];
+                const mergedItem: Conversation = {
+                  ...confirmedConv,
+                  lastMessageAt: Math.max(confirmedConv.lastMessageAt || 0, prevItem.lastMessageAt || 0),
+                  pipeline: prevItem.pipeline !== "New" ? prevItem.pipeline : confirmedConv.pipeline,
+                  messages:
+                    cachedMsgs.length > 0
+                      ? cachedMsgs
+                      : prevItem.messages && prevItem.messages.length > 0
+                      ? prevItem.messages
+                      : [],
+                };
+                next = prev.map((c, idx) => (idx === existingIdx ? mergedItem : c));
+              } else {
+                next = [confirmedConv, ...prev];
+              }
+              next.sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
+              persistConversationsCache(next);
+              return next;
+            });
+            return {
+              ok: true,
+              conversationId: confirmedId,
+              existed: Boolean(json.existed),
+            };
+          }
+        }
+      } catch (err) {
+        console.warn("Manual lead background sync notice:", err);
+      }
+
+      return { ok: true, conversationId: senderId, existed: false };
+    },
+    [isReadOnly, user, conversations, patchConversation, token, normalizeConversationMeta]
+  );
+
   const deleteConversation = useCallback(
     async (senderId: string) => {
       try {
-        setConversations((prev) => prev.filter((c) => c.id !== senderId));
+        deletedIdsRef.current.add(senderId);
+        recentlyCreatedRef.current.delete(senderId);
+        pendingPatchesRef.current.delete(senderId);
+        const manualMap = getStoredManualLeads();
+        if (manualMap[senderId]) {
+          delete manualMap[senderId];
+          persistManualLeads(manualMap);
+        }
+        setConversations((prev) => {
+          const next = prev.filter((c) => c.id !== senderId);
+          persistConversationsCache(next);
+          return next;
+        });
         messagesCacheRef.current.delete(senderId);
         if (activeChatIdRef.current === senderId) {
           setActiveChatId(null);
@@ -1553,6 +2270,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
   const clearWhatsAppConversations = useCallback(async () => {
     try {
+      persistManualLeads({});
+      recentlyCreatedRef.current.clear();
       setConversations((prev) => prev.filter((c) => c.channel !== "WA"));
       const active = conversations.find((c) => c.id === activeChatIdRef.current);
       if (active?.channel === "WA") {
@@ -1710,19 +2429,62 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     messagesCacheRef.current.set(chatId, nextCached);
 
     const now = Date.now();
+    const lastText = msgs[msgs.length - 1]?.text || "";
+
+    const existingPatch = pendingPatchesRef.current.get(chatId);
+    pendingPatchesRef.current.set(chatId, {
+      updates: {
+        ...(existingPatch ? existingPatch.updates : {}),
+        lastMessageAt: now,
+        lastOutgoingAt: now,
+        lastMessageDirection: "outgoing",
+        lastMessageText: lastText,
+        unreadCount: 0,
+      },
+      expiresAt: now + 30000,
+    });
+
+    const recentEntry = recentlyCreatedRef.current.get(chatId);
+    if (recentEntry) {
+      recentlyCreatedRef.current.set(chatId, {
+        conv: {
+          ...recentEntry.conv,
+          lastMessageAt: Math.max(recentEntry.conv.lastMessageAt || 0, now),
+          lastOutgoingAt: now,
+          lastMessageDirection: "outgoing",
+          lastMessageText: lastText || recentEntry.conv.lastMessageText,
+          unreadCount: 0,
+          pipeline: recentEntry.conv.pipeline === "New" ? "Contacted" : recentEntry.conv.pipeline,
+          messages: nextCached,
+        },
+        expiresAt: now + 60000,
+      });
+    }
+
     setConversations((prev) => {
       const idx = prev.findIndex((c) => c.id === chatId);
-      if (idx < 0) return prev;
-      const target = prev[idx];
+      const fallbackBase =
+        idx >= 0 ? prev[idx] : recentEntry?.conv || getStoredManualLeads()[chatId];
+      if (!fallbackBase) return prev;
+      const nextPipeline = fallbackBase.pipeline === "New" ? "Contacted" : fallbackBase.pipeline;
       const updated: Conversation = {
-        ...target,
-        messages: [...(target.messages || []), ...msgs],
-        lastMessageAt: Math.max(target.lastMessageAt || 0, now),
+        ...fallbackBase,
+        messages: nextCached,
+        lastMessageAt: Math.max(fallbackBase.lastMessageAt || 0, now),
+        lastOutgoingAt: now,
+        lastMessageDirection: "outgoing",
+        lastMessageText: lastText || fallbackBase.lastMessageText,
         unreadCount: 0,
-        pipeline: target.pipeline === "New" ? "Contacted" : target.pipeline,
+        pipeline: nextPipeline,
       };
-      const rest = prev.filter((_, i) => i !== idx);
-      return [updated, ...rest];
+      const curPatch = pendingPatchesRef.current.get(chatId);
+      if (curPatch) {
+        curPatch.updates.pipeline = nextPipeline;
+      }
+      const rest = idx >= 0 ? prev.filter((_, i) => i !== idx) : prev;
+      const next = [updated, ...rest];
+      persistConversationsCache(next);
+      return next;
     });
   }, []);
 
@@ -1777,8 +2539,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           ? confirmedRawMessages[confirmedRawMessages.length - 1]
           : null;
 
-      setConversations((prev) =>
-        prev.map((c) => {
+      setConversations((prev) => {
+        const next = prev.map((c) => {
           if (c.id !== chatId) return c;
           let nextLog = c.activityLog || [];
           if (newestConfirmed && newestConfirmed.senderName) {
@@ -1799,18 +2561,60 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               ].slice(0, 120);
             }
           }
+          const confirmedTs = newestConfirmed ? (newestConfirmed.timestamp || Date.now()) : 0;
           return {
             ...c,
             messages: nextMessages,
-            lastOutgoingAt: newestConfirmed?.timestamp || Date.now(),
-            lastMessageDirection: "outgoing",
+            unreadCount: newestConfirmed ? 0 : computeUnreadFromMessages(nextMessages),
+            lastMessageAt: Math.max(c.lastMessageAt || 0, confirmedTs),
+            lastOutgoingAt: newestConfirmed ? confirmedTs : c.lastOutgoingAt,
+            lastMessageDirection: newestConfirmed ? "outgoing" : c.lastMessageDirection,
             lastMessageText: newestConfirmed?.text || c.lastMessageText,
             activityLog: nextLog,
           };
-        })
-      );
+        });
+        persistConversationsCache(next);
+        return next;
+      });
+
+      // If this was a locally stored manual lead and a message was just confirmed on the server,
+      // ensure the manual lead metadata (leadName, source, notes, branch, agent) is synced to the server
+      // while keeping the local entry protected until the protection window expires.
+      if (newestConfirmed) {
+        const manualMap = getStoredManualLeads();
+        const pendingManual = manualMap[chatId] as (Conversation & { _syncedMeta?: boolean }) | undefined;
+        if (pendingManual && !pendingManual._syncedMeta) {
+          pendingManual._syncedMeta = true;
+          manualMap[chatId] = pendingManual;
+          persistManualLeads(manualMap);
+
+          const syncUpdates: Record<string, any> = {};
+          if (pendingManual.leadName) {
+            syncUpdates.name = pendingManual.leadName;
+            syncUpdates.leadName = pendingManual.leadName;
+          }
+          if (pendingManual.source && pendingManual.source !== "direct") {
+            syncUpdates.source = pendingManual.source;
+          }
+          if (pendingManual.notes) {
+            syncUpdates.notes = pendingManual.notes;
+          }
+          if (pendingManual.branch) {
+            syncUpdates.branch = pendingManual.branch;
+          }
+          if (pendingManual.formAnswers && Object.keys(pendingManual.formAnswers).length > 0) {
+            syncUpdates.formAnswers = pendingManual.formAnswers;
+          }
+          if (pendingManual.agent && pendingManual.agent !== "Unassigned") {
+            syncUpdates.agent = pendingManual.agent;
+          }
+          if (Object.keys(syncUpdates).length > 0) {
+            patchConversation(chatId, syncUpdates);
+          }
+        }
+      }
     },
-    []
+    [patchConversation]
   );
 
   return (
@@ -1825,6 +2629,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         setActiveChatId,
         openChat,
         patchConversation,
+        createManualLead,
         markConversationAsRead,
         refresh: fetchConversations,
         setPollPaused,
