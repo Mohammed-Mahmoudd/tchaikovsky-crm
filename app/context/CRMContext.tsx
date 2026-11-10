@@ -245,11 +245,13 @@ function persistManualLeads(map: Record<string, Conversation>) {
   } catch {}
 }
 
-function slimConversationsForStorage(convs: Conversation[], limit: number): Conversation[] {
-  return convs.slice(0, limit).map((c) => ({
+function slimConversationsForStorage(convs: Conversation[], limit?: number): Conversation[] {
+  const sourceList = typeof limit === "number" ? convs.slice(0, limit) : convs;
+  return sourceList.map((c) => ({
     ...c,
     messages: [],
-    activityLog: Array.isArray(c.activityLog) ? c.activityLog.slice(0, 15) : [],
+    activityLog: [],
+    lastMessageText: c.lastMessageText && c.lastMessageText.length > 160 ? c.lastMessageText.slice(0, 160) : c.lastMessageText,
     source:
       c.source && typeof c.source === "object"
         ? { ...c.source, activityLog: undefined }
@@ -276,7 +278,7 @@ function getCachedConversations(): Conversation[] {
       localStorage.removeItem(LEGACY_CACHE_KEY);
       const legacyParsed = JSON.parse(legacyRaw);
       if (Array.isArray(legacyParsed) && legacyParsed.length > 0) {
-        const migrated = slimConversationsForStorage(legacyParsed, 250);
+        const migrated = slimConversationsForStorage(legacyParsed);
         try {
           localStorage.setItem(CACHE_KEY, JSON.stringify(migrated));
         } catch {}
@@ -303,11 +305,11 @@ function persistConversationsCache(convs: Conversation[]) {
     if (!snapshot) return;
     try {
       localStorage.removeItem(LEGACY_CACHE_KEY);
-      const slimmed = slimConversationsForStorage(snapshot, 250);
+      const slimmed = slimConversationsForStorage(snapshot);
       localStorage.setItem(CACHE_KEY, JSON.stringify(slimmed));
     } catch {
       try {
-        const fallbackSlim = slimConversationsForStorage(snapshot, 100);
+        const fallbackSlim = slimConversationsForStorage(snapshot, 1000);
         localStorage.setItem(CACHE_KEY, JSON.stringify(fallbackSlim));
       } catch {}
     }
@@ -734,15 +736,21 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       if (token) headers["Authorization"] = `Bearer ${token}`;
       const canUseDeltaRev =
         lastServerRevRef.current > 0 &&
-        conversationsRef.current.length > 0 &&
+        conversationsRef.current.length > 250 &&
         pendingPatchesRef.current.size === 0 &&
         recentlyCreatedRef.current.size === 0;
       const revQuery = canUseDeltaRev ? `&rev=${lastServerRevRef.current}` : "";
-      const res = await fetch(`${API}/messages?slim=1${revQuery}`, {
+      let res = await fetch(`${API}/messages?slim=1${revQuery}`, {
         headers,
         cache: "no-store",
-      });
-      if (!res.ok) return;
+      }).catch(() => null);
+      if (!res || !res.ok) {
+        res = await fetch(`https://api.tchaikovskyschool.com/crm-api/messages?slim=1${revQuery}`, {
+          headers,
+          cache: "no-store",
+        }).catch(() => null);
+      }
+      if (!res || !res.ok) return;
       const json = await res.json().catch(() => null);
       if (json?.unchanged === true) {
         return;
@@ -1654,97 +1662,6 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       clearTimeout(timer);
     };
   }, [activeChatId, fetchActiveChat]);
-
-  // ── Reconcile exact unread message counts for conversations opened without a staff reply ──
-  const reconciledUnreadRef = useRef<Set<string>>(new Set());
-  const syncStatesTriggeredRef = useRef(false);
-
-  useEffect(() => {
-    if (syncStatesTriggeredRef.current || isMetaReviewer) return;
-    syncStatesTriggeredRef.current = true;
-    fetch(`${API}/messages/sync-states`, { method: "POST" })
-      .then(() => fetchConversations())
-      .catch(() => {});
-  }, [isMetaReviewer, fetchConversations]);
-
-  useEffect(() => {
-    if (conversations.length === 0) return;
-
-    const candidates = conversations.filter((c) => {
-      const key = `${c.id}_${c.lastMessageAt || 0}`;
-      if (reconciledUnreadRef.current.has(key)) return false;
-      if ((messagesCacheRef.current.get(c.id)?.length || 0) > 0) {
-        reconciledUnreadRef.current.add(key);
-        return false;
-      }
-      return (
-        c.lastMessageDirection === "incoming" ||
-        c.pipeline === "New" ||
-        (c.unreadCount || 0) > 0
-      );
-    });
-
-    if (candidates.length === 0) return;
-
-    let cancelled = false;
-    const batch = candidates.slice(0, 6);
-    batch.forEach((c) => reconciledUnreadRef.current.add(`${c.id}_${c.lastMessageAt || 0}`));
-
-    (async () => {
-      const updatesMap = new Map<string, { messages: Message[]; unreadCount: number }>();
-      const headers: Record<string, string> = {};
-      if (token) headers["Authorization"] = `Bearer ${token}`;
-
-      await Promise.all(
-        batch.map(async (conv) => {
-          try {
-            const res = await fetch(`${API}/messages/${conv.id}`, { headers });
-            if (!res.ok) return;
-            const json = await res.json().catch(() => null);
-            if (!json?.success || !json?.data) return;
-            const msgs = normalizeMessages(json.data.messages);
-            messagesCacheRef.current.set(conv.id, msgs);
-            const exactUnread = computeUnreadFromMessages(msgs);
-            updatesMap.set(conv.id, { messages: msgs, unreadCount: exactUnread });
-
-            if (!isReadOnly && (json.data.unreadCount || 0) !== exactUnread) {
-              fetch(`${API}/messages/${conv.id}`, {
-                method: "PATCH",
-                headers: { ...headers, "Content-Type": "application/json" },
-                body: JSON.stringify({ unreadCount: exactUnread }),
-              }).catch(() => {});
-            }
-          } catch {}
-        })
-      );
-
-      if (cancelled || updatesMap.size === 0) return;
-
-      setConversations((prev) => {
-        let changed = false;
-        const next = prev.map((c) => {
-          const item = updatesMap.get(c.id);
-          if (!item) return c;
-          if ((c.unreadCount || 0) === item.unreadCount && c.messages.length === item.messages.length) {
-            return c;
-          }
-          changed = true;
-          return {
-            ...c,
-            messages: item.messages,
-            unreadCount: item.unreadCount,
-          };
-        });
-        if (!changed) return prev;
-        if (!isMetaReviewer) persistConversationsCache(next);
-        return next;
-      });
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [conversations, token, normalizeMessages, isReadOnly, isMetaReviewer]);
 
   // Scoped view for Meta Reviewer test account (test@meta.com)
   const visibleConversations = useMemo(() => {
