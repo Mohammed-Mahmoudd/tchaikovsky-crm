@@ -220,9 +220,87 @@ type CRMContextType = {
 const CRMContext = createContext<CRMContextType | undefined>(undefined);
 
 const API = "/api";
-const CACHE_KEY = "crm_conversations_cache_v2";
+const DIRECT_API = "https://api.tchaikovskyschool.com/crm-api";
+const CACHE_KEY = "crm_conversations_cache_v3";
+const V2_CACHE_KEY = "crm_conversations_cache_v2";
 const LEGACY_CACHE_KEY = "crm_conversations_cache";
 const MANUAL_LEADS_KEY = "crm_manual_leads_v1";
+const IDB_NAME = "tchaikovsky_crm_cache_db";
+const IDB_STORE = "conversations_store";
+const IDB_KEY = "all_conversations_v1";
+
+function openCacheIDB(): Promise<IDBDatabase | null> {
+  if (typeof window === "undefined" || typeof indexedDB === "undefined") {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          db.createObjectStore(IDB_STORE);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function saveConversationsToIDB(convs: Conversation[]): Promise<void> {
+  const db = await openCacheIDB();
+  if (!db) return;
+  try {
+    const payload = convs.map((c) => ({
+      ...c,
+      messages: [],
+      source:
+        c.source && typeof c.source === "object"
+          ? { ...c.source, activityLog: undefined }
+          : c.source,
+    }));
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).put(payload, IDB_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+  } catch {}
+}
+
+async function loadConversationsFromIDB(): Promise<Conversation[] | null> {
+  const db = await openCacheIDB();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+      req.onsuccess = () => {
+        const res = req.result;
+        if (Array.isArray(res) && res.length > 0) {
+          resolve(res as Conversation[]);
+        } else {
+          resolve(null);
+        }
+      };
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function clearConversationsIDB(): Promise<void> {
+  const db = await openCacheIDB();
+  if (!db) return;
+  try {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).delete(IDB_KEY);
+  } catch {}
+}
 
 function getStoredManualLeads(): Record<string, Conversation> {
   if (typeof window === "undefined") return {};
@@ -247,38 +325,84 @@ function persistManualLeads(map: Record<string, Conversation>) {
 
 function slimConversationsForStorage(convs: Conversation[], limit?: number): Conversation[] {
   const sourceList = typeof limit === "number" ? convs.slice(0, limit) : convs;
-  return sourceList.map((c) => ({
-    ...c,
-    messages: [],
-    activityLog: [],
-    lastMessageText: c.lastMessageText && c.lastMessageText.length > 160 ? c.lastMessageText.slice(0, 160) : c.lastMessageText,
-    source:
+  return sourceList.map((c) => {
+    const cleanSource =
       c.source && typeof c.source === "object"
         ? { ...c.source, activityLog: undefined }
-        : c.source,
-  }));
+        : c.source;
+    const item: Record<string, any> = {
+      id: c.id,
+      name: c.name || "",
+      phone: c.phone || "",
+      agent: c.agent || "Unassigned",
+      channel: c.channel || "FB",
+      status: c.status || "Open",
+      windowLeft: c.windowLeft || "Active",
+      pipeline: c.pipeline || "New",
+      source: cleanSource || "direct",
+      messages: [],
+    };
+    if (c._id) item._id = c._id;
+    if (c.profileName) item.profileName = c.profileName;
+    if (c.leadName) item.leadName = c.leadName;
+    if (c.metaChannel) item.metaChannel = c.metaChannel;
+    if (c.metaSenderId) item.metaSenderId = c.metaSenderId;
+    if (c.formPhone) item.formPhone = c.formPhone;
+    if (c.unreadCount) item.unreadCount = c.unreadCount;
+    if (c.notes) item.notes = c.notes;
+    if (c.followUpNote) item.followUpNote = c.followUpNote;
+    if (c.followUpDate) item.followUpDate = c.followUpDate;
+    if (c.followUpCompleted) item.followUpCompleted = c.followUpCompleted;
+    if (c.followUpCompletedAt) item.followUpCompletedAt = c.followUpCompletedAt;
+    if (c.auditionDate) item.auditionDate = c.auditionDate;
+    if (c.auditionBookedAt) item.auditionBookedAt = c.auditionBookedAt;
+    if (c.attendedAt) item.attendedAt = c.attendedAt;
+    if (c.enrolledAt) item.enrolledAt = c.enrolledAt;
+    if (c.paidAt) item.paidAt = c.paidAt;
+    if (c.bookedBy) item.bookedBy = c.bookedBy;
+    if (c.attendedBy) item.attendedBy = c.attendedBy;
+    if (c.enrolledBy) item.enrolledBy = c.enrolledBy;
+    if (c.auditionOutcome) item.auditionOutcome = c.auditionOutcome;
+    if (c.followUpTags && c.followUpTags.length > 0) item.followUpTags = c.followUpTags;
+    if (c.branch) item.branch = c.branch;
+    if (c.formAnswers && Object.keys(c.formAnswers).length > 0) item.formAnswers = c.formAnswers;
+    if (c.cashIn) item.cashIn = c.cashIn;
+    if (c.createdAt) item.createdAt = c.createdAt;
+    if (c.updatedAt) item.updatedAt = c.updatedAt;
+    if (c.lastMessageAt) item.lastMessageAt = c.lastMessageAt;
+    if (c.lastMessageText) {
+      item.lastMessageText = c.lastMessageText.length > 180 ? c.lastMessageText.slice(0, 180) : c.lastMessageText;
+    }
+    if (c.lastMessageDirection) item.lastMessageDirection = c.lastMessageDirection;
+    if (c.lastOutgoingAt) item.lastOutgoingAt = c.lastOutgoingAt;
+    if (c.lastSeenAt) item.lastSeenAt = c.lastSeenAt;
+    return item as Conversation;
+  });
 }
 
 function getCachedConversations(): Conversation[] {
   if (typeof window === "undefined") return [];
   try {
+    try {
+      localStorage.removeItem(LEGACY_CACHE_KEY);
+    } catch {}
     const raw = localStorage.getItem(CACHE_KEY);
     if (raw) {
       try {
-        localStorage.removeItem(LEGACY_CACHE_KEY);
+        localStorage.removeItem(V2_CACHE_KEY);
       } catch {}
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
         return parsed;
       }
     }
-    // One-time migration from legacy cache key if v2 is not written yet
-    const legacyRaw = localStorage.getItem(LEGACY_CACHE_KEY);
-    if (legacyRaw) {
-      localStorage.removeItem(LEGACY_CACHE_KEY);
-      const legacyParsed = JSON.parse(legacyRaw);
-      if (Array.isArray(legacyParsed) && legacyParsed.length > 0) {
-        const migrated = slimConversationsForStorage(legacyParsed);
+    // Migrate from v2 ONLY if it holds the full dataset (> 250 items), otherwise purge the truncated 250-item v2 cache
+    const v2Raw = localStorage.getItem(V2_CACHE_KEY);
+    if (v2Raw) {
+      localStorage.removeItem(V2_CACHE_KEY);
+      const v2Parsed = JSON.parse(v2Raw);
+      if (Array.isArray(v2Parsed) && v2Parsed.length > 250) {
+        const migrated = slimConversationsForStorage(v2Parsed);
         try {
           localStorage.setItem(CACHE_KEY, JSON.stringify(migrated));
         } catch {}
@@ -303,13 +427,17 @@ function persistConversationsCache(convs: Conversation[]) {
     const snapshot = pendingCacheSnapshot;
     pendingCacheSnapshot = null;
     if (!snapshot) return;
+    // 1. Save full untruncated dataset (including all activityLog entries) to IndexedDB
+    saveConversationsToIDB(snapshot).catch(() => {});
+    // 2. Save compact full list to localStorage for synchronous 0ms hydration on reload
     try {
       localStorage.removeItem(LEGACY_CACHE_KEY);
+      localStorage.removeItem(V2_CACHE_KEY);
       const slimmed = slimConversationsForStorage(snapshot);
       localStorage.setItem(CACHE_KEY, JSON.stringify(slimmed));
     } catch {
       try {
-        const fallbackSlim = slimConversationsForStorage(snapshot, 1000);
+        const fallbackSlim = slimConversationsForStorage(snapshot, 1500);
         localStorage.setItem(CACHE_KEY, JSON.stringify(fallbackSlim));
       } catch {}
     }
@@ -452,6 +580,31 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     }
   }, [conversations.length]);
 
+  // Hydrate full untruncated dataset (including all activityLog entries) from IndexedDB on mount (~5ms)
+  useEffect(() => {
+    if (isMetaReviewer) return;
+    let cancelled = false;
+    loadConversationsFromIDB().then((idbConvs) => {
+      if (cancelled || !idbConvs || idbConvs.length === 0) return;
+      // Only apply IDB snapshot if live server fetch hasn't already populated full activityLog data
+      if (lastServerRevRef.current > 0 && conversationsRef.current.length >= idbConvs.length) {
+        return;
+      }
+      setConversations((prev) => {
+        if (prev.length > idbConvs.length) return prev;
+        const idbWithMessages = idbConvs.map((c) => ({
+          ...c,
+          messages: messagesCacheRef.current.get(c.id) || c.messages || [],
+        }));
+        return idbWithMessages;
+      });
+      setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isMetaReviewer]);
+
   // Fix B: when true the 3s poll is silently skipped (set during drag + 3s after drop)
   const pollPausedRef = useRef(false);
   const setPollPaused = useCallback((paused: boolean) => {
@@ -479,11 +632,11 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       };
 
       // 1. Fetch public/all agents endpoint
-      let res = await fetch(`${API}/messages/agents?all=1`, { cache: "no-store" });
-      if (!res.ok) {
-        res = await fetch(`${API}/agents?all=1`, { cache: "no-store" });
+      let res = await fetch(`${API}/messages/agents?all=1`, { cache: "no-store" }).catch(() => null);
+      if (!res || !res.ok) {
+        res = await fetch(`${DIRECT_API}/messages/agents?all=1`, { cache: "no-store" }).catch(() => null);
       }
-      if (res.ok) {
+      if (res && res.ok) {
         const data = await res.json().catch(() => null);
         if (data?.success && Array.isArray(data.data)) {
           data.data.forEach(addMember);
@@ -983,11 +1136,17 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     try {
       const headers: Record<string, string> = {};
       if (token) headers["Authorization"] = `Bearer ${token}`;
-      const res = await fetch(`${API}/messages/${chatId}`, {
+      let res = await fetch(`${API}/messages/${chatId}`, {
         headers,
         cache: "no-store",
-      });
-      if (!res.ok) return;
+      }).catch(() => null);
+      if (!res || !res.ok) {
+        res = await fetch(`${DIRECT_API}/messages/${chatId}`, {
+          headers,
+          cache: "no-store",
+        }).catch(() => null);
+      }
+      if (!res || !res.ok) return;
       const json = await res.json().catch(() => null);
       if (json?.success && json.data) {
         const serverMessages = normalizeMessages(json.data.messages);
@@ -1092,7 +1251,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         setLoading(true);
         try {
           localStorage.removeItem(CACHE_KEY);
+          localStorage.removeItem(V2_CACHE_KEY);
           localStorage.removeItem(LEGACY_CACHE_KEY);
+          clearConversationsIDB();
         } catch {}
       }
     }
