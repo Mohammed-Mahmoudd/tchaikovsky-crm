@@ -86,6 +86,7 @@ import { useAuth, canAccessRoute } from "./components/AuthProvider";
 import { formatLastMessageTime } from "./utils/time";
 import MessageTemplate, { parseTemplateAttachment } from "./components/MessageTemplate";
 import InstagramMedia from "./components/InstagramMedia";
+import { VoiceNotePlayer } from "./components/VoiceNotePlayer";
 import { matchLeadSearch } from "./utils/search";
 
 const isPlaceholderText = (text?: string) => {
@@ -214,6 +215,28 @@ function formatShortIsoDate(isoDate: string): string {
   return dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
+export const isConvUnassigned = (agent?: string | null): boolean => {
+  if (!agent) return true;
+  const a = agent.trim().toLowerCase();
+  return a === "unassigned" || a === "";
+};
+
+export const isConvAssignedToUser = (agent?: string | null, userName?: string | null): boolean => {
+  if (!agent || !userName) return false;
+  return agent.trim().toLowerCase() === userName.trim().toLowerCase();
+};
+
+export const isUnassignedNewLead = (conv: any): boolean => {
+  if (!isConvUnassigned(conv?.agent)) return false;
+  if (conv?.status === "Resolved") return false;
+  if (conv?.lastOutgoingAt && Number(conv.lastOutgoingAt) > 0) return false;
+  if (conv?.lastMessageDirection === "outgoing") return false;
+  if (Array.isArray(conv?.messages) && conv.messages.some((m: any) => !m.isIncoming)) return false;
+  const pipe = (conv?.pipeline || "New").trim();
+  if (pipe !== "New") return false;
+  return true;
+};
+
 export default function InboxPage() {
   const [activeFilter, setActiveFilter] = useState("All");
   const [datePreset, setDatePreset] = useState<DateFilterPreset>("ALL");
@@ -285,8 +308,12 @@ export default function InboxPage() {
   // ── Pre-date filter conversations (tab filter + search query) for live preset badge counts ──
   const tabAndSearchFilteredConvs = useMemo(() => {
     return conversations.filter((conv) => {
-      if (activeFilter === "Mine" && conv.agent !== user?.name) return false;
-      if (activeFilter === "Unassigned" && conv.agent !== "Unassigned") return false;
+      if (activeFilter === "Mine") {
+        const isMine = isConvAssignedToUser(conv.agent, user?.name);
+        const isNewUnassigned = isUnassignedNewLead(conv);
+        if (!isMine && !isNewUnassigned) return false;
+      }
+      if (activeFilter === "Unassigned" && !isConvUnassigned(conv.agent)) return false;
       if (activeFilter === "Open" && conv.status !== "Open") return false;
       if (activeFilter === "Resolved" && conv.status !== "Resolved") return false;
       if (activeFilter === "WA" && conv.channel !== "WA") return false;
@@ -409,7 +436,7 @@ export default function InboxPage() {
   const isAdmission = user?.role === "admission_officer" || user?.role === "agent";
   const isAssignedToOther = isAssigned && !isAssignedToMe;
   const canSendMessages = !isReadOnly;
-  const canAssignToSelf = !isReadOnly && isAdmission && (!isAssigned || isAssignedToMe);
+  const canAssignToSelf = !isReadOnly && (isAdmission || isChairman) && (!isAssigned || isAssignedToMe);
   const canEditAgent = !isReadOnly && (isChairman || canAssignToSelf);
   const canViewTeamActivity = isChairman || canAccessRoute(user?.role, "/team-performance");
 
@@ -640,8 +667,8 @@ export default function InboxPage() {
 
       const chatId = activeConv.id;
 
-      // Auto-assign to admission officer on first reply to unassigned lead (optimistic 0ms update)
-      if (isAdmission && !isAssigned && user?.name) {
+      // Auto-assign to staff on first reply to unassigned lead (optimistic 0ms update)
+      if ((isAdmission || isChairman) && !isAssigned && user?.name) {
         patchConversation(chatId, { agent: user.name });
       }
 
@@ -1347,7 +1374,7 @@ export default function InboxPage() {
 
               <div className="flex items-center gap-2 shrink-0">
                 {/* 1-click Quick "Assign to me" button for unassigned leads */}
-                {!isReadOnly && !isAssigned && isAdmission && user?.name && (
+                {!isReadOnly && !isAssigned && (isAdmission || isChairman) && user?.name && (
                   <button
                     type="button"
                     onClick={() => patchConversation(activeConv.id, { agent: user.name })}
@@ -1907,9 +1934,13 @@ export default function InboxPage() {
 
                                     if (att.type === "audio" && url) {
                                       return (
-                                        <audio key={idx} controls className="max-w-full my-1">
-                                          <source src={url} />
-                                        </audio>
+                                        <VoiceNotePlayer
+                                          key={idx}
+                                          url={url}
+                                          fileName={fileName}
+                                          isIncoming={msg.isIncoming}
+                                          channel={activeConv.channel}
+                                        />
                                       );
                                     }
                                     if (att.type === "video" && url) {
@@ -2258,7 +2289,7 @@ export default function InboxPage() {
               userName={user?.name}
               windowLeft={activeConv.windowLeft}
               isUnassigned={!isAssigned}
-              isAdmission={isAdmission}
+              isAdmission={isAdmission || isChairman}
               onAssignToMe={user?.name ? () => patchConversation(activeConv.id, { agent: user.name }) : undefined}
               onSendMessage={handleSendReply}
               editingMessage={editingMessage}
@@ -2346,7 +2377,7 @@ export default function InboxPage() {
                 <span className="text-[12px] font-medium truncate" style={{ color: "var(--text-primary)" }}>
                   {activeConv.agent || "Unassigned"}
                 </span>
-                {!isReadOnly && !isAssigned && isAdmission && user?.name && (
+                {!isReadOnly && !isAssigned && (isAdmission || isChairman) && user?.name && (
                   <button
                     type="button"
                     onClick={() => patchConversation(activeConv.id, { agent: user.name })}

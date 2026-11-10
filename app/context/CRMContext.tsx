@@ -1724,6 +1724,11 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               if (typeof window !== "undefined") {
                 window.dispatchEvent(new CustomEvent("crm:branches-updated"));
               }
+            } else if (payload.type === "quick_replies_updated") {
+              // Quick replies modified — notify chat composers to refresh immediately
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("crm:quick-replies-updated"));
+              }
             }
           } catch (e) {
             console.warn("CRMContext: SSE message parse error", e);

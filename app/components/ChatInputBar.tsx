@@ -17,6 +17,18 @@ import {
 } from "lucide-react";
 import { EmojiPicker, recordRecentEmoji } from "./EmojiPicker";
 import { ComposerAssistBar, FormatAction } from "./ComposerAssistBar";
+import { FastRepliesPopover } from "./FastRepliesPopover";
+import { FastReplyModal } from "./FastReplyModal";
+import {
+  QuickReply,
+  getStoredQuickReplies,
+  saveStoredQuickReplies,
+  filterQuickReplies,
+  fetchRemoteQuickReplies,
+  createRemoteQuickReply,
+  updateRemoteQuickReply,
+  deleteRemoteQuickReply,
+} from "../utils/quickReplies";
 import { getEmojiSuggestions, recordSuggestionPick } from "../utils/emojiSuggestions";
 import {
   CHANNEL_CAPABILITIES,
@@ -302,11 +314,52 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const attachMenuRef = useRef<HTMLDivElement>(null);
 
+  // ── Fast Replies (WhatsApp-style quick replies triggered by "/") ─────────
+  const [quickReplies, setQuickReplies] = useState<QuickReply[]>(() => getStoredQuickReplies());
+  const [isFastRepliesDismissed, setIsFastRepliesDismissed] = useState(false);
+  const [activeReplyIndex, setActiveReplyIndex] = useState(0);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [editingReply, setEditingReply] = useState<QuickReply | null>(null);
+  const [modalInitialShortcut, setModalInitialShortcut] = useState("");
+
+  // Sync quick replies with backend & listen to SSE/storage updates
+  useEffect(() => {
+    let isMounted = true;
+    fetchRemoteQuickReplies(token).then((data) => {
+      if (isMounted && data && data.length > 0) {
+        setQuickReplies(data);
+      }
+    });
+
+    const handleUpdated = () => {
+      fetchRemoteQuickReplies(token).then((data) => {
+        if (isMounted && data && data.length > 0) {
+          setQuickReplies(data);
+        }
+      });
+    };
+
+    if (typeof window !== "undefined") {
+      window.addEventListener("crm:quick-replies-updated", handleUpdated);
+      window.addEventListener("storage", handleUpdated);
+    }
+
+    return () => {
+      isMounted = false;
+      if (typeof window !== "undefined") {
+        window.removeEventListener("crm:quick-replies-updated", handleUpdated);
+        window.removeEventListener("storage", handleUpdated);
+      }
+    };
+  }, [token]);
+
   // Reset input, attachments, and focus when switching conversations
   useEffect(() => {
     setText("");
     setCaret(0);
     setDismissedAtWords(null);
+    setIsFastRepliesDismissed(false);
+    setActiveReplyIndex(0);
     setIsSending(false);
     setShowEmojiPicker(false);
     setShowAttachMenu(false);
@@ -655,11 +708,162 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     supportsFormatting,
   ]);
 
-  const showSuggestions = suggestion.emojis.length > 0 && !isSuggestionDismissed;
+  const isWindowClosed = windowLeft === "Closed";
+  const isDisabled = isSending || isReadOnly || !canSendMessages;
+  const hasQueuedAttachments = queuedAttachments.length > 0;
+
+  // ── Fast Replies trigger detection and matching ─────────────────────────
+  const slashMatch = useMemo(() => {
+    // Only match '/' preceded by start of string or whitespace
+    const match = textBeforeCaret.match(/(?:^|\s)\/([^\s]*)$/);
+    if (!match) return null;
+    const fullMatch = match[0];
+    const query = match[1];
+    const slashOffsetInMatch = fullMatch.indexOf("/");
+    const matchStart = caret - fullMatch.length;
+    const slashIndex = matchStart + slashOffsetInMatch;
+    return { query, slashIndex };
+  }, [textBeforeCaret, caret]);
+
+  const lastQueryRef = useRef<string | null>(null);
+  useEffect(() => {
+    const currentQuery = slashMatch ? slashMatch.query : null;
+    if (currentQuery !== lastQueryRef.current) {
+      lastQueryRef.current = currentQuery;
+      setIsFastRepliesDismissed(false);
+      setActiveReplyIndex(0);
+    }
+  }, [slashMatch]);
+
+  const filteredReplies = useMemo(() => {
+    if (!slashMatch) return [];
+    return filterQuickReplies(quickReplies, slashMatch.query);
+  }, [quickReplies, slashMatch]);
+
+  const showFastReplies = Boolean(
+    slashMatch &&
+      !isFastRepliesDismissed &&
+      !isDisabled &&
+      !isWindowClosed &&
+      !editingMessage
+  );
+
+  const handleInsertFastReply = useCallback(
+    (reply: QuickReply) => {
+      if (!slashMatch) return;
+      const beforeSlash = text.slice(0, slashMatch.slashIndex);
+      const afterCaret = text.slice(caret);
+      const insertText = reply.text;
+      const nextText = beforeSlash + insertText + afterCaret;
+      const nextCaret = beforeSlash.length + insertText.length;
+
+      applyEdit({
+        text: nextText,
+        selStart: nextCaret,
+        selEnd: nextCaret,
+      });
+      setIsFastRepliesDismissed(true);
+    },
+    [slashMatch, text, caret, applyEdit]
+  );
+
+  const handleSaveQuickReply = useCallback(
+    async (data: { id?: string; shortcut: string; title?: string; text: string; category?: string }) => {
+      try {
+        if (data.id) {
+          setQuickReplies((prev) => {
+            const next = prev.map((item) => (item.id === data.id ? { ...item, ...data } : item));
+            saveStoredQuickReplies(next);
+            return next;
+          });
+          await updateRemoteQuickReply(data.id, data, token);
+          return { success: true };
+        } else {
+          const tempId = `qr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+          const newReply: QuickReply = {
+            id: tempId,
+            shortcut: data.shortcut,
+            title: data.title || data.shortcut,
+            text: data.text,
+            category: data.category || "General",
+            order: quickReplies.length,
+          };
+          setQuickReplies((prev) => {
+            const next = [...prev, newReply];
+            saveStoredQuickReplies(next);
+            return next;
+          });
+          createRemoteQuickReply(data, token).then((remote) => {
+            if (remote && remote.id) {
+              setQuickReplies((prev) => {
+                const updated = prev.map((item) => (item.id === tempId ? remote : item));
+                saveStoredQuickReplies(updated);
+                return updated;
+              });
+            }
+          });
+          return { success: true };
+        }
+      } catch (err: any) {
+        return { success: false, error: err.message || "Failed to save quick reply" };
+      }
+    },
+    [token, quickReplies.length]
+  );
+
+  const handleDeleteQuickReply = useCallback(
+    (id: string, shortcut: string) => {
+      if (typeof window !== "undefined" && !window.confirm(`Are you sure you want to delete the fast reply "/${shortcut}"?`)) {
+        return;
+      }
+      setQuickReplies((prev) => {
+        const next = prev.filter((item) => item.id !== id);
+        saveStoredQuickReplies(next);
+        return next;
+      });
+      deleteRemoteQuickReply(id, token);
+    },
+    [token]
+  );
+
+  const showSuggestions = suggestion.emojis.length > 0 && !isSuggestionDismissed && !showFastReplies;
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Never hijack keys while an IME (e.g. Arabic / CJK keyboard) is composing
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+
+    // Fast replies keyboard navigation (WhatsApp-style)
+    if (showFastReplies) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        if (filteredReplies.length > 0) {
+          setActiveReplyIndex((prev) => (prev + 1) % filteredReplies.length);
+        }
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        if (filteredReplies.length > 0) {
+          setActiveReplyIndex((prev) => (prev - 1 + filteredReplies.length) % filteredReplies.length);
+        }
+        return;
+      }
+      if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
+        if (filteredReplies.length > 0) {
+          e.preventDefault();
+          const chosen = filteredReplies[activeReplyIndex] || filteredReplies[0];
+          if (chosen) {
+            handleInsertFastReply(chosen);
+          }
+          return;
+        }
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setIsFastRepliesDismissed(true);
+        return;
+      }
+    }
 
     // Tab → insert the top emoji suggestion
     if (e.key === "Tab" && !e.shiftKey && showSuggestions) {
@@ -723,10 +927,6 @@ export const ChatInputBar = React.memo(function ChatInputBar({
       handleSendOrSave();
     }
   };
-
-  const isWindowClosed = windowLeft === "Closed";
-  const isDisabled = isSending || isReadOnly || !canSendMessages;
-  const hasQueuedAttachments = queuedAttachments.length > 0;
 
   const placeholderText = editingMessage
     ? "Edit message..."
@@ -1046,8 +1246,29 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         </div>
       )}
 
+      {/* Fast Replies Popover (Triggered by "/" or slash button) */}
+      <FastRepliesPopover
+        isOpen={showFastReplies}
+        query={slashMatch?.query ?? ""}
+        replies={filteredReplies}
+        activeIndex={activeReplyIndex}
+        onSelect={handleInsertFastReply}
+        onClose={() => setIsFastRepliesDismissed(true)}
+        onOpenCreate={(initialSc) => {
+          setModalInitialShortcut(initialSc || "");
+          setEditingReply(null);
+          setShowCreateModal(true);
+        }}
+        onEditReply={(reply) => {
+          setEditingReply(reply);
+          setShowCreateModal(true);
+        }}
+        onDeleteReply={handleDeleteQuickReply}
+        onSetActiveIndex={setActiveReplyIndex}
+      />
+
       {/* Smart emoji suggestions + WhatsApp formatting toolbar (appears while typing) */}
-      {!isWindowClosed && !isDisabled && !showEmojiPicker && (
+      {!isWindowClosed && !isDisabled && !showEmojiPicker && !showFastReplies && (
         <ComposerAssistBar
           suggestions={showSuggestions ? suggestion.emojis : []}
           onPickSuggestion={handlePickSuggestion}
@@ -1238,6 +1459,19 @@ export const ChatInputBar = React.memo(function ChatInputBar({
           )}
         </div>
       )}
+
+      {/* Fast Reply Create / Edit Modal */}
+      <FastReplyModal
+        isOpen={showCreateModal}
+        editingReply={editingReply}
+        initialShortcut={modalInitialShortcut}
+        onClose={() => {
+          setShowCreateModal(false);
+          setEditingReply(null);
+          requestAnimationFrame(() => inputRef.current?.focus());
+        }}
+        onSave={handleSaveQuickReply}
+      />
     </div>
   );
 });
