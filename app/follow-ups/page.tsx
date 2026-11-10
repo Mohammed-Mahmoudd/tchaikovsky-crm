@@ -101,35 +101,39 @@ export default function FollowUpsPage() {
       .filter((c) => {
         const tags = c.followUpTags || [];
         const hasTag = tags.includes('payment-pending') || tags.includes('trial-session');
+        const isJL = c.auditionOutcome === 'joining-later' || c.pipeline === 'Joining Later';
         return (
-          (c.pipeline !== 'Audition Booked' || c.auditionOutcome === 'joining-later' || hasTag) &&
-          Boolean(c.followUpDate || c.followUpNote || c.auditionOutcome === 'joining-later' || hasTag)
+          (c.pipeline !== 'Audition Booked' || isJL || hasTag) &&
+          Boolean(c.followUpDate || c.followUpNote || isJL || hasTag)
         );
       })
-      .map((c) => ({
-        id: c.id,
-        name: c.name || 'Student',
-        phone: c.phone || '',
-        text:
-          c.followUpNote ||
-          (c.auditionOutcome === 'joining-later'
-            ? 'Joining Later - Follow up'
-            : (c.followUpTags || []).includes('payment-pending')
-            ? 'Payment Pending - Follow up'
-            : (c.followUpTags || []).includes('trial-session')
-            ? 'Trial Session - Follow up'
-            : 'Follow up with customer'),
-        date: formatDisplayDate(c.followUpDate || ''),
-        rawDate: c.followUpDate || '',
-        people: `${c.name || 'Student'} · ${c.agent || 'Unassigned'}`,
-        branch: c.branch || '',
-        auditionOutcome: c.auditionOutcome || '',
-        followUpTags: c.followUpTags || [],
-        pipeline: c.pipeline || '',
-        completed: Boolean(c.followUpCompleted),
-        completedAt: c.followUpCompletedAt || '',
-        dateValue: c.followUpDate || '9999-12-31',
-      }));
+      .map((c) => {
+        const isJL = c.auditionOutcome === 'joining-later' || c.pipeline === 'Joining Later';
+        return {
+          id: c.id,
+          name: c.name || 'Student',
+          phone: c.phone || '',
+          text:
+            c.followUpNote ||
+            (isJL
+              ? 'Joining Later - Follow up'
+              : (c.followUpTags || []).includes('payment-pending')
+              ? 'Payment Pending - Follow up'
+              : (c.followUpTags || []).includes('trial-session')
+              ? 'Trial Session - Follow up'
+              : 'Follow up with customer'),
+          date: formatDisplayDate(c.followUpDate || ''),
+          rawDate: c.followUpDate || '',
+          people: `${c.name || 'Student'} · ${c.agent || 'Unassigned'}`,
+          branch: c.branch || '',
+          auditionOutcome: isJL ? 'joining-later' : (c.auditionOutcome || ''),
+          followUpTags: c.followUpTags || [],
+          pipeline: c.pipeline || '',
+          completed: Boolean(c.followUpCompleted),
+          completedAt: c.followUpCompletedAt || '',
+          dateValue: c.followUpDate || '9999-12-31',
+        };
+      });
   }, [conversations]);
 
   // Instant optimistic toggle between active and ended (persisted to backend)

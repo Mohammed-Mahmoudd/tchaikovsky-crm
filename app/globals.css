@@ -146,6 +146,29 @@ button, [role="button"] {
   border-radius: 4px;
 }
 
+/* Visible, easy-to-grab horizontal scrollbar for the Pipeline Kanban board */
+.pipeline-board-scroll {
+  scrollbar-width: auto;
+  scrollbar-color: var(--text-muted) var(--bg-column);
+}
+.pipeline-board-scroll::-webkit-scrollbar {
+  height: 10px;
+  width: 6px;
+}
+.pipeline-board-scroll::-webkit-scrollbar-track {
+  background: var(--bg-column);
+  border-radius: 9999px;
+  margin: 0 16px;
+}
+.pipeline-board-scroll::-webkit-scrollbar-thumb {
+  background: var(--text-muted);
+  border-radius: 9999px;
+  border: 2px solid var(--bg-column);
+}
+.pipeline-board-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
 /* Prevent text selection on drag */
 .select-none {
   user-select: none;

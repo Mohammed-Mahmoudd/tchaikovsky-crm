@@ -26,10 +26,12 @@ import {
 
 const STAGE_COLORS: Record<string, string> = {
   "New":             "#0066FF",
-  "Contacted":       "#FF9500",
-  "Audition Booked": "#34C759",
-  "Attended":        "#30B0C7",
-  "Enrolled":        "#5856D6",
+  "Contacted":       "#5856D6",
+  "Qualified":       "#30B0C7",
+  "Audition Booked": "#FF9500",
+  "Attended":        "#34C759",
+  "Enrolled":        "#30D158",
+  "Joining Later":   "#F59E0B",
   "Unqualified":     "#8E8E93",
   "Lost":            "#FF3B30",
   "direct":          "#8E8E93",
@@ -1041,9 +1043,11 @@ export default function LeadsPage() {
     "All",
     "New",
     "Contacted",
+    "Qualified",
     "Audition Booked",
     "Attended",
     "Enrolled",
+    "Joining Later",
     "Unqualified",
     "Lost",
   ];

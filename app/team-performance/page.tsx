@@ -253,9 +253,11 @@ function formatOutcomeLabel(outcome?: string): string {
 const STAGE_COLORS: Record<string, string> = {
   New: '#007AFF',
   Contacted: '#5856D6',
+  Qualified: '#30B0C7',
   'Audition Booked': '#FF9500',
   Attended: '#34C759',
   Enrolled: '#30D158',
+  'Joining Later': '#F59E0B',
   Unqualified: '#8E8E93',
   Lost: '#FF3B30',
 };
@@ -779,7 +781,7 @@ function TeamActivitiesPageInner() {
       if (
         !seenTypes.has('stage_changed') &&
         assignedAgent !== 'Unassigned' &&
-        ['Contacted', 'Unqualified', 'Lost'].includes(c.pipeline)
+        ['Contacted', 'Qualified', 'Joining Later', 'Unqualified', 'Lost'].includes(c.pipeline)
       ) {
         pushActivity(
           `${c.id}_stage_${c.pipeline}`,
@@ -1209,7 +1211,7 @@ function TeamActivitiesPageInner() {
       else if (ch.includes('fb') || ch.includes('messenger') || ch.includes('facebook')) channelCounts.Messenger += 1;
     });
 
-    const orderedStages = ['New', 'Contacted', 'Audition Booked', 'Attended', 'Enrolled', 'Unqualified', 'Lost'];
+    const orderedStages = ['New', 'Contacted', 'Qualified', 'Audition Booked', 'Attended', 'Enrolled', 'Joining Later', 'Unqualified', 'Lost'];
     Object.keys(stageMap).forEach((s) => {
       if (!orderedStages.includes(s)) orderedStages.push(s);
     });

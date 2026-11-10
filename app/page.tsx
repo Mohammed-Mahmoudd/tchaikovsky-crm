@@ -24,6 +24,7 @@ import {
   Image as ImageIcon,
   Clock,
   UploadCloud,
+  ChevronDown,
 } from "lucide-react";
 import { useBranches } from "./lib/branches";
 import { BranchSelect } from "./components/BranchSelect";
@@ -39,10 +40,16 @@ type Message = {
   text: string;
   attachments?: any[];
   time: string;
+  timestamp?: number;
   isIncoming: boolean;
   isRead?: boolean;
   dir?: "rtl" | "ltr";
   senderName?: string;
+  isEdited?: boolean;
+  editedAt?: number;
+  isDeleted?: boolean;
+  deletedAt?: number;
+  deletedBy?: string;
 };
 
 type Conversation = {
@@ -166,9 +173,11 @@ const isTemplateAttachment = (att: any) =>
 const PIPELINE_STAGES = [
   "New",
   "Contacted",
+  "Qualified",
   "Audition Booked",
   "Attended",
   "Enrolled",
+  "Joining Later",
   "Unqualified",
   "Lost",
 ] as const;
@@ -176,17 +185,42 @@ const PIPELINE_STAGES = [
 const PIPELINE_STAGE_COLORS: Record<string, string> = {
   "New": "#007AFF",
   "Contacted": "#5856D6",
+  "Qualified": "#30B0C7",
   "Audition Booked": "#FF9500",
   "Attended": "#34C759",
   "Enrolled": "#30D158",
+  "Joining Later": "#F59E0B",
   "Unqualified": "#8E8E93",
   "Lost": "#FF3B30",
 };
 
 type MobileView = "list" | "chat" | "details";
+type DateFilterPreset = "ALL" | "TODAY" | "YESTERDAY" | "LAST_7D" | "CUSTOM";
+
+function parseLocalDayBounds(isoDate: string): { start: number; end: number } | null {
+  if (!isoDate || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return null;
+  const [y, m, d] = isoDate.split("-").map(Number);
+  const start = new Date(y, m - 1, d, 0, 0, 0, 0).getTime();
+  const end = new Date(y, m - 1, d, 23, 59, 59, 999).getTime();
+  if (Number.isNaN(start) || Number.isNaN(end)) return null;
+  return { start, end };
+}
+
+function formatShortIsoDate(isoDate: string): string {
+  if (!isoDate || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return isoDate;
+  const [y, m, d] = isoDate.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  if (Number.isNaN(dt.getTime())) return isoDate;
+  return dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
 
 export default function InboxPage() {
   const [activeFilter, setActiveFilter] = useState("All");
+  const [datePreset, setDatePreset] = useState<DateFilterPreset>("ALL");
+  const [customDateFrom, setCustomDateFrom] = useState<string>("");
+  const [customDateTo, setCustomDateTo] = useState<string>("");
+  const [showDatePopover, setShowDatePopover] = useState(false);
+  const datePopoverRef = useRef<HTMLDivElement | null>(null);
   const [mobileView, setMobileView] = useState<MobileView>("list");
   const [showDetailsPanel, setShowDetailsPanel] = useState(false);
   const { isReadOnly, user, token } = useAuth();
@@ -207,6 +241,7 @@ export default function InboxPage() {
     setSearchQuery,
     deleteConversation,
     editMessage,
+    unsendMessage,
     reactToMessage,
     addOptimisticMessages,
     finalizeOptimisticMessages,
@@ -228,8 +263,27 @@ export default function InboxPage() {
     }
   }, [activeChatId]);
 
-  // ── Filter logic (memoized to avoid re-calculating on unrelated renders) ──
-  const filteredConversations = useMemo(() => {
+  // Close date filter popover when clicking outside or pressing Escape
+  useEffect(() => {
+    if (!showDatePopover) return;
+    const handleMouseDown = (e: MouseEvent) => {
+      if (datePopoverRef.current && !datePopoverRef.current.contains(e.target as Node)) {
+        setShowDatePopover(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowDatePopover(false);
+    };
+    document.addEventListener("mousedown", handleMouseDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleMouseDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showDatePopover]);
+
+  // ── Pre-date filter conversations (tab filter + search query) for live preset badge counts ──
+  const tabAndSearchFilteredConvs = useMemo(() => {
     return conversations.filter((conv) => {
       if (activeFilter === "Mine" && conv.agent !== user?.name) return false;
       if (activeFilter === "Unassigned" && conv.agent !== "Unassigned") return false;
@@ -245,6 +299,101 @@ export default function InboxPage() {
       return true;
     });
   }, [conversations, activeFilter, searchQuery, user?.name]);
+
+  const dateBounds = useMemo(() => {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0).getTime();
+    const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime();
+    const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 0, 0, 0, 0).getTime();
+    const yesterdayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59, 999).getTime();
+    const last7dStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6, 0, 0, 0, 0).getTime();
+    return { todayStart, todayEnd, yesterdayStart, yesterdayEnd, last7dStart };
+  }, []);
+
+  const datePresetCounts = useMemo(() => {
+    let today = 0;
+    let yesterday = 0;
+    let last7d = 0;
+    for (const c of tabAndSearchFilteredConvs) {
+      const ts = c.lastMessageAt || 0;
+      if (!ts) continue;
+      if (ts >= dateBounds.todayStart && ts <= dateBounds.todayEnd) today++;
+      if (ts >= dateBounds.yesterdayStart && ts <= dateBounds.yesterdayEnd) yesterday++;
+      if (ts >= dateBounds.last7dStart && ts <= dateBounds.todayEnd) last7d++;
+    }
+    return {
+      ALL: tabAndSearchFilteredConvs.length,
+      TODAY: today,
+      YESTERDAY: yesterday,
+      LAST_7D: last7d,
+    };
+  }, [tabAndSearchFilteredConvs, dateBounds]);
+
+  // ── Filter logic (memoized to avoid re-calculating on unrelated renders) ──
+  const filteredConversations = useMemo(() => {
+    if (datePreset === "ALL") return tabAndSearchFilteredConvs;
+
+    let rangeStart: number | null = null;
+    let rangeEnd: number | null = null;
+
+    if (datePreset === "TODAY") {
+      rangeStart = dateBounds.todayStart;
+      rangeEnd = dateBounds.todayEnd;
+    } else if (datePreset === "YESTERDAY") {
+      rangeStart = dateBounds.yesterdayStart;
+      rangeEnd = dateBounds.yesterdayEnd;
+    } else if (datePreset === "LAST_7D") {
+      rangeStart = dateBounds.last7dStart;
+      rangeEnd = dateBounds.todayEnd;
+    } else if (datePreset === "CUSTOM") {
+      const fromBounds = customDateFrom ? parseLocalDayBounds(customDateFrom) : null;
+      const toBounds = customDateTo ? parseLocalDayBounds(customDateTo) : null;
+      if (fromBounds && toBounds) {
+        rangeStart = Math.min(fromBounds.start, toBounds.start);
+        rangeEnd = Math.max(fromBounds.end, toBounds.end);
+      } else if (fromBounds) {
+        rangeStart = fromBounds.start;
+        rangeEnd = fromBounds.end;
+      } else if (toBounds) {
+        rangeStart = toBounds.start;
+        rangeEnd = toBounds.end;
+      } else {
+        return tabAndSearchFilteredConvs;
+      }
+    }
+
+    return tabAndSearchFilteredConvs.filter((conv) => {
+      const ts = conv.lastMessageAt || 0;
+      if (!ts) return false;
+      if (rangeStart !== null && ts < rangeStart) return false;
+      if (rangeEnd !== null && ts > rangeEnd) return false;
+      return true;
+    });
+  }, [tabAndSearchFilteredConvs, datePreset, dateBounds, customDateFrom, customDateTo]);
+
+  const isDateFiltered =
+    datePreset !== "ALL" &&
+    (datePreset !== "CUSTOM" || Boolean(customDateFrom || customDateTo));
+
+  const dateFilterDisplayLabel = useMemo(() => {
+    if (datePreset === "TODAY") return "Today";
+    if (datePreset === "YESTERDAY") return "Yesterday";
+    if (datePreset === "LAST_7D") return "Last 7 Days";
+    if (datePreset === "CUSTOM") {
+      if (customDateFrom && customDateTo && customDateFrom !== customDateTo) {
+        return `${formatShortIsoDate(customDateFrom)} – ${formatShortIsoDate(customDateTo)}`;
+      }
+      if (customDateFrom) return formatShortIsoDate(customDateFrom);
+      if (customDateTo) return formatShortIsoDate(customDateTo);
+    }
+    return "All Dates";
+  }, [datePreset, customDateFrom, customDateTo]);
+
+  const resetDateFilter = useCallback(() => {
+    setDatePreset("ALL");
+    setCustomDateFrom("");
+    setCustomDateTo("");
+  }, []);
 
   // Use activeChatId directly — memoized lookup
   const activeConv = useMemo(() => {
@@ -276,8 +425,14 @@ export default function InboxPage() {
   // Delivery error state for active chat
   const [sendError, setSendError] = useState<ParsedMetaError | null>(null);
 
-  // WhatsApp Message Edit & Reaction UI state
+  // WhatsApp Message Edit, Unsend & Reaction UI state
   const [editingMessage, setEditingMessage] = useState<{ id: string; text: string } | null>(null);
+  const [unsendingMessage, setUnsendingMessage] = useState<{
+    id: string;
+    text: string;
+    hasAttachments: boolean;
+  } | null>(null);
+  const [isUnsending, setIsUnsending] = useState(false);
   const [replyingTo, setReplyingTo] = useState<{
     id: string;
     text: string;
@@ -659,6 +814,28 @@ export default function InboxPage() {
     [activeConv, isReadOnly, editMessage]
   );
 
+  const handleConfirmUnsendMessage = useCallback(async () => {
+    if (!activeConv || !unsendingMessage || isReadOnly || isUnsending) return;
+    const targetId = unsendingMessage.id;
+    setIsUnsending(true);
+    setSendError(null);
+    if (editingMessage?.id === targetId) setEditingMessage(null);
+    if (replyingTo?.id === targetId) setReplyingTo(null);
+    setUnsendingMessage(null);
+
+    try {
+      const res = await unsendMessage(activeConv.id, targetId);
+      if (!res.ok) {
+        setSendError({
+          title: "Could not delete message",
+          message: res.error || "WhatsApp only allows deleting messages within 48 hours of sending.",
+        });
+      }
+    } finally {
+      setIsUnsending(false);
+    }
+  }, [activeConv, unsendingMessage, isReadOnly, isUnsending, editingMessage?.id, replyingTo?.id, unsendMessage]);
+
   const handleReactToMessage = useCallback(
     async (messageId: string, emoji: string) => {
       if (!activeConv || isReadOnly) return;
@@ -741,14 +918,201 @@ export default function InboxPage() {
         style={{ background: "var(--bg-card)", borderRight: "1px solid var(--border-main)" }}
       >
         <div className="p-3.5 space-y-2.5" style={{ borderBottom: "1px solid var(--border-main)" }}>
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <h1 className="text-[17px] font-bold flex items-center gap-2" style={{ color: "var(--text-primary)" }}>
               Inbox
               <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full" style={{ background: "var(--bg-pill)", color: "var(--text-secondary)" }}>
                 {filteredConversations.length}
-                {searchQuery.trim() && ` of ${conversations.length}`}
+                {(searchQuery.trim() || isDateFiltered) && ` of ${conversations.length}`}
               </span>
             </h1>
+
+            {/* Date Filter Popover */}
+            <div className="relative inline-block" ref={datePopoverRef}>
+              <button
+                type="button"
+                onClick={() => setShowDatePopover((prev) => !prev)}
+                className="h-[22px] px-1.5 text-[10px] font-medium rounded-md flex items-center gap-1 transition-colors cursor-pointer select-none hover:opacity-90"
+                style={{
+                  background: isDateFiltered ? "rgba(0, 102, 255, 0.08)" : "var(--bg-pill)",
+                  border: isDateFiltered ? "1px solid #0066FF" : "1px solid var(--border-input)",
+                  color: isDateFiltered ? "#0066FF" : "var(--text-secondary)",
+                }}
+                title="Filter conversations by date"
+              >
+                <Calendar className="w-2.5 h-2.5 shrink-0" />
+                <span className="truncate max-w-[95px] font-semibold leading-none">
+                  {dateFilterDisplayLabel}
+                </span>
+                {isDateFiltered && (
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      resetDateFilter();
+                    }}
+                    className="hover:text-red-500 font-bold text-[9px] leading-none"
+                    title="Reset date filter"
+                  >
+                    ✕
+                  </span>
+                )}
+                <ChevronDown
+                  className={`w-2.5 h-2.5 opacity-70 transition-transform duration-150 shrink-0 ${
+                    showDatePopover ? "rotate-180" : ""
+                  }`}
+                />
+              </button>
+
+              {showDatePopover && (
+                <div
+                  className="absolute right-0 top-[calc(100%+4px)] z-50 w-[235px] rounded-xl shadow-2xl p-2 flex flex-col gap-1.5 animate-in fade-in zoom-in-95 duration-150"
+                  style={{
+                    background: "var(--bg-card)",
+                    border: "1px solid var(--border-main)",
+                    backdropFilter: "blur(16px)",
+                  }}
+                >
+                  {/* Quick Presets */}
+                  <div className="flex flex-col gap-0.5">
+                    {(
+                      [
+                        { id: "ALL", label: "All Dates", count: datePresetCounts.ALL },
+                        { id: "TODAY", label: "Today", count: datePresetCounts.TODAY },
+                        { id: "YESTERDAY", label: "Yesterday", count: datePresetCounts.YESTERDAY },
+                        { id: "LAST_7D", label: "Last 7 Days", count: datePresetCounts.LAST_7D },
+                      ] as const
+                    ).map((preset) => {
+                      const active = datePreset === preset.id;
+                      return (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() => {
+                            setDatePreset(preset.id);
+                            setCustomDateFrom("");
+                            setCustomDateTo("");
+                            setShowDatePopover(false);
+                          }}
+                          className={`w-full px-2.5 py-1.5 rounded-lg text-left text-[11px] font-semibold flex items-center justify-between transition-colors cursor-pointer ${
+                            active
+                              ? "bg-[#0066FF] text-white"
+                              : "hover:bg-[var(--bg-pill)] text-[var(--text-primary)]"
+                          }`}
+                        >
+                          <span>{preset.label}</span>
+                          <span
+                            className={`text-[10px] px-1.5 py-0.5 rounded-md font-bold ${
+                              active
+                                ? "bg-white/20 text-white"
+                                : preset.count > 0
+                                ? "text-[#0066FF] bg-[#0066FF]/10"
+                                : "bg-[var(--bg-pill)] text-[var(--text-muted)]"
+                            }`}
+                          >
+                            {preset.count}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Custom Date / Range */}
+                  <div
+                    className="pt-2 flex flex-col gap-2"
+                    style={{ borderTop: "1px solid var(--border-main)" }}
+                  >
+                    <p
+                      className="text-[10px] font-bold uppercase tracking-wider px-1"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      Custom Date or Range
+                    </p>
+                    <div className="flex flex-col gap-1.5 px-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <label
+                          className="text-[11px] font-medium shrink-0 w-10"
+                          style={{ color: "var(--text-secondary)" }}
+                        >
+                          Date
+                        </label>
+                        <input
+                          type="date"
+                          value={customDateFrom}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setCustomDateFrom(val);
+                            if (val || customDateTo) {
+                              setDatePreset("CUSTOM");
+                            } else {
+                              setDatePreset("ALL");
+                            }
+                          }}
+                          className="flex-1 h-[28px] px-2 text-[11px] font-medium rounded-lg outline-none cursor-pointer"
+                          style={{
+                            background: "var(--bg-input)",
+                            border: "1px solid var(--border-input)",
+                            color: "var(--text-primary)",
+                          }}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <label
+                          className="text-[11px] font-medium shrink-0 w-10"
+                          style={{ color: "var(--text-secondary)" }}
+                        >
+                          To
+                        </label>
+                        <input
+                          type="date"
+                          value={customDateTo}
+                          min={customDateFrom || undefined}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setCustomDateTo(val);
+                            if (val || customDateFrom) {
+                              setDatePreset("CUSTOM");
+                            } else {
+                              setDatePreset("ALL");
+                            }
+                          }}
+                          placeholder="Optional"
+                          className="flex-1 h-[28px] px-2 text-[11px] font-medium rounded-lg outline-none cursor-pointer"
+                          style={{
+                            background: "var(--bg-input)",
+                            border: "1px solid var(--border-input)",
+                            color: "var(--text-primary)",
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {isDateFiltered && (
+                    <div
+                      className="pt-1.5 flex items-center justify-between px-1"
+                      style={{ borderTop: "1px solid var(--border-main)" }}
+                    >
+                      <span
+                        className="text-[10px] truncate max-w-[140px]"
+                        style={{ color: "var(--text-secondary)" }}
+                      >
+                        Showing: <strong style={{ color: "var(--text-primary)" }}>{dateFilterDisplayLabel}</strong>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          resetDateFilter();
+                          setShowDatePopover(false);
+                        }}
+                        className="text-[10px] font-bold text-[#0066FF] hover:underline cursor-pointer shrink-0 ml-2"
+                      >
+                        Reset
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Filters */}
@@ -780,21 +1144,39 @@ export default function InboxPage() {
               <p className="text-[11px] mt-1 mb-3" style={{ color: "var(--text-secondary)" }}>
                 {searchQuery
                   ? `No conversations match "${searchQuery}"`
+                  : isDateFiltered
+                  ? `No conversations in ${activeFilter} for ${dateFilterDisplayLabel}`
                   : `No conversations in ${activeFilter}`}
               </p>
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => setSearchQuery("")}
-                  className="text-[11px] font-semibold px-3 py-1.5 rounded-lg transition-opacity hover:opacity-90"
-                  style={{
-                    background: "#0066FF",
-                    color: "#ffffff",
-                  }}
-                >
-                  Clear search
-                </button>
-              )}
+              <div className="flex items-center justify-center gap-2 flex-wrap">
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery("")}
+                    className="text-[11px] font-semibold px-3 py-1.5 rounded-lg transition-opacity hover:opacity-90 cursor-pointer"
+                    style={{
+                      background: "#0066FF",
+                      color: "#ffffff",
+                    }}
+                  >
+                    Clear search
+                  </button>
+                )}
+                {isDateFiltered && (
+                  <button
+                    type="button"
+                    onClick={resetDateFilter}
+                    className="text-[11px] font-semibold px-3 py-1.5 rounded-lg transition-opacity hover:opacity-90 cursor-pointer"
+                    style={{
+                      background: "var(--bg-pill)",
+                      border: "1px solid var(--border-input)",
+                      color: "var(--text-primary)",
+                    }}
+                  >
+                    Reset date filter
+                  </button>
+                )}
+              </div>
             </div>
           ) : (
             filteredConversations.map((conv) => {
@@ -1118,14 +1500,24 @@ export default function InboxPage() {
                   }
 
                   const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
+                  const FORTY_EIGHT_HOURS_MS = 48 * 60 * 60 * 1000;
+                  const isDeletedMsg = Boolean(msg.isDeleted);
                   const canEditThisMessage =
                     !isReadOnly &&
+                    !isDeletedMsg &&
                     !msg.isIncoming &&
                     showPlainText &&
                     activeConv.channel === "WA" &&
                     (!msg.timestamp || Date.now() - msg.timestamp <= FIFTEEN_MINUTES_MS);
-                  const canReplyToThisMessage = !isReadOnly;
-                  const canReactToThisMessage = !isReadOnly && activeConv.channel === "WA";
+                  const canUnsendThisMessage =
+                    !isReadOnly &&
+                    !isDeletedMsg &&
+                    !msg.isIncoming &&
+                    !msg.id.startsWith("temp_") &&
+                    activeConv.channel === "WA" &&
+                    (!msg.timestamp || Date.now() - msg.timestamp <= FORTY_EIGHT_HOURS_MS);
+                  const canReplyToThisMessage = !isReadOnly && !isDeletedMsg;
+                  const canReactToThisMessage = !isReadOnly && !isDeletedMsg && activeConv.channel === "WA";
                   const isEditingThis = editingMessage?.id === msg.id;
                   const isReplyingToThis = replyingTo?.id === msg.id;
                   const isReactionOpen = activeReactionMenu?.msgId === msg.id;
@@ -1346,236 +1738,253 @@ export default function InboxPage() {
                             );
                           })()}
 
-                          {/* Media attachments (photos, files/documents, voice notes, video) */}
-                          {msg.attachments && msg.attachments.length > 0 && (
-                            <div className="flex flex-col gap-2 mb-1.5">
-                              {msg.attachments.map((att: any, idx: number) => {
-                                if (isTemplateAttachment(att)) return null;
-                                const url = att.previewUrl || att.payload?.url || att.url;
-                                const fileName =
-                                  att.fileName ||
-                                  att.payload?.title ||
-                                  att.title ||
-                                  (att.type === "file" && msg.text && !isPlaceholderText(msg.text)
-                                    ? msg.text
-                                    : undefined);
-                                const fileSizeStr = formatFileSize(att.fileSize);
-                                const downloadUrl =
-                                  url && !url.startsWith("blob:")
-                                    ? `${url}${url.includes("?") ? "&" : "?"}download=1&name=${encodeURIComponent(
-                                        fileName || "attachment"
-                                      )}`
-                                    : url;
+                          {/* Deleted Message Placeholder (WhatsApp Unsend for Everyone) */}
+                          {isDeletedMsg ? (
+                            <p
+                              className="text-[13px] md:text-[14px] italic flex items-center gap-1.5 select-none opacity-80"
+                              style={{
+                                color: msg.isIncoming
+                                  ? "var(--text-secondary)"
+                                  : "var(--text-chat-outgoing)",
+                              }}
+                            >
+                              <Trash2 className="w-3.5 h-3.5 shrink-0 opacity-75" />
+                              <span>This message was deleted</span>
+                            </p>
+                          ) : (
+                            <>
+                              {/* Media attachments (photos, files/documents, voice notes, video) */}
+                              {msg.attachments && msg.attachments.length > 0 && (
+                                <div className="flex flex-col gap-2 mb-1.5">
+                                  {msg.attachments.map((att: any, idx: number) => {
+                                    if (isTemplateAttachment(att)) return null;
+                                    const url = att.previewUrl || att.payload?.url || att.url;
+                                    const fileName =
+                                      att.fileName ||
+                                      att.payload?.title ||
+                                      att.title ||
+                                      (att.type === "file" && msg.text && !isPlaceholderText(msg.text)
+                                        ? msg.text
+                                        : undefined);
+                                    const fileSizeStr = formatFileSize(att.fileSize);
+                                    const downloadUrl =
+                                      url && !url.startsWith("blob:")
+                                        ? `${url}${url.includes("?") ? "&" : "?"}download=1&name=${encodeURIComponent(
+                                            fileName || "attachment"
+                                          )}`
+                                        : url;
 
-                                if (att.type === "image") {
-                                  if (url) {
-                                    return (
-                                      <div
-                                        key={idx}
-                                        className="relative group/img overflow-hidden rounded-xl max-w-[300px]"
-                                      >
-                                        <img
-                                          src={url}
-                                          alt={fileName || "Photo"}
-                                          loading="lazy"
-                                          onClick={() =>
-                                            setLightboxImage({ url, fileName: fileName || "Photo.jpg" })
-                                          }
-                                          className="max-w-full rounded-xl max-h-72 object-cover cursor-zoom-in transition-transform duration-150 hover:scale-[1.01]"
-                                        />
-                                        <a
-                                          href={downloadUrl}
-                                          download={fileName || "Photo.jpg"}
-                                          onClick={(e) => e.stopPropagation()}
-                                          title="Download photo"
-                                          className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center opacity-0 group-hover/img:opacity-100 transition-opacity shadow-sm"
-                                        >
-                                          <Download className="w-3.5 h-3.5" />
-                                        </a>
-                                      </div>
-                                    );
-                                  }
-                                  return (
-                                    <div
-                                      key={idx}
-                                      className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg text-[12px] font-medium border border-black/10 dark:border-white/10 ${
-                                        msg.isIncoming
-                                          ? "bg-[var(--bg-pill)] text-[var(--text-primary)]"
-                                          : "bg-white/85 dark:bg-white/5 text-[var(--text-chat-outgoing)]"
-                                      }`}
-                                    >
-                                      <ImageIcon className="w-4 h-4 shrink-0 opacity-80" />
-                                      <span>Photo</span>
-                                    </div>
-                                  );
-                                }
-
-                                if (att.type === "file" || att.type === "document") {
-                                  const displayFileName = fileName || "Document";
-                                  const ext = displayFileName.includes(".")
-                                    ? displayFileName.split(".").pop()?.toUpperCase().slice(0, 5) || "FILE"
-                                    : "FILE";
-                                  return (
-                                    <div
-                                      key={idx}
-                                      className="flex items-center justify-between gap-3 p-2.5 rounded-xl border min-w-[210px] max-w-[320px] transition-colors"
-                                      style={{
-                                        background: msg.isIncoming ? "var(--bg-pill)" : "var(--file-card-bg)",
-                                        borderColor: "var(--file-card-border)",
-                                      }}
-                                    >
-                                      <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                    if (att.type === "image") {
+                                      if (url) {
+                                        return (
+                                          <div
+                                            key={idx}
+                                            className="relative group/img overflow-hidden rounded-xl max-w-[300px]"
+                                          >
+                                            <img
+                                              src={url}
+                                              alt={fileName || "Photo"}
+                                              loading="lazy"
+                                              onClick={() =>
+                                                setLightboxImage({ url, fileName: fileName || "Photo.jpg" })
+                                              }
+                                              className="max-w-full rounded-xl max-h-72 object-cover cursor-zoom-in transition-transform duration-150 hover:scale-[1.01]"
+                                            />
+                                            <a
+                                              href={downloadUrl}
+                                              download={fileName || "Photo.jpg"}
+                                              onClick={(e) => e.stopPropagation()}
+                                              title="Download photo"
+                                              className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white flex items-center justify-center opacity-0 group-hover/img:opacity-100 transition-opacity shadow-sm"
+                                            >
+                                              <Download className="w-3.5 h-3.5" />
+                                            </a>
+                                          </div>
+                                        );
+                                      }
+                                      return (
                                         <div
-                                          className="w-10 h-10 rounded-lg flex flex-col items-center justify-center shrink-0 border"
+                                          key={idx}
+                                          className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg text-[12px] font-medium border border-black/10 dark:border-white/10 ${
+                                            msg.isIncoming
+                                              ? "bg-[var(--bg-pill)] text-[var(--text-primary)]"
+                                              : "bg-white/85 dark:bg-white/5 text-[var(--text-chat-outgoing)]"
+                                          }`}
+                                        >
+                                          <ImageIcon className="w-4 h-4 shrink-0 opacity-80" />
+                                          <span>Photo</span>
+                                        </div>
+                                      );
+                                    }
+
+                                    if (att.type === "file" || att.type === "document") {
+                                      const displayFileName = fileName || "Document";
+                                      const ext = displayFileName.includes(".")
+                                        ? displayFileName.split(".").pop()?.toUpperCase().slice(0, 5) || "FILE"
+                                        : "FILE";
+                                      return (
+                                        <div
+                                          key={idx}
+                                          className="flex items-center justify-between gap-3 p-2.5 rounded-xl border min-w-[210px] max-w-[320px] transition-colors"
                                           style={{
-                                            background: "var(--file-icon-bg)",
-                                            borderColor: "var(--file-icon-border)",
-                                            color: "var(--file-icon-color)",
+                                            background: msg.isIncoming ? "var(--bg-pill)" : "var(--file-card-bg)",
+                                            borderColor: "var(--file-card-border)",
                                           }}
                                         >
-                                          <FileText className="w-4 h-4" />
-                                          <span className="text-[8px] font-extrabold leading-none mt-0.5">
-                                            {ext}
-                                          </span>
+                                          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                            <div
+                                              className="w-10 h-10 rounded-lg flex flex-col items-center justify-center shrink-0 border"
+                                              style={{
+                                                background: "var(--file-icon-bg)",
+                                                borderColor: "var(--file-icon-border)",
+                                                color: "var(--file-icon-color)",
+                                              }}
+                                            >
+                                              <FileText className="w-4 h-4" />
+                                              <span className="text-[8px] font-extrabold leading-none mt-0.5">
+                                                {ext}
+                                              </span>
+                                            </div>
+                                            <div className="min-w-0 flex-1">
+                                              <p
+                                                className="text-[12px] font-semibold truncate"
+                                                style={{
+                                                  color: msg.isIncoming
+                                                    ? "var(--text-chat-incoming)"
+                                                    : "var(--text-chat-outgoing)",
+                                                }}
+                                                title={displayFileName}
+                                              >
+                                                {displayFileName}
+                                              </p>
+                                              <p
+                                                className="text-[10px] mt-0.5 opacity-80"
+                                                style={{
+                                                  color: msg.isIncoming
+                                                    ? "var(--text-secondary)"
+                                                    : "var(--text-chat-outgoing)",
+                                                }}
+                                              >
+                                                {fileSizeStr ? `${ext} · ${fileSizeStr}` : `${ext} Document`}
+                                              </p>
+                                            </div>
+                                          </div>
+
+                                          {url && (
+                                            <div className="flex items-center gap-1 shrink-0">
+                                              <a
+                                                href={url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                title="Open file"
+                                                className="p-1.5 rounded-lg hover:bg-black/10 dark:hover:bg-white/15 transition-colors"
+                                                style={{
+                                                  color: msg.isIncoming
+                                                    ? "var(--text-primary)"
+                                                    : "var(--text-chat-outgoing)",
+                                                }}
+                                              >
+                                                <ExternalLink className="w-3.5 h-3.5" />
+                                              </a>
+                                              <a
+                                                href={downloadUrl}
+                                                download={displayFileName}
+                                                title="Download file"
+                                                className="p-1.5 rounded-lg hover:bg-black/10 dark:hover:bg-white/15 transition-colors"
+                                                style={{
+                                                  color: msg.isIncoming
+                                                    ? "var(--text-primary)"
+                                                    : "var(--text-chat-outgoing)",
+                                                }}
+                                              >
+                                                <Download className="w-3.5 h-3.5" />
+                                              </a>
+                                            </div>
+                                          )}
                                         </div>
-                                        <div className="min-w-0 flex-1">
-                                          <p
-                                            className="text-[12px] font-semibold truncate"
-                                            style={{
-                                              color: msg.isIncoming
-                                                ? "var(--text-chat-incoming)"
-                                                : "var(--text-chat-outgoing)",
-                                            }}
-                                            title={displayFileName}
-                                          >
-                                            {displayFileName}
-                                          </p>
-                                          <p
-                                            className="text-[10px] mt-0.5 opacity-80"
-                                            style={{
-                                              color: msg.isIncoming
-                                                ? "var(--text-secondary)"
-                                                : "var(--text-chat-outgoing)",
-                                            }}
-                                          >
-                                            {fileSizeStr ? `${ext} · ${fileSizeStr}` : `${ext} Document`}
-                                          </p>
-                                        </div>
-                                      </div>
+                                      );
+                                    }
 
-                                      {url && (
-                                        <div className="flex items-center gap-1 shrink-0">
-                                          <a
-                                            href={url}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            title="Open file"
-                                            className="p-1.5 rounded-lg hover:bg-black/10 dark:hover:bg-white/15 transition-colors"
-                                            style={{
-                                              color: msg.isIncoming
-                                                ? "var(--text-primary)"
-                                                : "var(--text-chat-outgoing)",
-                                            }}
-                                          >
-                                            <ExternalLink className="w-3.5 h-3.5" />
-                                          </a>
-                                          <a
-                                            href={downloadUrl}
-                                            download={displayFileName}
-                                            title="Download file"
-                                            className="p-1.5 rounded-lg hover:bg-black/10 dark:hover:bg-white/15 transition-colors"
-                                            style={{
-                                              color: msg.isIncoming
-                                                ? "var(--text-primary)"
-                                                : "var(--text-chat-outgoing)",
-                                            }}
-                                          >
-                                            <Download className="w-3.5 h-3.5" />
-                                          </a>
-                                        </div>
-                                      )}
-                                    </div>
-                                  );
-                                }
+                                    if (att.type === "audio" && url) {
+                                      return (
+                                        <audio key={idx} controls className="max-w-full my-1">
+                                          <source src={url} />
+                                        </audio>
+                                      );
+                                    }
+                                    if (att.type === "video" && url) {
+                                      return (
+                                        <video
+                                          key={idx}
+                                          controls
+                                          playsInline
+                                          preload="metadata"
+                                          className="max-w-full rounded-xl max-h-64 my-1"
+                                        >
+                                          <source src={url} />
+                                        </video>
+                                      );
+                                    }
+                                    if (
+                                      att.type === "ig_post" ||
+                                      att.type === "ig_reel" ||
+                                      att.type === "share"
+                                    ) {
+                                      return (
+                                        <InstagramMedia
+                                          key={idx}
+                                          url={att.payload?.url || att.url}
+                                          title={att.payload?.title || att.title}
+                                          type={att.type}
+                                          mediaId={att.payload?.ig_post_media_id}
+                                        />
+                                      );
+                                    }
+                                    return null;
+                                  })}
+                                </div>
+                              )}
 
-                                if (att.type === "audio" && url) {
-                                  return (
-                                    <audio key={idx} controls className="max-w-full my-1">
-                                      <source src={url} />
-                                    </audio>
-                                  );
-                                }
-                                if (att.type === "video" && url) {
-                                  return (
-                                    <video
-                                      key={idx}
-                                      controls
-                                      playsInline
-                                      preload="metadata"
-                                      className="max-w-full rounded-xl max-h-64 my-1"
-                                    >
-                                      <source src={url} />
-                                    </video>
-                                  );
-                                }
-                                if (
-                                  att.type === "ig_post" ||
-                                  att.type === "ig_reel" ||
-                                  att.type === "share"
-                                ) {
-                                  return (
-                                    <InstagramMedia
-                                      key={idx}
-                                      url={att.payload?.url || att.url}
-                                      title={att.payload?.title || att.title}
-                                      type={att.type}
-                                      mediaId={att.payload?.ig_post_media_id}
-                                    />
-                                  );
-                                }
-                                return null;
-                              })}
-                            </div>
-                          )}
+                              {/* Text content (e.g. form comments or lead message) */}
+                              {showPlainText && (
+                                <p
+                                  className={`text-[14px] md:text-[15px] leading-relaxed whitespace-pre-wrap break-words ${
+                                    hasTemplateAttachment || shouldRenderFallbackCard ? "mb-3" : ""
+                                  } ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
+                                  style={{ color: msg.isIncoming ? "var(--text-chat-incoming)" : "var(--text-chat-outgoing)" }}
+                                  dir={msg.dir}
+                                >
+                                  {activeConv.channel === "WA" ? renderWhatsAppText(msg.text) : msg.text}
+                                </p>
+                              )}
 
-                          {/* Text content (e.g. form comments or lead message) */}
-                          {showPlainText && (
-                            <p
-                              className={`text-[14px] md:text-[15px] leading-relaxed whitespace-pre-wrap break-words ${
-                                hasTemplateAttachment || shouldRenderFallbackCard ? "mb-3" : ""
-                              } ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
-                              style={{ color: msg.isIncoming ? "var(--text-chat-incoming)" : "var(--text-chat-outgoing)" }}
-                              dir={msg.dir}
-                            >
-                              {activeConv.channel === "WA" ? renderWhatsAppText(msg.text) : msg.text}
-                            </p>
-                          )}
+                              {/* Template card attachments */}
+                              {hasTemplateAttachment && (
+                                <div className="flex flex-col gap-2.5">
+                                  {msg.attachments
+                                    ?.filter(isTemplateAttachment)
+                                    .map((att: any, idx: number) => (
+                                      <MessageTemplate
+                                        key={idx}
+                                        attachment={att}
+                                        isIncoming={msg.isIncoming}
+                                        senderPhone={convPhone}
+                                      />
+                                    ))}
+                                </div>
+                              )}
 
-                          {/* Template card attachments */}
-                          {hasTemplateAttachment && (
-                            <div className="flex flex-col gap-2.5">
-                              {msg.attachments
-                                ?.filter(isTemplateAttachment)
-                                .map((att: any, idx: number) => (
-                                  <MessageTemplate
-                                    key={idx}
-                                    attachment={att}
-                                    isIncoming={msg.isIncoming}
-                                    senderPhone={convPhone}
-                                  />
-                                ))}
-                            </div>
-                          )}
-
-                          {/* Graceful fallback card for legacy messages that stored placeholder text */}
-                          {shouldRenderFallbackCard && (
-                            <MessageTemplate
-                              attachment={{
-                                type: "template",
-                              }}
-                              isIncoming={msg.isIncoming}
-                              senderPhone={convPhone}
-                            />
+                              {/* Graceful fallback card for legacy messages that stored placeholder text */}
+                              {shouldRenderFallbackCard && (
+                                <MessageTemplate
+                                  attachment={{
+                                    type: "template",
+                                  }}
+                                  isIncoming={msg.isIncoming}
+                                  senderPhone={convPhone}
+                                />
+                              )}
+                            </>
                           )}
 
                           {/* WhatsApp Message Footer: Sender · Edited · Time · Read Ticks */}
@@ -1588,14 +1997,33 @@ export default function InboxPage() {
                               opacity: msg.isIncoming ? 1 : 0.78,
                             }}
                           >
-                            {!msg.isIncoming && msg.senderName && (
+                            {!msg.isIncoming && msg.senderName && !isDeletedMsg && (
                               <span className="font-semibold">{msg.senderName} ·</span>
                             )}
-                            {msg.isEdited && (
+                            {isDeletedMsg && (() => {
+                              const realDeletedBy =
+                                msg.deletedBy && msg.deletedBy !== "Staff" ? msg.deletedBy : null;
+                              const realSenderName =
+                                msg.senderName && msg.senderName !== "Staff" ? msg.senderName : null;
+                              const deletedByName =
+                                realDeletedBy ||
+                                (!msg.isIncoming
+                                  ? realSenderName || user?.name || "Staff"
+                                  : activeConv.leadName ||
+                                    activeConv.profileName ||
+                                    activeConv.name ||
+                                    "Customer");
+                              return (
+                                <span className="italic font-medium opacity-90">
+                                  Deleted by {deletedByName} ·
+                                </span>
+                              );
+                            })()}
+                            {!isDeletedMsg && msg.isEdited && (
                               <span className="italic opacity-90">Edited ·</span>
                             )}
                             <span>{msg.time}</span>
-                            {!msg.isIncoming && (
+                            {!msg.isIncoming && !isDeletedMsg && (
                               <span className="inline-flex items-center ml-0.5" title={msg.status || "sent"}>
                                 {msg.status === "pending" ? (
                                   <Clock className="w-3 h-3 opacity-80 animate-pulse" />
@@ -1729,7 +2157,29 @@ export default function InboxPage() {
                             </button>
                           )}
 
-                          {showPlainText && (
+                          {/* WhatsApp Delete for Everyone (<48h) — Only on WhatsApp */}
+                          {canUnsendThisMessage && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setActiveReactionMenu(null);
+                                setFullEmojiMenu(null);
+                                setUnsendingMessage({
+                                  id: msg.id,
+                                  text: msg.text || "",
+                                  hasAttachments: Boolean(msg.attachments && msg.attachments.length > 0),
+                                });
+                              }}
+                              title="Delete for everyone"
+                              className="p-1.5 rounded-full border border-transparent hover:border-red-500 hover:text-red-500 transition-colors cursor-pointer"
+                              style={{ color: "var(--text-secondary)" }}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+
+                          {showPlainText && !isDeletedMsg && (
                             <button
                               type="button"
                               onClick={(e) => {
@@ -2010,7 +2460,7 @@ export default function InboxPage() {
 
             <div className="mb-5">
               <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Audition</h3>
-              {(activeConv.pipeline === "Audition Booked" || activeConv.auditionOutcome || activeConv.auditionDate) ? (
+              {(activeConv.pipeline === "Audition Booked" || activeConv.auditionDate || (activeConv.auditionOutcome && activeConv.auditionOutcome !== "joining-later")) ? (
                 <div
                   className="p-3 rounded-lg border mb-2"
                   style={{
@@ -2107,7 +2557,7 @@ export default function InboxPage() {
 
             {/* Follow-up */}
             {(() => {
-              const isJoiningLater = activeConv.auditionOutcome === 'joining-later';
+              const isJoiningLater = activeConv.pipeline === 'Joining Later' || activeConv.auditionOutcome === 'joining-later';
               const tags = activeConv.followUpTags || [];
               const isPaymentPending = tags.includes('payment-pending');
               const isTrialSession = tags.includes('trial-session');
@@ -2116,10 +2566,17 @@ export default function InboxPage() {
               const handleToggleJoiningLater = () => {
                 if (isReadOnly) return;
                 if (isJoiningLater) {
-                  // Revert Joining Later outcome back to regular follow-up
-                  patchConversation(activeConv.id, { auditionOutcome: '' });
+                  // Revert Joining Later outcome & pipeline stage back to regular follow-up
+                  const nextPipeline =
+                    activeConv.pipeline === 'Joining Later'
+                      ? (activeConv.auditionDate ? 'Audition Booked' : 'Contacted')
+                      : activeConv.pipeline;
+                  patchConversation(activeConv.id, {
+                    auditionOutcome: '',
+                    pipeline: nextPipeline,
+                  });
                 } else {
-                  // Turn ON Joining Later with smart defaults (+14 days)
+                  // Turn ON Joining Later with smart defaults (+14 days) and move to Joining Later pipeline stage
                   const d = new Date();
                   d.setDate(d.getDate() + 14);
                   const y = d.getFullYear();
@@ -2128,6 +2585,7 @@ export default function InboxPage() {
                   const defaultDate = `${y}-${m}-${day}`;
 
                   const updates: Record<string, any> = {
+                    pipeline: 'Joining Later',
                     auditionOutcome: 'joining-later',
                     followUpCompleted: false,
                   };
@@ -2136,9 +2594,6 @@ export default function InboxPage() {
                   }
                   if (!activeConv.followUpNote || !activeConv.followUpNote.trim()) {
                     updates.followUpNote = 'Joining Later - Follow up';
-                  }
-                  if (activeConv.pipeline === 'Audition Booked') {
-                    updates.pipeline = 'Contacted';
                   }
                   patchConversation(activeConv.id, updates);
                 }
@@ -2191,12 +2646,17 @@ export default function InboxPage() {
 
               const handleClearFollowUp = () => {
                 if (isReadOnly) return;
+                const nextPipeline =
+                  activeConv.pipeline === 'Joining Later'
+                    ? (activeConv.auditionDate ? 'Audition Booked' : 'Contacted')
+                    : activeConv.pipeline;
                 patchConversation(activeConv.id, {
                   followUpDate: '',
                   followUpNote: '',
                   followUpCompleted: false,
                   followUpCompletedAt: null,
                   followUpTags: [],
+                  pipeline: nextPipeline,
                   auditionOutcome: (isJoiningLater || activeConv.auditionOutcome === 'schedule-followup') ? '' : activeConv.auditionOutcome,
                 });
               };
@@ -2572,6 +3032,78 @@ export default function InboxPage() {
                 style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}
               >
                 Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Delete Message Confirmation Modal (WhatsApp) ── */}
+      {unsendingMessage && activeConv && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150"
+          onClick={() => setUnsendingMessage(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl p-5 shadow-2xl flex flex-col gap-4"
+            style={{ background: "var(--bg-card)", border: "1px solid var(--border-main)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-[16px] font-bold" style={{ color: "var(--text-primary)" }}>
+                  Delete message for everyone?
+                </h3>
+                <p className="text-[12px] mt-1 leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+                  This will delete the message for everyone in the WhatsApp chat. A &ldquo;This message was deleted&rdquo; notice will remain in the conversation history.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setUnsendingMessage(null)}
+                className="p-1.5 rounded-lg transition-colors hover:opacity-70 cursor-pointer shrink-0"
+                style={{ color: "var(--text-secondary)" }}
+                aria-label="Close modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {(unsendingMessage.text || unsendingMessage.hasAttachments) && (
+              <div
+                className="px-3.5 py-2.5 rounded-xl text-[13px] line-clamp-3 break-words"
+                style={{
+                  background: "var(--bg-pill)",
+                  border: "1px solid var(--border-main)",
+                  color: "var(--text-primary)",
+                }}
+                dir="auto"
+              >
+                {unsendingMessage.text || "Attachment"}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setUnsendingMessage(null)}
+                className="h-[36px] px-4 text-[12px] font-medium rounded-xl cursor-pointer hover:opacity-80 transition-colors"
+                style={{
+                  background: "var(--bg-pill)",
+                  border: "1px solid var(--border-input)",
+                  color: "var(--text-secondary)",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isUnsending}
+                onClick={handleConfirmUnsendMessage}
+                className="h-[36px] px-4 text-[12px] font-semibold text-white rounded-xl cursor-pointer hover:opacity-90 transition-opacity disabled:opacity-50"
+                style={{ background: "#EF4444" }}
+              >
+                {isUnsending ? "Deleting..." : "Delete for everyone"}
               </button>
             </div>
           </div>

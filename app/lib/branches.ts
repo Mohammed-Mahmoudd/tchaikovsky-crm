@@ -92,9 +92,10 @@ export function useBranches() {
 
   const fetchBranches = useCallback(async () => {
     try {
-      const res = await fetch(API_URL);
-      const data = await res.json();
-      if (data.success && Array.isArray(data.data)) {
+      const res = await fetch(API_URL, { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => null);
+      if (data?.success && Array.isArray(data.data)) {
         setBranchGroups(data.data);
         setCache(data.data);
       }
@@ -107,6 +108,14 @@ export function useBranches() {
 
   useEffect(() => {
     fetchBranches();
+    if (typeof window === "undefined") return;
+    const handleBranchesUpdated = () => {
+      fetchBranches();
+    };
+    window.addEventListener("crm:branches-updated", handleBranchesUpdated);
+    return () => {
+      window.removeEventListener("crm:branches-updated", handleBranchesUpdated);
+    };
   }, [fetchBranches]);
 
   // Legacy-compatible format: { region, branches: string[] } — drop-in for BRANCH_GROUPS

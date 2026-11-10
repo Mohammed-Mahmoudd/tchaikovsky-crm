@@ -168,10 +168,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     fetch("/crm-api/auth/me", {
       headers: { Authorization: `Bearer ${stored}` },
     })
-      .then((r) => r.json())
-      .then((data) => {
+      .then(async (r) => {
+        const data = await r.json().catch(() => null);
+        return { status: r.status, ok: r.ok, data };
+      })
+      .then(({ status, data }) => {
         if (!ignore) {
-          if (data.success && data.user) {
+          if (data?.success && data.user) {
             setToken(stored);
             setUser((prev) => {
               const updated = {
@@ -183,7 +186,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               } catch {}
               return updated;
             });
-          } else {
+          } else if (status === 401 || status === 403) {
             localStorage.removeItem(TOKEN_KEY);
             localStorage.removeItem(USER_KEY);
             setToken(null);
@@ -211,7 +214,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: cleanEmail, password }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => null);
+      if (!data) {
+        return "Network error. Unable to reach authentication server.";
+      }
       if (!data.success) {
         return data.error || "Invalid email or password";
       }

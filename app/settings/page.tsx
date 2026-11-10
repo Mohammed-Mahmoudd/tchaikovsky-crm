@@ -166,9 +166,9 @@ export default function SettingsPage() {
     let cancelled = false;
     setLoadingUsage(true);
     authFetch(`/crm-api/branches/${branchToDelete.id}/usage`)
-      .then((r) => r.json())
+      .then((r) => (r.ok ? r.json().catch(() => null) : null))
       .then((data) => {
-        if (!cancelled && data.success && data.usage) {
+        if (!cancelled && data?.success && data.usage) {
           setBranchUsageStats(data.usage);
         }
       })
@@ -267,9 +267,9 @@ export default function SettingsPage() {
       }
       try {
         const res = await authFetch("/crm-api/auth/users");
-        const data = await res.json();
+        const data = res.ok ? await res.json().catch(() => null) : null;
         if (!ignore) {
-          if (data.success && Array.isArray(data.users)) {
+          if (data?.success && Array.isArray(data.users)) {
             setTeam(data.users);
             if (typeof data.maxSeats === "number") {
               setMaxSeats(data.maxSeats);

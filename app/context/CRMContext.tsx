@@ -36,6 +36,9 @@ export type Message = {
   senderName?: string;
   isEdited?: boolean;
   editedAt?: number;
+  isDeleted?: boolean;
+  deletedAt?: number;
+  deletedBy?: string;
   reactions?: MessageReaction[];
   replyTo?: MessageReplyTo;
 };
@@ -58,7 +61,7 @@ export type Conversation = {
   status: "Open" | "Pending" | "Resolved";
   unreadCount?: number;
   windowLeft?: string;
-  pipeline: "New" | "Contacted" | "Audition Booked" | "Attended" | "Enrolled" | "Unqualified" | "Lost" | "direct";
+  pipeline: "New" | "Contacted" | "Qualified" | "Audition Booked" | "Attended" | "Enrolled" | "Joining Later" | "Unqualified" | "Lost" | "direct";
   source:
   | {
     campaign?: string;
@@ -208,6 +211,7 @@ type CRMContextType = {
   deleteConversation: (id: string) => Promise<void>;
   clearWhatsAppConversations: () => Promise<void>;
   editMessage: (chatId: string, messageId: string, newText: string) => Promise<{ ok: boolean; error?: string }>;
+  unsendMessage: (chatId: string, messageId: string) => Promise<{ ok: boolean; error?: string }>;
   reactToMessage: (chatId: string, messageId: string, emoji: string) => Promise<boolean>;
   addOptimisticMessages: (chatId: string, msgs: Message[]) => void;
   finalizeOptimisticMessages: (chatId: string, tempIds: string[], confirmedRawMessages?: any[]) => void;
@@ -216,7 +220,8 @@ type CRMContextType = {
 const CRMContext = createContext<CRMContextType | undefined>(undefined);
 
 const API = "/api";
-const CACHE_KEY = "crm_conversations_cache";
+const CACHE_KEY = "crm_conversations_cache_v2";
+const LEGACY_CACHE_KEY = "crm_conversations_cache";
 const MANUAL_LEADS_KEY = "crm_manual_leads_v1";
 
 function getStoredManualLeads(): Record<string, Conversation> {
@@ -240,14 +245,42 @@ function persistManualLeads(map: Record<string, Conversation>) {
   } catch {}
 }
 
+function slimConversationsForStorage(convs: Conversation[], limit: number): Conversation[] {
+  return convs.slice(0, limit).map((c) => ({
+    ...c,
+    messages: [],
+    activityLog: Array.isArray(c.activityLog) ? c.activityLog.slice(0, 15) : [],
+    source:
+      c.source && typeof c.source === "object"
+        ? { ...c.source, activityLog: undefined }
+        : c.source,
+  }));
+}
+
 function getCachedConversations(): Conversation[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = localStorage.getItem(CACHE_KEY);
     if (raw) {
+      try {
+        localStorage.removeItem(LEGACY_CACHE_KEY);
+      } catch {}
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
         return parsed;
+      }
+    }
+    // One-time migration from legacy cache key if v2 is not written yet
+    const legacyRaw = localStorage.getItem(LEGACY_CACHE_KEY);
+    if (legacyRaw) {
+      localStorage.removeItem(LEGACY_CACHE_KEY);
+      const legacyParsed = JSON.parse(legacyRaw);
+      if (Array.isArray(legacyParsed) && legacyParsed.length > 0) {
+        const migrated = slimConversationsForStorage(legacyParsed, 250);
+        try {
+          localStorage.setItem(CACHE_KEY, JSON.stringify(migrated));
+        } catch {}
+        return migrated;
       }
     }
   } catch (e) {
@@ -256,11 +289,29 @@ function getCachedConversations(): Conversation[] {
   return [];
 }
 
+let cachePersistTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingCacheSnapshot: Conversation[] | null = null;
+
 function persistConversationsCache(convs: Conversation[]) {
   if (typeof window === "undefined") return;
-  try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify(convs));
-  } catch {}
+  pendingCacheSnapshot = convs;
+  if (cachePersistTimer !== null) return;
+  cachePersistTimer = setTimeout(() => {
+    cachePersistTimer = null;
+    const snapshot = pendingCacheSnapshot;
+    pendingCacheSnapshot = null;
+    if (!snapshot) return;
+    try {
+      localStorage.removeItem(LEGACY_CACHE_KEY);
+      const slimmed = slimConversationsForStorage(snapshot, 250);
+      localStorage.setItem(CACHE_KEY, JSON.stringify(slimmed));
+    } catch {
+      try {
+        const fallbackSlim = slimConversationsForStorage(snapshot, 100);
+        localStorage.setItem(CACHE_KEY, JSON.stringify(fallbackSlim));
+      } catch {}
+    }
+  }, 120);
 }
 
 function safeDateIso(val: any): string {
@@ -383,6 +434,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
   // ── Refs for stable closures (never cause re-creation of callbacks) ──
   const activeChatIdRef = useRef<string | null>(null);
+  const conversationsRef = useRef<Conversation[]>(conversations);
+  conversationsRef.current = conversations;
   const initialLoadDone = useRef(false);
 
   // Keep the ref in sync with state
@@ -404,71 +457,71 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   }, []);
   const router = useRouter();
 
-  // ── Fetch assignable agents and full team list once on mount (cached 60s on backend, ~0ms on hit) ──
-  useEffect(() => {
-    let ignore = false;
-    const fetchAgents = async () => {
-      try {
-        const mergedMap = new Map<string, AssignableAgent>();
-        const addMember = (m: any) => {
-          if (!m || !m.name) return;
-          if (m.active === false) return;
-          const cleanName = String(m.name).trim();
-          if (!cleanName) return;
-          const key = cleanName.toLowerCase();
-          mergedMap.set(key, {
-            name: cleanName,
-            role: String(m.role || "admission_officer").toLowerCase().trim(),
-            email: m.email ? String(m.email) : undefined,
-            avatar: m.avatar ? String(m.avatar) : undefined,
-            active: m.active !== false,
-          });
-        };
+  // ── Fetch assignable agents and full team list (cached on backend, invalidated on team_updated SSE) ──
+  const fetchAgents = useCallback(async () => {
+    try {
+      const mergedMap = new Map<string, AssignableAgent>();
+      const addMember = (m: any) => {
+        if (!m || !m.name) return;
+        if (m.active === false) return;
+        const cleanName = String(m.name).trim();
+        if (!cleanName) return;
+        const key = cleanName.toLowerCase();
+        mergedMap.set(key, {
+          name: cleanName,
+          role: String(m.role || "admission_officer").toLowerCase().trim(),
+          email: m.email ? String(m.email) : undefined,
+          avatar: m.avatar ? String(m.avatar) : undefined,
+          active: m.active !== false,
+        });
+      };
 
-        // 1. Fetch public/all agents endpoint
-        let res = await fetch(`${API}/messages/agents?all=1`);
-        if (!res.ok) {
-          res = await fetch(`${API}/agents?all=1`);
-        }
-        if (res.ok) {
-          const data = await res.json();
-          if (data.success && Array.isArray(data.data)) {
-            data.data.forEach(addMember);
-          }
-        }
-
-        // 2. If authenticated (e.g. Chairman), also fetch full users list so all roles (Enrollment Director, Finance, Marketing, etc.) are included even before backend restart
-        if (token) {
-          try {
-            const usersRes = await fetch(`${API}/auth/users`, {
-              headers: { Authorization: `Bearer ${token}` },
-            });
-            if (usersRes.ok) {
-              const usersData = await usersRes.json();
-              if (usersData.success && Array.isArray(usersData.users)) {
-                usersData.users.forEach(addMember);
-              }
-            }
-          } catch {}
-        }
-
-        if (!ignore && mergedMap.size > 0) {
-          const allMembers = Array.from(mergedMap.values());
-          setTeamMembers(allMembers);
-
-          const allowedRoles = ["chairman", "owner", "manager", "admission_officer", "agent"];
-          const filtered = allMembers.filter((a: AssignableAgent) =>
-            allowedRoles.includes((a.role || "").toLowerCase().trim())
-          );
-          setAssignableAgents(filtered);
-        }
-      } catch (e) {
-        console.warn("Failed to load assignable agents:", e);
+      // 1. Fetch public/all agents endpoint
+      let res = await fetch(`${API}/messages/agents?all=1`, { cache: "no-store" });
+      if (!res.ok) {
+        res = await fetch(`${API}/agents?all=1`, { cache: "no-store" });
       }
-    };
-    fetchAgents();
-    return () => { ignore = true; };
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        if (data?.success && Array.isArray(data.data)) {
+          data.data.forEach(addMember);
+        }
+      }
+
+      // 2. If authenticated (e.g. Chairman), also fetch full users list so all roles (Enrollment Director, Finance, Marketing, etc.) are included
+      if (token) {
+        try {
+          const usersRes = await fetch(`${API}/auth/users`, {
+            headers: { Authorization: `Bearer ${token}` },
+            cache: "no-store",
+          });
+          if (usersRes.ok) {
+            const usersData = await usersRes.json().catch(() => null);
+            if (usersData?.success && Array.isArray(usersData.users)) {
+              usersData.users.forEach(addMember);
+            }
+          }
+        } catch {}
+      }
+
+      if (mergedMap.size > 0) {
+        const allMembers = Array.from(mergedMap.values());
+        setTeamMembers(allMembers);
+
+        const allowedRoles = ["chairman", "owner", "manager", "admission_officer", "agent"];
+        const filtered = allMembers.filter((a: AssignableAgent) =>
+          allowedRoles.includes((a.role || "").toLowerCase().trim())
+        );
+        setAssignableAgents(filtered);
+      }
+    } catch (e) {
+      console.warn("Failed to load assignable agents:", e);
+    }
   }, [token]);
+
+  useEffect(() => {
+    fetchAgents();
+  }, [fetchAgents]);
 
   // ── Messages cache: lives outside React state so slim polls never touch it ──
   const messagesCacheRef = useRef<Map<string, Message[]>>(new Map());
@@ -559,7 +612,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         return 0;
       })(),
       windowLeft: "Active",
-      pipeline: c.pipeline || "New",
+      pipeline:
+        c.auditionOutcome === "joining-later" && (!c.pipeline || c.pipeline === "Contacted" || c.pipeline === "Qualified" || c.pipeline === "New")
+          ? "Joining Later"
+          : c.pipeline || "New",
       source: c.source || "direct",
       notes: c.notes || "",
       followUpNote: c.followUpNote || "",
@@ -601,15 +657,17 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       branch: c.branch || "",
       formAnswers: c.formAnswers || {},
       cashIn: (() => {
-        if (c.cashIn !== undefined && c.cashIn !== null) return Number(c.cashIn) || 0;
+        const topCash = Number(c.cashIn) || 0;
+        if (topCash > 0) return topCash;
         if (typeof c.source === "object" && c.source?.cashIn !== undefined && c.source?.cashIn !== null) {
-          return Number(c.source.cashIn) || 0;
+          const srcCash = Number(c.source.cashIn) || 0;
+          if (srcCash > 0) return srcCash;
         }
         if (typeof window !== "undefined") {
           const local = localStorage.getItem(`crm_cash_${c.senderId || c._id}`);
           if (local !== null) return Number(local) || 0;
         }
-        return 0;
+        return topCash;
       })(),
       createdAt: c.createdAt,
       updatedAt: c.updatedAt,
@@ -639,6 +697,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       senderName: m.senderName || undefined,
       isEdited: Boolean(m.isEdited),
       editedAt: m.editedAt || undefined,
+      isDeleted: Boolean(m.isDeleted),
+      deletedAt: m.deletedAt || undefined,
+      deletedBy:
+        (m.deletedBy && m.deletedBy !== "Staff"
+          ? m.deletedBy
+          : m.direction === "outgoing" && m.senderName && m.senderName !== "Staff"
+          ? m.senderName
+          : m.deletedBy) || undefined,
       reactions: Array.isArray(m.reactions) ? m.reactions : [],
       replyTo: m.replyTo
         ? {
@@ -657,6 +723,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   // Track recently created/opened manual leads so in-flight background polls can NEVER wipe them out before server sync settles
   const recentlyCreatedRef = useRef<Map<string, { conv: Conversation; expiresAt: number }>>(new Map());
   const deletedIdsRef = useRef<Set<string>>(new Set());
+  const lastServerRevRef = useRef<number>(0);
 
   // ── Slim bulk fetch — metadata only, never touches messages ──
   const fetchConversations = useCallback(async () => {
@@ -665,9 +732,25 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     try {
       const headers: Record<string, string> = {};
       if (token) headers["Authorization"] = `Bearer ${token}`;
-      const res = await fetch(`${API}/messages?slim=1`, { headers });
-      const json = await res.json();
-      if (json.success && Array.isArray(json.data)) {
+      const canUseDeltaRev =
+        lastServerRevRef.current > 0 &&
+        conversationsRef.current.length > 0 &&
+        pendingPatchesRef.current.size === 0 &&
+        recentlyCreatedRef.current.size === 0;
+      const revQuery = canUseDeltaRev ? `&rev=${lastServerRevRef.current}` : "";
+      const res = await fetch(`${API}/messages?slim=1${revQuery}`, {
+        headers,
+        cache: "no-store",
+      });
+      if (!res.ok) return;
+      const json = await res.json().catch(() => null);
+      if (json?.unchanged === true) {
+        return;
+      }
+      if (json?.success && Array.isArray(json.data)) {
+        if (typeof json.rev === "number") {
+          lastServerRevRef.current = json.rev;
+        }
         const now = Date.now();
 
         const rawList = isMetaReviewer
@@ -678,7 +761,15 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           .filter((c: any) => !deletedIdsRef.current.has(String(c.senderId || c.id || "")))
           .map((c: any) => {
             const meta = normalizeConversationMeta(c);
-            const cachedMessages = messagesCacheRef.current.get(meta.id) || [];
+            let cachedMessages = messagesCacheRef.current.get(meta.id) || [];
+            // Evict stale cached messages for inactive chats if the server has a newer message timestamp
+            if (cachedMessages.length > 0 && meta.id !== activeChatIdRef.current) {
+              const lastCachedTs = cachedMessages[cachedMessages.length - 1]?.timestamp || 0;
+              if ((meta.lastMessageAt || 0) > lastCachedTs + 1000) {
+                messagesCacheRef.current.delete(meta.id);
+                cachedMessages = [];
+              }
+            }
             const pending = pendingPatchesRef.current.get(meta.id);
             if (pending) {
               if (now > pending.expiresAt) {
@@ -695,7 +786,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               }
             }
 
-            // Always preserve cached messages — slim poll NEVER wipes them
+            // Always preserve valid cached messages — slim poll NEVER wipes them
             const resolvedUnread =
               cachedMessages.length > 0
                 ? computeUnreadFromMessages(cachedMessages)
@@ -816,18 +907,33 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               oldConv.updatedAt === nextConv.updatedAt &&
               oldConv.lastMessageAt === nextConv.lastMessageAt &&
               oldConv.lastMessageText === nextConv.lastMessageText &&
+              oldConv.lastMessageDirection === nextConv.lastMessageDirection &&
+              oldConv.lastOutgoingAt === nextConv.lastOutgoingAt &&
+              oldConv.lastSeenAt === nextConv.lastSeenAt &&
               oldConv.unreadCount === nextConv.unreadCount &&
               oldConv.pipeline === nextConv.pipeline &&
               oldConv.agent === nextConv.agent &&
               oldConv.status === nextConv.status &&
               oldConv.name === nextConv.name &&
+              oldConv.profileName === nextConv.profileName &&
               oldConv.leadName === nextConv.leadName &&
               oldConv.phone === nextConv.phone &&
               oldConv.branch === nextConv.branch &&
               oldConv.auditionDate === nextConv.auditionDate &&
               oldConv.auditionOutcome === nextConv.auditionOutcome &&
+              oldConv.auditionBookedAt === nextConv.auditionBookedAt &&
+              oldConv.attendedAt === nextConv.attendedAt &&
+              oldConv.enrolledAt === nextConv.enrolledAt &&
+              oldConv.paidAt === nextConv.paidAt &&
+              oldConv.bookedBy === nextConv.bookedBy &&
+              oldConv.attendedBy === nextConv.attendedBy &&
+              oldConv.enrolledBy === nextConv.enrolledBy &&
               oldConv.followUpDate === nextConv.followUpDate &&
+              oldConv.followUpNote === nextConv.followUpNote &&
               oldConv.followUpCompleted === nextConv.followUpCompleted &&
+              oldConv.followUpCompletedAt === nextConv.followUpCompletedAt &&
+              (oldConv.followUpTags?.length || 0) === (nextConv.followUpTags?.length || 0) &&
+              (oldConv.activityLog?.length || 0) === (nextConv.activityLog?.length || 0) &&
               oldConv.cashIn === nextConv.cashIn &&
               oldConv.notes === nextConv.notes &&
               oldConv.messages === nextConv.messages;
@@ -850,7 +956,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         });
       }
     } catch (err) {
-      console.error("CRMContext: failed to fetch conversations", err);
+      console.warn("CRMContext: failed to fetch conversations", err);
     } finally {
       if (!initialLoadDone.current) {
         initialLoadDone.current = true;
@@ -869,10 +975,13 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     try {
       const headers: Record<string, string> = {};
       if (token) headers["Authorization"] = `Bearer ${token}`;
-      const res = await fetch(`${API}/messages/${chatId}`, { headers });
+      const res = await fetch(`${API}/messages/${chatId}`, {
+        headers,
+        cache: "no-store",
+      });
       if (!res.ok) return;
-      const json = await res.json();
-      if (json.success && json.data) {
+      const json = await res.json().catch(() => null);
+      if (json?.success && json.data) {
         const serverMessages = normalizeMessages(json.data.messages);
         const existingCached = messagesCacheRef.current.get(chatId) || [];
         // Keep any in-flight optimistic messages (temp_*) that are still uploading/sending
@@ -887,6 +996,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const computedUnread = computeUnreadFromMessages(newMessages);
         const pending = pendingPatchesRef.current.get(chatId);
         const hasActivePending = Boolean(pending && Date.now() <= pending.expiresAt);
+        const normActive = normalizeConversationMeta(json.data);
 
         // Merge into conversations state (touch active conversation's messages and metadata)
         setConversations((prev) =>
@@ -896,10 +1006,26 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   ...c,
                   messages: newMessages,
                   unreadCount: computedUnread,
-                  lastMessageAt: Math.max(c.lastMessageAt || 0, json.data?.lastMessageAt || 0),
-                  pipeline: (hasActivePending && pending?.updates.pipeline) || json.data?.pipeline || c.pipeline,
-                  agent: (hasActivePending && pending?.updates.agent) || json.data?.agent || c.agent,
-                  status: (hasActivePending && pending?.updates.status) || json.data?.status || c.status,
+                  lastMessageAt: Math.max(c.lastMessageAt || 0, normActive.lastMessageAt || 0),
+                  pipeline: (hasActivePending && pending?.updates.pipeline) || normActive.pipeline || c.pipeline,
+                  auditionOutcome:
+                    hasActivePending && pending?.updates.auditionOutcome !== undefined
+                      ? pending.updates.auditionOutcome
+                      : normActive.auditionOutcome ?? c.auditionOutcome,
+                  followUpDate:
+                    hasActivePending && pending?.updates.followUpDate !== undefined
+                      ? pending.updates.followUpDate
+                      : normActive.followUpDate ?? c.followUpDate,
+                  followUpNote:
+                    hasActivePending && pending?.updates.followUpNote !== undefined
+                      ? pending.updates.followUpNote
+                      : normActive.followUpNote ?? c.followUpNote,
+                  followUpCompleted:
+                    hasActivePending && pending?.updates.followUpCompleted !== undefined
+                      ? pending.updates.followUpCompleted
+                      : normActive.followUpCompleted ?? c.followUpCompleted,
+                  agent: (hasActivePending && pending?.updates.agent) || normActive.agent || c.agent,
+                  status: (hasActivePending && pending?.updates.status) || normActive.status || c.status,
                 }
               : c
           )
@@ -916,7 +1042,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         }
       }
     } catch (err) {
-      console.error("CRMContext: failed to fetch active chat", err);
+      console.warn("CRMContext: failed to fetch active chat", err);
     }
   }, [normalizeMessages, isMetaReviewer, token, isReadOnly]);
 
@@ -939,6 +1065,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         if (conversations.length === 0) {
           setLoading(true);
         }
+        lastServerRevRef.current = 0;
         messagesCacheRef.current.clear();
         pendingPatchesRef.current.clear();
         recentlyCreatedRef.current.clear();
@@ -948,6 +1075,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         // Logged out: clear data and cache
         setConversations([]);
         setActiveChatId(null);
+        lastServerRevRef.current = 0;
         messagesCacheRef.current.clear();
         pendingPatchesRef.current.clear();
         recentlyCreatedRef.current.clear();
@@ -956,6 +1084,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         setLoading(true);
         try {
           localStorage.removeItem(CACHE_KEY);
+          localStorage.removeItem(LEGACY_CACHE_KEY);
         } catch {}
       }
     }
@@ -977,6 +1106,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
         eventSource.onmessage = (event) => {
           try {
+            if (!event.data || typeof event.data !== "string" || !event.data.trim().startsWith("{")) return;
             const payload = JSON.parse(event.data);
             if (!payload || !payload.type) return;
 
@@ -995,46 +1125,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               const isOutgoing = message?.direction === "outgoing";
               const currentActiveId = activeChatIdRef.current;
 
-              // 1. Update conversations list instantly
-              setConversations((prev) => {
-                const idx = prev.findIndex((c) => c.id === conversationId);
-                const targetPipeline = remoteConv?.pipeline || (isOutgoing ? "Contacted" : undefined);
-
-                if (idx >= 0) {
-                  const existing = prev[idx];
-                  const targetUnread = isOutgoing
-                    ? 0
-                    : remoteConv?.unreadCount && remoteConv.unreadCount > 0
-                    ? remoteConv.unreadCount
-                    : (existing.unreadCount || 0) + 1;
-                  const updated: Conversation = {
-                    ...existing,
-                    // Never move backwards (history-synced/late messages must not rewind it)
-                    lastMessageAt: Math.max(
-                      existing.lastMessageAt || 0,
-                      remoteConv?.lastMessageAt || 0,
-                      message?.timestamp || Date.now()
-                    ),
-                    unreadCount: targetUnread,
-                    pipeline: (targetPipeline && existing.pipeline === "New" ? targetPipeline : existing.pipeline) as any,
-                  };
-                  if (remoteConv?.name && !existing.name) updated.name = remoteConv.name;
-                  if (remoteConv?.agent) updated.agent = remoteConv.agent;
-                  if (remoteConv?.status) updated.status = remoteConv.status;
-
-                  // Move to top of the conversation list
-                  const remaining = prev.filter((_, i) => i !== idx);
-                  return [updated, ...remaining];
-                } else if (remoteConv) {
-                  // Newly created conversation arriving in real-time
-                  const normalized = normalizeConversationMeta(remoteConv);
-                  return [{ ...normalized, messages: [] }, ...prev];
-                }
-                return prev;
-              });
-
-              // 2. If this is the currently active chat, append the message in real-time
-              if (currentActiveId === conversationId && message) {
+              // 1. Reconcile messagesCacheRef if this conversation is active OR already cached in memory
+              let updatedMessagesForConv: Message[] | undefined;
+              if (message && (currentActiveId === conversationId || messagesCacheRef.current.has(conversationId))) {
                 const formattedReplyTo = message.replyTo
                   ? {
                       id: String(message.replyTo.id || message.replyTo.messageId),
@@ -1057,6 +1150,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   senderName: message.senderName || undefined,
                   isEdited: Boolean(message.isEdited),
                   editedAt: message.editedAt || undefined,
+                  isDeleted: Boolean(message.isDeleted),
+                  deletedAt: message.deletedAt || undefined,
+                  deletedBy: message.deletedBy || undefined,
                   reactions: Array.isArray(message.reactions) ? message.reactions : [],
                   replyTo: formattedReplyTo,
                 };
@@ -1065,7 +1161,6 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 const existingIdx = cached.findIndex((m) => m.id === formattedMsg.id);
                 let updatedMessages: Message[];
                 if (existingIdx >= 0) {
-                  // Merge upgraded fields (e.g. attachment URL, replyTo or senderName) into existing message
                   updatedMessages = cached.map((m, idx) =>
                     idx === existingIdx
                       ? {
@@ -1081,7 +1176,6 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                       : m
                   );
                 } else if (isOutgoing) {
-                  // If this is an outgoing message we sent, reconcile with any in-flight optimistic temp message
                   const tempIdx = cached.findIndex(
                     (m) => m.id.startsWith("temp_") && m.status === "pending"
                   );
@@ -1104,22 +1198,95 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     );
                   }
                 } else {
-                  // Keep chronological order even if an older message arrives late
                   updatedMessages = [...cached, formattedMsg].sort(
                     (a, b) => (a.timestamp || 0) - (b.timestamp || 0)
                   );
                 }
                 messagesCacheRef.current.set(conversationId, updatedMessages);
-                const nextUnread = isOutgoing ? 0 : computeUnreadFromMessages(updatedMessages);
-
-                setConversations((prev) =>
-                  prev.map((c) =>
-                    c.id === conversationId
-                      ? { ...c, messages: updatedMessages, unreadCount: nextUnread }
-                      : c
-                  )
-                );
+                updatedMessagesForConv = updatedMessages;
               }
+
+              // 2. Update conversations list & metadata instantly
+              setConversations((prev) => {
+                const idx = prev.findIndex((c) => c.id === conversationId);
+                const targetPipeline = remoteConv?.pipeline || (isOutgoing ? "Contacted" : undefined);
+                const msgPreview =
+                  remoteConv?.lastMessageText ||
+                  message?.text ||
+                  (Array.isArray(message?.attachments) && message.attachments.length > 0
+                    ? `[${message.attachments[0].type || "attachment"}]`
+                    : "");
+                const normRemote = remoteConv ? normalizeConversationMeta(remoteConv) : null;
+
+                if (idx >= 0) {
+                  const existing = prev[idx];
+                  const fallbackUnread = isOutgoing
+                    ? 0
+                    : remoteConv?.unreadCount && remoteConv.unreadCount > 0
+                    ? remoteConv.unreadCount
+                    : (existing.unreadCount || 0) + 1;
+                  const targetUnread = updatedMessagesForConv
+                    ? isOutgoing
+                      ? 0
+                      : computeUnreadFromMessages(updatedMessagesForConv)
+                    : fallbackUnread;
+
+                  const updated: Conversation = {
+                    ...existing,
+                    ...(normRemote
+                      ? {
+                          name: normRemote.name || existing.name,
+                          profileName: normRemote.profileName || existing.profileName,
+                          leadName: normRemote.leadName || existing.leadName,
+                          phone: normRemote.phone || existing.phone,
+                          formPhone: normRemote.formPhone || existing.formPhone,
+                          activityLog:
+                            normRemote.activityLog && normRemote.activityLog.length > 0
+                              ? normRemote.activityLog
+                              : existing.activityLog,
+                          source: normRemote.source || existing.source,
+                        }
+                      : {}),
+                    lastMessageAt: Math.max(
+                      existing.lastMessageAt || 0,
+                      remoteConv?.lastMessageAt || 0,
+                      message?.timestamp || Date.now()
+                    ),
+                    lastMessageText: msgPreview || existing.lastMessageText,
+                    lastMessageDirection: isOutgoing ? "outgoing" : "incoming",
+                    lastOutgoingAt: isOutgoing
+                      ? Math.max(
+                          existing.lastOutgoingAt || 0,
+                          remoteConv?.lastOutgoingAt || 0,
+                          message?.timestamp || Date.now()
+                        )
+                      : existing.lastOutgoingAt,
+                    unreadCount: targetUnread,
+                    pipeline: (targetPipeline && existing.pipeline === "New" ? targetPipeline : existing.pipeline) as any,
+                    messages: updatedMessagesForConv || existing.messages,
+                  };
+                  if (remoteConv?.agent) updated.agent = remoteConv.agent;
+                  if (remoteConv?.status) updated.status = remoteConv.status;
+
+                  const remaining = prev.filter((_, i) => i !== idx);
+                  const nextList = [updated, ...remaining];
+                  persistConversationsCache(nextList);
+                  return nextList;
+                } else if (normRemote) {
+                  const nextList = [
+                    {
+                      ...normRemote,
+                      lastMessageText: msgPreview || normRemote.lastMessageText,
+                      lastMessageDirection: (isOutgoing ? "outgoing" : "incoming") as "incoming" | "outgoing",
+                      messages: updatedMessagesForConv || [],
+                    },
+                    ...prev,
+                  ];
+                  persistConversationsCache(nextList);
+                  return nextList;
+                }
+                return prev;
+              });
             } else if (payload.type === "conversation_updated" && payload.data) {
               const { conversationId, conversation: remoteConv } = payload.data;
               if (!conversationId || !remoteConv) return;
@@ -1127,11 +1294,13 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               setConversations((prev) => {
                 const exists = prev.some((c) => c.id === conversationId);
                 if (!exists) {
-                  return [{ ...normalizeConversationMeta(remoteConv), messages: [] }, ...prev];
+                  const nextList = [{ ...normalizeConversationMeta(remoteConv), messages: [] }, ...prev];
+                  persistConversationsCache(nextList);
+                  return nextList;
                 }
                 const pending = pendingPatchesRef.current.get(conversationId);
                 const hasPending = Boolean(pending && Date.now() <= pending.expiresAt);
-                return prev.map((c) => {
+                const nextList = prev.map((c) => {
                   if (c.id !== conversationId) return c;
                   const norm = normalizeConversationMeta(remoteConv);
                   const cachedMsgs = messagesCacheRef.current.get(conversationId) || c.messages || [];
@@ -1148,6 +1317,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     messages: cachedMsgs,
                   };
                 });
+                persistConversationsCache(nextList);
+                return nextList;
               });
             } else if (payload.type === "marked_read" && payload.data) {
               const { conversationId } = payload.data;
@@ -1298,6 +1469,60 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   return { ...c, messages: updatedMessages || [] };
                 })
               );
+            } else if (payload.type === "message_deleted" && payload.data) {
+              const { conversationId, messageId, text, deletedAt, deletedBy } = payload.data;
+              if (!conversationId || !messageId) return;
+              const deletedText = text || "This message was deleted";
+              const resolveDeletedBy = (m: Message) => {
+                if (deletedBy && deletedBy !== "Staff") return deletedBy;
+                if (m.deletedBy && m.deletedBy !== "Staff") return m.deletedBy;
+                if (!m.isIncoming && m.senderName && m.senderName !== "Staff") return m.senderName;
+                return deletedBy || m.deletedBy || undefined;
+              };
+
+              const cached = messagesCacheRef.current.get(conversationId);
+              if (cached) {
+                const updated = cached.map((m) =>
+                  m.id === messageId
+                    ? {
+                        ...m,
+                        text: deletedText,
+                        attachments: [],
+                        reactions: [],
+                        isDeleted: true,
+                        deletedAt: deletedAt || Date.now(),
+                        deletedBy: resolveDeletedBy(m),
+                      }
+                    : m
+                );
+                messagesCacheRef.current.set(conversationId, updated);
+              }
+
+              setConversations((prev) =>
+                prev.map((c) => {
+                  if (c.id !== conversationId) return c;
+                  const msgs = c.messages || [];
+                  const isLatest = msgs.length > 0 && msgs[msgs.length - 1]?.id === messageId;
+                  const updatedMessages = msgs.map((m) =>
+                    m.id === messageId
+                      ? {
+                          ...m,
+                          text: deletedText,
+                          attachments: [],
+                          reactions: [],
+                          isDeleted: true,
+                          deletedAt: deletedAt || Date.now(),
+                          deletedBy: resolveDeletedBy(m),
+                        }
+                      : m
+                  );
+                  return {
+                    ...c,
+                    lastMessageText: isLatest ? deletedText : c.lastMessageText,
+                    messages: updatedMessages,
+                  };
+                })
+              );
             } else if (payload.type === "message_reaction" && payload.data) {
               const { conversationId, messageId, reactions } = payload.data;
               if (!conversationId || !messageId) return;
@@ -1322,9 +1547,17 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             } else if (payload.type === "names_updated") {
               // WhatsApp backfill completed on backend — refresh conversations so real names appear
               fetchConversations();
+            } else if (payload.type === "team_updated") {
+              // Staff user created, updated, or deleted — refresh agents & team members live
+              fetchAgents();
+            } else if (payload.type === "branches_updated") {
+              // Branch list modified — notify all useBranches() hooks to refresh immediately
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("crm:branches-updated"));
+              }
             }
           } catch (e) {
-            console.error("CRMContext: SSE message parse error", e);
+            console.warn("CRMContext: SSE message parse error", e);
           }
         };
 
@@ -1338,7 +1571,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           }
         };
       } catch (err) {
-        console.error("CRMContext: SSE setup error", err);
+        console.warn("CRMContext: SSE setup error", err);
         if (!isCancelled) {
           reconnectTimer = setTimeout(connectSSE, 5000);
         }
@@ -1354,7 +1587,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       }
       clearTimeout(reconnectTimer);
     };
-  }, [normalizeConversationMeta]);
+  }, [normalizeConversationMeta, fetchConversations, fetchAgents, isMetaReviewer]);
 
   // ── Non-overlapping background polling (3s delay after completion) ──
   useEffect(() => {
@@ -1467,7 +1700,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           try {
             const res = await fetch(`${API}/messages/${conv.id}`, { headers });
             if (!res.ok) return;
-            const json = await res.json();
+            const json = await res.json().catch(() => null);
             if (!json?.success || !json?.data) return;
             const msgs = normalizeMessages(json.data.messages);
             messagesCacheRef.current.set(conv.id, msgs);
@@ -1549,14 +1782,15 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       // 4. Follow-ups badge: due today or overdue (excluding booked auditions which are tracked under Auditions and completed follow-ups)
       const tags = c.followUpTags || [];
       const hasFollowUpTag = tags.includes('payment-pending') || tags.includes('trial-session');
-      if ((c.pipeline !== "Audition Booked" || c.auditionOutcome === "joining-later" || hasFollowUpTag) && !c.followUpCompleted) {
+      const isJoiningLater = c.pipeline === "Joining Later" || c.auditionOutcome === "joining-later";
+      if ((c.pipeline !== "Audition Booked" || isJoiningLater || hasFollowUpTag) && !c.followUpCompleted) {
         if (c.followUpDate) {
           if (c.followUpDate <= today) {
             followUps += 1;
           }
         } else if (c.followUpNote && c.followUpNote.trim()) {
           followUps += 1;
-        } else if (c.auditionOutcome === "joining-later" || hasFollowUpTag) {
+        } else if (isJoiningLater || hasFollowUpTag) {
           followUps += 1;
         }
       }
@@ -1567,10 +1801,74 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
   // Instant optimistic update across all pages + background PATCH
   const patchConversation = useCallback(
-    async (id: string, updates: Partial<Record<string, any>>) => {
+    async (id: string, rawUpdates: Partial<Record<string, any>>) => {
       if (isReadOnly) {
         console.warn("View-only account: modifications are disabled.");
         return;
+      }
+
+      const currentForSync = conversationsRef.current.find((conv) => conv.id === id);
+      const updates: Record<string, any> = { ...rawUpdates };
+
+      const getDefaultJoiningLaterIso = () => {
+        const d = new Date();
+        d.setDate(d.getDate() + 14);
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, "0");
+        const day = String(d.getDate()).padStart(2, "0");
+        return `${y}-${m}-${day}`;
+      };
+
+      // Two-way synchronization between Pipeline "Joining Later" and Follow-up / Audition "joining-later"
+      if (updates.pipeline === "Joining Later") {
+        if (updates.auditionOutcome === undefined) {
+          updates.auditionOutcome = "joining-later";
+        }
+        if (updates.followUpCompleted === undefined) {
+          updates.followUpCompleted = false;
+        }
+        if (!currentForSync?.followUpDate && updates.followUpDate === undefined) {
+          updates.followUpDate = getDefaultJoiningLaterIso();
+        }
+        if (!(currentForSync?.followUpNote || "").trim() && updates.followUpNote === undefined) {
+          updates.followUpNote = "Joining Later - Follow up";
+        }
+      } else if (updates.pipeline !== undefined && updates.pipeline !== "Joining Later") {
+        if (
+          (currentForSync?.auditionOutcome === "joining-later" || currentForSync?.pipeline === "Joining Later") &&
+          updates.auditionOutcome === undefined
+        ) {
+          updates.auditionOutcome = "";
+        }
+      } else if (updates.auditionOutcome === "joining-later") {
+        if (
+          updates.pipeline === undefined ||
+          updates.pipeline === "Contacted" ||
+          updates.pipeline === "Qualified" ||
+          updates.pipeline === "Audition Booked"
+        ) {
+          updates.pipeline = "Joining Later";
+        }
+        if (updates.followUpCompleted === undefined) {
+          updates.followUpCompleted = false;
+        }
+        if (!currentForSync?.followUpDate && updates.followUpDate === undefined) {
+          updates.followUpDate = getDefaultJoiningLaterIso();
+        }
+        if (!(currentForSync?.followUpNote || "").trim() && updates.followUpNote === undefined) {
+          updates.followUpNote = "Joining Later - Follow up";
+        }
+      } else if (
+        updates.auditionOutcome !== undefined &&
+        updates.auditionOutcome !== "joining-later" &&
+        currentForSync?.pipeline === "Joining Later" &&
+        updates.pipeline === undefined
+      ) {
+        const out = String(updates.auditionOutcome);
+        if (out === "registered") updates.pipeline = "Enrolled";
+        else if (out === "schedule-followup" || out === "paid-trial") updates.pipeline = "Attended";
+        else if (out === "no-show") updates.pipeline = "Lost";
+        else updates.pipeline = currentForSync?.auditionDate ? "Audition Booked" : "Contacted";
       }
 
       const nowIso = new Date().toISOString();
@@ -1909,23 +2207,25 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           }
         } else if (res.status === 404 && recentlyCreatedRef.current.has(id)) {
           // Brand-new manual lead whose POST /api/messages/manual is still in-flight; keep optimistic state
-        } else {
+        } else if (res.status === 401 || res.status === 403 || res.status === 409) {
           // Server rejected the patch (e.g. 403 Forbidden or 409 Conflict): rollback
           pendingPatchesRef.current.delete(id);
           try {
             const rollbackRes = await fetch(`${API}/messages/${id}`, { headers });
-            const rollbackJson = await rollbackRes.json();
-            if (rollbackJson && rollbackJson.data) {
-              const confirmed = normalizeConversationMeta(rollbackJson.data);
-              setConversations((prev) => {
-                const next = prev.map((c) =>
-                  c.id === id
-                    ? ({ ...confirmed, messages: c.messages } as Conversation)
-                    : c
-                );
-                persistConversationsCache(next);
-                return next;
-              });
+            if (rollbackRes.ok) {
+              const rollbackJson = await rollbackRes.json().catch(() => null);
+              if (rollbackJson && rollbackJson.data) {
+                const confirmed = normalizeConversationMeta(rollbackJson.data);
+                setConversations((prev) => {
+                  const next = prev.map((c) =>
+                    c.id === id
+                      ? ({ ...confirmed, messages: c.messages } as Conversation)
+                      : c
+                  );
+                  persistConversationsCache(next);
+                  return next;
+                });
+              }
             }
           } catch {}
           if (json && json.error && typeof window !== "undefined") {
@@ -1934,7 +2234,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           }
         }
       } catch (err) {
-        console.error("Failed to patch conversation:", err);
+        console.warn("Failed to patch conversation:", err);
         // On network error keep the optimistic update; it will reconcile on next poll
       }
     },
@@ -2350,6 +2650,84 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     [isReadOnly, token]
   );
 
+  // 0ms optimistic message unsend (delete for everyone on WhatsApp) + server sync
+  const unsendMessage = useCallback(
+    async (chatId: string, messageId: string): Promise<{ ok: boolean; error?: string }> => {
+      if (isReadOnly) return { ok: false, error: "View-only mode" };
+
+      const prevCached = messagesCacheRef.current.get(chatId);
+      const deletedAt = Date.now();
+      const actorName = user?.name && user.name !== "Staff" ? user.name : null;
+      const deletedPlaceholder = "This message was deleted";
+
+      const applyDelete = (m: Message): Message =>
+        m.id === messageId
+          ? {
+              ...m,
+              text: deletedPlaceholder,
+              attachments: [],
+              reactions: [],
+              isDeleted: true,
+              deletedAt,
+              deletedBy:
+                actorName ||
+                (!m.isIncoming && m.senderName && m.senderName !== "Staff" ? m.senderName : null) ||
+                user?.name ||
+                "Staff",
+            }
+          : m;
+
+      // 1. Instant 0ms optimistic update
+      if (prevCached) {
+        messagesCacheRef.current.set(chatId, prevCached.map(applyDelete));
+      }
+
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id !== chatId) return c;
+          const msgs = c.messages || [];
+          const isLatest = msgs.length > 0 && msgs[msgs.length - 1]?.id === messageId;
+          return {
+            ...c,
+            lastMessageText: isLatest ? deletedPlaceholder : c.lastMessageText,
+            messages: msgs.map(applyDelete),
+          };
+        })
+      );
+
+      // 2. Persist to backend & WhatsApp
+      try {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const res = await fetch(`${API}/messages/${chatId}/messages/${messageId}`, {
+          method: "DELETE",
+          headers,
+          body: JSON.stringify({ deletedBy: actorName || user?.name }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          if (prevCached) {
+            messagesCacheRef.current.set(chatId, prevCached);
+            setConversations((prev) =>
+              prev.map((c) => (c.id === chatId ? { ...c, messages: prevCached } : c))
+            );
+          }
+          return { ok: false, error: json?.error || "Failed to unsend message" };
+        }
+        return { ok: true };
+      } catch (err: any) {
+        if (prevCached) {
+          messagesCacheRef.current.set(chatId, prevCached);
+          setConversations((prev) =>
+            prev.map((c) => (c.id === chatId ? { ...c, messages: prevCached } : c))
+          );
+        }
+        return { ok: false, error: err?.message || "Network error while unsending message" };
+      }
+    },
+    [isReadOnly, token, user?.name]
+  );
+
   // 0ms optimistic emoji reaction toggle/update + server sync
   const reactToMessage = useCallback(
     async (chatId: string, messageId: string, emoji: string): Promise<boolean> => {
@@ -2617,6 +2995,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     [patchConversation]
   );
 
+  const forceRefresh = useCallback(async () => {
+    lastServerRevRef.current = 0;
+    fetchAgents();
+    await fetchConversations();
+  }, [fetchAgents, fetchConversations]);
+
   return (
     <CRMContext.Provider
       value={{
@@ -2631,13 +3015,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         patchConversation,
         createManualLead,
         markConversationAsRead,
-        refresh: fetchConversations,
+        refresh: forceRefresh,
         setPollPaused,
         searchQuery,
         setSearchQuery,
         deleteConversation,
         clearWhatsAppConversations,
         editMessage,
+        unsendMessage,
         reactToMessage,
         addOptimisticMessages,
         finalizeOptimisticMessages,

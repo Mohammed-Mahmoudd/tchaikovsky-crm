@@ -2,7 +2,7 @@
 
 import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
-import { MessageSquare, Trash2, AlertTriangle, Calendar, CheckCircle2, Clock, X } from "lucide-react";
+import { MessageSquare, Trash2, AlertTriangle, Calendar, CheckCircle2, Clock, X, ChevronLeft, ChevronRight } from "lucide-react";
 import { useCRM } from "../context/CRMContext";
 import { useAuth } from "../components/AuthProvider";
 import { formatLastMessageTime } from "../utils/time";
@@ -13,6 +13,7 @@ import {
   DndContext,
   DragOverlay,
   PointerSensor,
+  TouchSensor,
   useSensor,
   useSensors,
   closestCorners,
@@ -23,12 +24,8 @@ import {
   DragEndEvent,
   DragOverEvent,
   useDroppable,
+  useDraggable,
 } from "@dnd-kit/core";
-import {
-  SortableContext,
-  verticalListSortingStrategy,
-  useSortable,
-} from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -36,9 +33,11 @@ import { CSS } from "@dnd-kit/utilities";
 type Stage =
   | "New"
   | "Contacted"
+  | "Qualified"
   | "Audition Booked"
   | "Attended"
   | "Enrolled"
+  | "Joining Later"
   | "Unqualified"
   | "Lost";
 
@@ -56,52 +55,22 @@ type Lead = {
 };
 
 const STAGES: Stage[] = [
-  "New", "Contacted", "Audition Booked", "Attended", "Enrolled", "Unqualified", "Lost",
+  "New", "Contacted", "Qualified", "Audition Booked", "Attended", "Enrolled", "Joining Later", "Unqualified", "Lost",
 ];
-
-
-
-
-// Stage color map for the move-to menu
-const STAGE_COLORS: Record<Stage, string> = {
-  "New": "#007AFF",
-  "Contacted": "#5856D6",
-  "Audition Booked": "#FF9500",
-  "Attended": "#34C759",
-  "Enrolled": "#30D158",
-  "Unqualified": "#8E8E93",
-  "Lost": "#FF3B30",
-};
 
 // How many cards to render initially per column
 const INITIAL_VISIBLE_COUNT = 30;
 
-// ─── useIsMobile hook ─────────────────────────────────────────────────────────
-
-function useIsMobile() {
-  const [isMobile, setIsMobile] = useState(false);
-  useEffect(() => {
-    // Check for coarse pointer (touch devices) or narrow viewport
-    const checkMobile = () => {
-      const coarse = window.matchMedia("(pointer: coarse)").matches;
-      const narrow = window.innerWidth < 768;
-      setIsMobile(coarse || narrow);
-    };
-    checkMobile();
-    window.addEventListener("resize", checkMobile);
-    return () => window.removeEventListener("resize", checkMobile);
-  }, []);
-  return isMobile;
-}
-
-// ─── "Move to" Popover ────────────────────────────────────────────────────────
+// ─── "Move to" Popover (Fixed viewport-clamped positioning so it never clips) ─
 
 const MoveToPopover = React.memo(function MoveToPopover({
   currentStage,
+  anchorRect,
   onMove,
   onClose,
 }: {
   currentStage: Stage;
+  anchorRect: { top: number; bottom: number; right: number; left: number };
   onMove: (stage: Stage) => void;
   onClose: () => void;
 }) {
@@ -113,33 +82,50 @@ const MoveToPopover = React.memo(function MoveToPopover({
         onClose();
       }
     };
+    const handleScrollOrResize = () => onClose();
     document.addEventListener("mousedown", handler, true);
     document.addEventListener("touchstart", handler, true);
+    window.addEventListener("resize", handleScrollOrResize);
+    window.addEventListener("scroll", handleScrollOrResize, true);
     return () => {
       document.removeEventListener("mousedown", handler, true);
       document.removeEventListener("touchstart", handler, true);
+      window.removeEventListener("resize", handleScrollOrResize);
+      window.removeEventListener("scroll", handleScrollOrResize, true);
     };
   }, [onClose]);
+
+  const menuWidth = 184;
+  const estimatedHeight = 360;
+  const vw = typeof window !== "undefined" ? window.innerWidth : 1024;
+  const vh = typeof window !== "undefined" ? window.innerHeight : 768;
+
+  const left = Math.max(8, Math.min(anchorRect.right - menuWidth, vw - menuWidth - 8));
+  const openUpward = anchorRect.bottom + estimatedHeight > vh - 8 && anchorRect.top > estimatedHeight;
+  const top = openUpward ? Math.max(8, anchorRect.top - estimatedHeight - 4) : anchorRect.bottom + 4;
 
   return (
     <div
       ref={popoverRef}
+      onClick={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
       style={{
-        position: "absolute",
-        top: "36px",
-        right: "0",
-        zIndex: 100,
-        minWidth: "180px",
+        position: "fixed",
+        top: `${top}px`,
+        left: `${left}px`,
+        width: `${menuWidth}px`,
+        maxHeight: `${vh - 16}px`,
+        overflowY: "auto",
+        zIndex: 200,
         background: "var(--bg-card)",
         border: "1px solid var(--border-main)",
-        borderRadius: "12px",
-        boxShadow: "0 8px 30px rgba(0,0,0,0.15)",
-        overflow: "hidden",
+        borderRadius: "10px",
+        boxShadow: "0 8px 28px rgba(0,0,0,0.14)",
       }}
     >
       <div
         style={{
-          padding: "8px 12px",
+          padding: "7px 12px",
           borderBottom: "1px solid var(--border-main)",
         }}
       >
@@ -152,7 +138,7 @@ const MoveToPopover = React.memo(function MoveToPopover({
             color: "var(--text-muted)",
           }}
         >
-          Move to
+          Move to stage
         </span>
       </div>
       {STAGES.map((stage) => {
@@ -167,41 +153,22 @@ const MoveToPopover = React.memo(function MoveToPopover({
               onMove(stage);
               onClose();
             }}
+            className="w-full flex items-center justify-between px-3 py-2 text-left text-[12px] transition-colors hover:bg-[var(--bg-hover)]"
             style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-              width: "100%",
-              padding: "10px 12px",
               border: "none",
               background: isCurrent ? "var(--bg-selected)" : "transparent",
               cursor: isCurrent ? "default" : "pointer",
-              opacity: isCurrent ? 0.5 : 1,
-              fontSize: "13px",
-              fontWeight: isCurrent ? 600 : 400,
-              color: "var(--text-primary)",
-              textAlign: "left",
-              touchAction: "manipulation",
-              WebkitTapHighlightColor: "transparent",
+              fontWeight: isCurrent ? 600 : 500,
+              color: isCurrent ? "#0066FF" : "var(--text-primary)",
             }}
           >
-            <span
-              style={{
-                width: "8px",
-                height: "8px",
-                borderRadius: "50%",
-                background: STAGE_COLORS[stage],
-                flexShrink: 0,
-              }}
-            />
-            {stage}
+            <span>{stage}</span>
             {isCurrent && (
               <span
                 style={{
-                  marginLeft: "auto",
                   fontSize: "10px",
                   fontWeight: 600,
-                  color: "var(--text-muted)",
+                  color: "#0066FF",
                 }}
               >
                 Current
@@ -214,118 +181,131 @@ const MoveToPopover = React.memo(function MoveToPopover({
   );
 });
 
-// ─── Mobile Lead Card (no drag, with "Move to" button) ───────────────────────
+// ─── Column Drop Zone ───────────────────────────────────────────────────────
 
-const MobileLeadCard = React.memo(function MobileLeadCard({
+const ColumnDropZone = React.memo(function ColumnDropZone() {
+  return (
+    <div
+      style={{
+        height: "44px",
+        borderRadius: "10px",
+        border: "1.5px dashed #0066FF",
+        background: "var(--bg-selected)",
+        opacity: 0.65,
+        flexShrink: 0,
+      }}
+    />
+  );
+});
+
+// ─── Lead Card (Clean neutral styling + quick Move menu on all devices) ─────
+
+const LeadCard = React.memo(function LeadCard({
   lead,
-  onMove,
+  isDragging,
   onClick,
+  onMove,
   isReadOnly,
 }: {
   lead: Lead;
-  onMove: (stage: Stage) => void;
+  isDragging?: boolean;
   onClick?: () => void;
+  onMove?: (stage: Stage) => void;
   isReadOnly?: boolean;
 }) {
-  const [showPopover, setShowPopover] = useState(false);
+  const [anchorRect, setAnchorRect] = useState<{
+    top: number;
+    bottom: number;
+    right: number;
+    left: number;
+  } | null>(null);
 
-  const handleMoveClick = useCallback((e: React.MouseEvent) => {
+  const handleMoveClick = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
-    setShowPopover((prev) => !prev);
+    const rect = e.currentTarget.getBoundingClientRect();
+    setAnchorRect((prev) =>
+      prev
+        ? null
+        : {
+            top: rect.top,
+            bottom: rect.bottom,
+            right: rect.right,
+            left: rect.left,
+          }
+    );
   }, []);
 
-  const handleClosePopover = useCallback(() => setShowPopover(false), []);
+  const handleClosePopover = useCallback(() => setAnchorRect(null), []);
 
   return (
     <div
       onClick={onClick}
-      className="rounded-xl px-4 py-3 transition-shadow hover:shadow-md cursor-pointer"
+      className={`group rounded-xl px-3 py-2.5 transition-shadow select-none relative ${
+        isDragging
+          ? "shadow-xl opacity-95 scale-[1.02] cursor-grabbing"
+          : "hover:shadow-md cursor-pointer"
+      }`}
       style={{
         background: "var(--bg-card)",
-        border: "1px solid var(--border-main)",
+        border: isDragging ? "1.5px solid #0066FF" : "1px solid var(--border-main)",
         boxShadow: "var(--shadow-card)",
-        position: "relative",
       }}
     >
-      <div className="flex items-start justify-between gap-2">
+      <div className="flex items-start justify-between gap-1.5">
         <p
-          className="text-[15px] font-bold leading-tight flex-1"
+          className="text-[13px] font-bold leading-snug truncate flex-1 min-w-0"
           style={{ color: "var(--text-primary)" }}
+          title={lead.name}
         >
           {lead.name}
         </p>
-        {/* Move-to button — top right (hidden in view-only mode) */}
-        {!isReadOnly && (
+        {!isReadOnly && onMove && !isDragging && (
           <button
             type="button"
             onClick={handleMoveClick}
+            onPointerDown={(e) => e.stopPropagation()}
+            title="Move to stage"
+            aria-label={`Move ${lead.name} to another stage`}
+            className="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold transition-opacity opacity-80 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 cursor-pointer"
             style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "4px",
-              padding: "4px 8px",
-              borderRadius: "6px",
-              border: "1px solid var(--border-input)",
               background: "var(--bg-pill)",
-              color: "#0066FF",
-              fontSize: "11px",
-              fontWeight: 600,
-              cursor: "pointer",
-              touchAction: "manipulation",
-              WebkitTapHighlightColor: "transparent",
-              flexShrink: 0,
+              border: "1px solid var(--border-input)",
+              color: "var(--text-secondary)",
             }}
           >
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              style={{ pointerEvents: "none" }}
-            >
-              <path d="M5 12h14" />
-              <path d="m12 5 7 7-7 7" />
-            </svg>
-            Move
+            <span>Move</span>
           </button>
         )}
       </div>
       <p
-        className="text-[13px] mt-0.5 leading-snug"
+        className="text-[11px] mt-0.5 leading-snug truncate"
         style={{ color: "var(--text-secondary)" }}
+        title={lead.campaign}
       >
         {lead.campaign}
       </p>
-      <div className="flex items-center justify-between mt-2.5">
-        <span className="text-[12px]" style={{ color: "var(--text-muted)" }}>
+      <div className="flex items-center justify-between mt-2 gap-1.5">
+        <span
+          className="text-[10px] truncate"
+          style={{ color: "var(--text-muted)" }}
+        >
           {lead.date.split(",")[0]}
         </span>
-        <div className="flex items-center gap-2">
-          {lead.lastMessageAt && (
-            <span className="text-[11px] font-medium" style={{ color: "var(--text-muted)" }} title="Last message sent">
-              {formatLastMessageTime(lead.lastMessageAt)}
-            </span>
-          )}
+        {lead.lastMessageAt && (
           <span
-            className="text-[11px] font-medium px-2 py-0.5 rounded-full"
-            style={{
-              background: STAGE_COLORS[lead.stage] + "18",
-              color: STAGE_COLORS[lead.stage],
-            }}
+            className="text-[10px] shrink-0 font-medium"
+            style={{ color: "var(--text-muted)" }}
+            title="Last message sent"
           >
-            {lead.stage}
+            {formatLastMessageTime(lead.lastMessageAt)}
           </span>
-        </div>
+        )}
       </div>
 
-      {/* Popover */}
-      {showPopover && (
+      {anchorRect && onMove && (
         <MoveToPopover
           currentStage={lead.stage}
+          anchorRect={anchorRect}
           onMove={onMove}
           onClose={handleClosePopover}
         />
@@ -334,220 +314,41 @@ const MobileLeadCard = React.memo(function MobileLeadCard({
   );
 });
 
-// ─── Mobile Column (no DnD) ─────────────────────────────────────────────────
-
-const MobileColumn = React.memo(function MobileColumn({
-  stage,
-  leads,
-  totalCount,
+const DraggableLeadCard = React.memo(function DraggableLeadCard({
+  lead,
+  onClick,
   onMove,
-  onSelectLead,
-  onShowMore,
-  hasMore,
-  isReadOnly,
-}: {
-  stage: Stage;
-  leads: Lead[];
-  totalCount: number;
-  onMove: (id: string, stage: Stage) => void;
-  onSelectLead: (id: string) => void;
-  onShowMore: () => void;
-  hasMore: boolean;
-  isReadOnly?: boolean;
-}) {
-  return (
-    <div className="flex flex-col min-w-[260px] max-w-[260px] shrink-0">
-      <div
-        className="flex flex-col rounded-2xl overflow-hidden"
-        style={{ background: "var(--bg-column)" }}
-      >
-        {/* Column header */}
-        <div className="flex items-center justify-between px-3 pt-4 pb-2 shrink-0">
-          <span
-            className="text-[15px] font-bold"
-            style={{ color: "var(--text-primary)" }}
-          >
-            {stage}
-          </span>
-          <span
-            className="text-[12px] font-bold px-2.5 py-0.5 rounded-full"
-            style={{
-              background: "var(--bg-card)",
-              color: "var(--text-secondary)",
-            }}
-          >
-            {totalCount}
-          </span>
-        </div>
-
-        {/* Card list — no inner scroll, grows to content for smooth outer scroll */}
-        <div
-          className="flex flex-col gap-2 px-2.5 pb-3"
-        >
-          {leads.map((lead) => (
-            <MobileLeadCard
-              key={lead.id}
-              lead={lead}
-              onMove={(targetStage) => onMove(lead.id, targetStage)}
-              onClick={() => onSelectLead(lead.id)}
-              isReadOnly={isReadOnly}
-            />
-          ))}
-          {hasMore && (
-            <button
-              onClick={onShowMore}
-              className="text-[12px] font-semibold py-2 rounded-lg transition-colors"
-              style={{
-                background: "var(--bg-pill)",
-                color: "#0066FF",
-                border: "1px solid var(--border-input)",
-              }}
-            >
-              Show more ({totalCount - leads.length} remaining)
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-});
-
-// ─── Column Drop Zone ───────────────────────────────────────────────────────
-// Shown at the bottom of the target column while a card is being dragged into it.
-// Kept minimal and formal — no animation, no label, just a quiet visual cue.
-
-const ColumnDropZone = React.memo(function ColumnDropZone() {
-  return (
-    <div
-      style={{
-        height: "40px",
-        borderRadius: "8px",
-        border: "1px dashed var(--border-input)",
-        background: "transparent",
-        opacity: 0.6,
-        flexShrink: 0,
-      }}
-    />
-  );
-});
-
-// ─── Desktop Lead Card (with drag handle dots, no move button) ───────────────
-
-const LeadCard = React.memo(function LeadCard({
-  lead,
-  isDragging,
-  onClick,
-  isReadOnly,
-}: {
-  lead: Lead;
-  isDragging?: boolean;
-  onClick?: () => void;
-  isReadOnly?: boolean;
-}) {
-  return (
-    <div
-      onClick={onClick}
-      className={`rounded-xl px-2.5 xl:px-3 py-2.5 transition-shadow select-none ${isDragging
-        ? "shadow-2xl opacity-95 rotate-1 scale-[1.02] cursor-grabbing"
-        : isReadOnly
-          ? "hover:shadow-sm cursor-pointer"
-          : "hover:shadow-md cursor-pointer"
-        }`}
-      style={{
-        background: "var(--bg-card)",
-        border: "1px solid var(--border-main)",
-        boxShadow: "var(--shadow-card)",
-      }}
-    >
-      <div className="flex items-start justify-between gap-1">
-        <p
-          className="text-[13px] xl:text-[14px] font-bold leading-tight truncate flex-1"
-          style={{ color: "var(--text-primary)" }}
-          title={lead.name}
-        >
-          {lead.name}
-        </p>
-        {!isReadOnly && (
-          <div
-            className="shrink-0 mt-0.5 opacity-40 hover:opacity-75 transition-opacity"
-            style={{ color: "var(--text-muted)" }}
-          >
-            <svg width="10" height="14" viewBox="0 0 12 16" fill="currentColor">
-              <circle cx="3" cy="3" r="1.5" />
-              <circle cx="9" cy="3" r="1.5" />
-              <circle cx="3" cy="8" r="1.5" />
-              <circle cx="9" cy="8" r="1.5" />
-              <circle cx="3" cy="13" r="1.5" />
-              <circle cx="9" cy="13" r="1.5" />
-            </svg>
-          </div>
-        )}
-      </div>
-      <p
-        className="text-[11px] xl:text-[12px] mt-0.5 leading-snug truncate"
-        style={{ color: "var(--text-secondary)" }}
-        title={lead.campaign}
-      >
-        {lead.campaign}
-      </p>
-      <div className="flex items-center justify-between mt-2 gap-1">
-        <span
-          className="text-[10px] xl:text-[11px] truncate"
-          style={{ color: "var(--text-muted)" }}
-        >
-          {lead.date.split(",")[0]}
-        </span>
-        {lead.lastMessageAt && (
-          <span
-            className="text-[10px] xl:text-[11px] shrink-0 font-medium"
-            style={{ color: "var(--text-muted)" }}
-            title="Last message sent"
-          >
-            {formatLastMessageTime(lead.lastMessageAt)}
-          </span>
-        )}
-      </div>
-    </div>
-  );
-});
-
-const SortableLeadCard = React.memo(function SortableLeadCard({
-  lead,
-  onClick,
   isReadOnly,
 }: {
   lead: Lead;
   onClick: () => void;
+  onMove: (stage: Stage) => void;
   isReadOnly?: boolean;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: lead.id, disabled: isReadOnly });
+  const { attributes, listeners, setNodeRef, transform, isDragging } =
+    useDraggable({
+      id: lead.id,
+      disabled: isReadOnly,
+      data: { stage: lead.stage },
+    });
 
   const style: React.CSSProperties = {
-    transform: CSS.Translate.toString(transform),
-    // Fix #1: no transition while dragging so the card follows the pointer instantly.
-    // Snap siblings back in 100ms (vs default ~250ms) to feel snappier.
-    transition: isDragging ? "none" : transition ? transition.replace(/\d+ms/, "100ms") : undefined,
+    transform: transform ? CSS.Translate.toString(transform) : undefined,
     cursor: isReadOnly ? "default" : isDragging ? "grabbing" : "grab",
-    touchAction: isDragging ? "none" : "pan-y",
     WebkitUserSelect: "none",
     userSelect: "none",
-    // GPU-composite this card during drag so moving it doesn't repaint siblings.
-    willChange: isDragging ? "transform" : "auto",
   };
 
   if (isDragging) {
-    // Show a lightweight ghost in the card's original slot while it's being dragged.
-    // DropPlaceholder was removed; use an inline ghost so we have no external dependency.
     return (
-      <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
+      <div ref={setNodeRef} style={{ height: "68px" }} {...attributes} {...listeners}>
         <div
           style={{
-            height: "68px",
-            borderRadius: "10px",
-            border: "2px dashed var(--border-input)",
+            height: "100%",
+            borderRadius: "12px",
+            border: "1.5px dashed var(--border-input)",
             background: "var(--bg-pill)",
-            opacity: 0.5,
+            opacity: 0.45,
           }}
         />
       </div>
@@ -556,12 +357,17 @@ const SortableLeadCard = React.memo(function SortableLeadCard({
 
   return (
     <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
-      <LeadCard lead={lead} onClick={onClick} isReadOnly={isReadOnly} />
+      <LeadCard
+        lead={lead}
+        onClick={onClick}
+        onMove={onMove}
+        isReadOnly={isReadOnly}
+      />
     </div>
   );
 });
 
-// ─── Desktop Column (with DnD & Drop Placeholder) ───────────────────────────
+// ─── Unified Responsive Column (Pinned Header + Independent Vertical Scroll) ─
 
 const Column = React.memo(function Column({
   stage,
@@ -569,6 +375,7 @@ const Column = React.memo(function Column({
   totalCount,
   isTargetColumn,
   onSelectLead,
+  onMoveLead,
   onShowMore,
   hasMore,
   isReadOnly,
@@ -576,43 +383,39 @@ const Column = React.memo(function Column({
   stage: Stage;
   leads: Lead[];
   totalCount: number;
-  // Fix #2/#3: pre-computed by parent so React.memo skips non-target columns
   isTargetColumn: boolean;
   onSelectLead: (id: string) => void;
+  onMoveLead: (id: string, stage: Stage) => void;
   onShowMore: () => void;
   hasMore: boolean;
   isReadOnly?: boolean;
 }) {
-  // Fix #3: only need setNodeRef, drop isOver (parent computes targeting now)
   const { setNodeRef } = useDroppable({ id: stage });
-  const itemIds = useMemo(() => leads.map((l) => l.id), [leads]);
 
   return (
     <div
       ref={setNodeRef}
-      className="flex flex-col flex-1 min-w-0 h-full"
+      className="flex flex-col h-full shrink-0 snap-start w-[78vw] max-w-[264px] sm:w-[216px] md:w-[204px] xl:min-w-[186px] 2xl:min-w-[174px] xl:w-auto xl:flex-1"
     >
       <div
         className="flex flex-col flex-1 rounded-2xl overflow-hidden h-full max-h-full"
         style={{
-          // Formal, subtle: only a slight background tint shift when targeted.
-          // No border flash, no scale, no shadow — keeps the board calm during drag.
           background: isTargetColumn ? "var(--bg-column-hover, var(--bg-column))" : "var(--bg-column)",
-          border: "1px solid transparent",
-          transition: "background 150ms ease",
+          border: isTargetColumn ? "1.5px solid #0066FF" : "1px solid transparent",
+          transition: "background 120ms ease, border-color 120ms ease",
         }}
       >
-        {/* Header without dots */}
-        <div className="flex items-center justify-between px-2.5 xl:px-3 pt-3 pb-2 shrink-0 select-none">
+        {/* Pinned neutral column header */}
+        <div className="flex items-center justify-between px-3 pt-3.5 pb-2.5 shrink-0 select-none">
           <span
-            className="text-[12px] xl:text-[13px] font-bold leading-tight truncate mr-1"
+            className="text-[13px] font-bold leading-tight truncate mr-1.5"
             style={{ color: "var(--text-primary)" }}
             title={stage}
           >
             {stage}
           </span>
           <span
-            className="text-[10px] xl:text-[11px] font-semibold px-2 py-0.5 rounded-full shrink-0"
+            className="text-[11px] font-semibold px-2 py-0.5 rounded-full shrink-0"
             style={{
               background: "var(--bg-card)",
               color: "var(--text-secondary)",
@@ -622,42 +425,37 @@ const Column = React.memo(function Column({
           </span>
         </div>
 
-        {/* Card list */}
-        <SortableContext id={stage} items={itemIds} strategy={verticalListSortingStrategy}>
-          <div
-            className="flex flex-col gap-2 flex-1 min-h-[150px] px-1.5 xl:px-2 pb-3 overflow-y-auto"
-            style={{ WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }}
-          >
-            {leads.map((lead) => (
-              <SortableLeadCard
-                key={lead.id}
-                lead={lead}
-                onClick={() => onSelectLead(lead.id)}
-                isReadOnly={isReadOnly}
-              />
-            ))}
+        {/* Independent vertical card scroll inside each column */}
+        <div
+          className="flex flex-col gap-2 flex-1 min-h-0 px-2 pb-3 overflow-y-auto overflow-x-hidden"
+          style={{ WebkitOverflowScrolling: "touch", overscrollBehaviorY: "contain" }}
+        >
+          {leads.map((lead) => (
+            <DraggableLeadCard
+              key={lead.id}
+              lead={lead}
+              onClick={() => onSelectLead(lead.id)}
+              onMove={(targetStage) => onMoveLead(lead.id, targetStage)}
+              isReadOnly={isReadOnly}
+            />
+          ))}
 
-            {/* Honest drop target: shown at the bottom of the column so the user
-                knows the card will be ADDED to this column. We no longer show a
-                positional placeholder because handleDragEnd doesn't track insertion
-                order — the card lands at its natural DB sort position. */}
-            {isTargetColumn && <ColumnDropZone />}
+          {isTargetColumn && <ColumnDropZone />}
 
-            {hasMore && (
-              <button
-                onClick={onShowMore}
-                className="text-[11px] xl:text-[12px] font-semibold py-1.5 rounded-lg transition-colors shrink-0"
-                style={{
-                  background: "var(--bg-pill)",
-                  color: "#0066FF",
-                  border: "1px solid var(--border-input)",
-                }}
-              >
-                + More ({totalCount - leads.length})
-              </button>
-            )}
-          </div>
-        </SortableContext>
+          {hasMore && (
+            <button
+              onClick={onShowMore}
+              className="text-[11px] font-semibold py-1.5 rounded-lg transition-colors shrink-0"
+              style={{
+                background: "var(--bg-pill)",
+                color: "#0066FF",
+                border: "1px solid var(--border-input)",
+              }}
+            >
+              + More ({totalCount - leads.length})
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -671,7 +469,6 @@ export default function PipelinePage() {
   const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager";
   const isAdmission = user?.role === "admission_officer" || user?.role === "agent";
   const userClean = (user?.name || "").trim().toLowerCase();
-  const isMobile = useIsMobile();
 
   const [view, setView] = useState<"pipeline" | "table">("pipeline");
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -860,11 +657,11 @@ export default function PipelinePage() {
     });
   }, [leads, filterCampaign, filterAgent, filterSource, filterReceived]);
 
-  // Pre-group leads by stage (instead of filtering 703 × 7 on every render)
+  // Pre-group leads by stage (instead of filtering 703 × 9 on every render)
   const groupedLeads = useMemo(() => {
     const groups: Record<Stage, Lead[]> = {
-      "New": [], "Contacted": [], "Audition Booked": [], "Attended": [],
-      "Enrolled": [], "Unqualified": [], "Lost": [],
+      "New": [], "Contacted": [], "Qualified": [], "Audition Booked": [], "Attended": [],
+      "Enrolled": [], "Joining Later": [], "Unqualified": [], "Lost": [],
     };
     for (const lead of filteredLeads) {
       if (groups[lead.stage]) {
@@ -890,33 +687,60 @@ export default function PipelinePage() {
     return closestCorners(args);
   }, []);
 
-  // Fix #5: distance 8 (was 4) — requires a deliberate 8px move to start drag,
-  // eliminating accidental activation on fast clicks or tiny jitters.
+  // Pointer + Touch sensors: deliberate 6px pointer move or 200ms touch press-and-hold
+  // so normal scrolling on phones/tablets/trackpads is never interrupted.
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } })
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 6 } })
   );
 
   const activeLead = useMemo(() => activeId ? leads.find(l => l.id === activeId) ?? null : null, [activeId, leads]);
   const panelLead = useMemo(() => panelLeadId ? leads.find(l => l.id === panelLeadId) ?? null : null, [panelLeadId, leads]);
   const panelConv = useMemo(() => panelLeadId ? conversations.find(c => c.id === panelLeadId) ?? null : null, [panelLeadId, conversations]);
 
-  // Fix #2: pre-compute which column is the hover target and where the placeholder
-  // should appear. Passing primitive booleans/numbers to Column means React.memo
-  // can skip re-rendering the 6 non-targeted columns on every pointer-move event.
+  // Pre-compute which column is the hover target so React.memo skips non-targeted columns
   const targetColumnInfo = useMemo(() => {
-    if (!activeLead || !overId) return { targetStage: null as Stage | null, hoverIndex: -1 };
-    // Resolve target stage from overId (could be a stage name or a card id)
+    if (!activeLead || !overId) return { targetStage: null as Stage | null };
     const overStage = STAGES.find((s) => s === overId) as Stage | undefined;
     const overLead = leads.find((l) => l.id === overId);
     const targetStage: Stage | null = overStage ?? overLead?.stage ?? null;
-    // Only highlight if we're crossing into a *different* stage
-    if (!targetStage || targetStage === activeLead.stage) return { targetStage: null, hoverIndex: -1 };
-    const targetLeads = groupedLeads[targetStage] ?? [];
-    const hoverIndex = targetLeads.findIndex((l) => l.id === overId);
-    return { targetStage, hoverIndex };
-  }, [activeLead, overId, leads, groupedLeads]);
+    if (!targetStage || targetStage === activeLead.stage) return { targetStage: null };
+    return { targetStage };
+  }, [activeLead, overId, leads]);
 
   const visibleStages = useMemo(() => STAGES.filter(s => !hiddenStages.has(s)), [hiddenStages]);
+
+  // Horizontal board scroll state & controls
+  const boardScrollRef = useRef<HTMLDivElement | null>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+
+  const updateScrollIndicators = useCallback(() => {
+    const el = boardScrollRef.current;
+    if (!el) return;
+    setCanScrollLeft(el.scrollLeft > 8);
+    setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 8);
+  }, []);
+
+  useEffect(() => {
+    const el = boardScrollRef.current;
+    if (!el) return;
+    updateScrollIndicators();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(updateScrollIndicators) : null;
+    ro?.observe(el);
+    window.addEventListener("resize", updateScrollIndicators);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener("resize", updateScrollIndicators);
+    };
+  }, [updateScrollIndicators, visibleStages.length, view]);
+
+  const scrollBoard = useCallback((dir: "left" | "right") => {
+    const el = boardScrollRef.current;
+    if (!el) return;
+    const step = Math.max(380, Math.round(el.clientWidth * 0.55));
+    el.scrollBy({ left: dir === "left" ? -step : step, behavior: "smooth" });
+  }, []);
 
   const toggleStage = useCallback((stage: Stage) => {
     setHiddenStages(prev => {
@@ -1189,7 +1013,7 @@ export default function PipelinePage() {
         </div>
       ) : (
         <>
-          {/* Stage summary pills */}
+          {/* Stage summary pills (clean neutral/theme styling) + horizontal scroll controls */}
           <div className="px-4 md:px-6 py-2 flex items-center gap-2 overflow-x-auto flex-nowrap shrink-0" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)', WebkitOverflowScrolling: 'touch' }}>
             <span className="text-[10px] font-bold tracking-widest mr-2 uppercase shrink-0" style={{ color: 'var(--text-muted)' }}>STAGES</span>
             {STAGES.map(stage => {
@@ -1206,70 +1030,95 @@ export default function PipelinePage() {
                 </button>
               );
             })}
+
+            {(canScrollLeft || canScrollRight) && (
+              <div className="ml-auto flex items-center gap-1 pl-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => scrollBoard("left")}
+                  disabled={!canScrollLeft}
+                  title="Scroll board left"
+                  aria-label="Scroll board left"
+                  className="w-6 h-6 rounded-md flex items-center justify-center transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default hover:bg-[var(--bg-hover)]"
+                  style={{ border: '1px solid var(--border-main)', color: 'var(--text-primary)', background: 'var(--bg-card)' }}
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => scrollBoard("right")}
+                  disabled={!canScrollRight}
+                  title="Scroll board right"
+                  aria-label="Scroll board right"
+                  className="w-6 h-6 rounded-md flex items-center justify-center transition-colors cursor-pointer disabled:opacity-30 disabled:cursor-default hover:bg-[var(--bg-hover)]"
+                  style={{ border: '1px solid var(--border-main)', color: 'var(--text-primary)', background: 'var(--bg-card)' }}
+                >
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
           </div>
 
-          {/* Kanban board — mobile vs desktop rendering */}
-          {isMobile ? (
-            /* ── MOBILE: No drag-and-drop, cards have "Move" button ── */
-            <div
-              className="flex-1 min-h-0 min-w-0 overflow-auto px-4 py-4"
-              style={{
-                WebkitOverflowScrolling: "touch",
-                overscrollBehavior: "contain",
-              }}
-            >
+          {/* Unified Kanban board across all devices (Phone, Tablet, Laptop, Desktop) */}
+          <DndContext
+            sensors={sensors}
+            collisionDetection={collisionDetectionStrategy}
+            onDragStart={handleDragStart}
+            onDragOver={handleDragOver}
+            onDragEnd={handleDragEnd}
+            onDragCancel={handleDragCancel}
+          >
+            <div className="relative flex-1 min-h-0 min-w-0 flex flex-col">
+              {canScrollLeft && (
+                <button
+                  type="button"
+                  onClick={() => scrollBoard("left")}
+                  title="Scroll left"
+                  aria-label="Scroll left"
+                  className="hidden md:flex absolute left-2 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full items-center justify-center transition-all cursor-pointer opacity-85 hover:opacity-100"
+                  style={{
+                    background: 'var(--bg-card)',
+                    border: '1px solid var(--border-main)',
+                    color: 'var(--text-primary)',
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.12)',
+                  }}
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+              )}
+              {canScrollRight && (
+                <button
+                  type="button"
+                  onClick={() => scrollBoard("right")}
+                  title="Scroll right"
+                  aria-label="Scroll right"
+                  className="hidden md:flex absolute right-2 top-1/2 -translate-y-1/2 z-20 w-8 h-8 rounded-full items-center justify-center transition-all cursor-pointer opacity-85 hover:opacity-100"
+                  style={{
+                    background: 'var(--bg-card)',
+                    border: '1px solid var(--border-main)',
+                    color: 'var(--text-primary)',
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.12)',
+                  }}
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              )}
+
               <div
-                className="flex gap-3 items-start"
+                ref={boardScrollRef}
+                onScroll={updateScrollIndicators}
+                className="pipeline-board-scroll flex-1 min-h-0 min-w-0 overflow-x-auto overflow-y-hidden py-3.5 md:py-4 snap-x snap-mandatory sm:snap-none"
                 style={{
-                  minWidth:
-                    visibleStages.length * 268 +
-                    (visibleStages.length - 1) * 12 +
-                    "px",
+                  touchAction: 'pan-x pan-y',
+                  WebkitOverflowScrolling: 'touch',
+                  overscrollBehaviorX: 'contain',
                 }}
               >
-                {visibleStages.map((stage) => {
-                  const allStageLeads = groupedLeads[stage];
-                  const limit = visibleCounts[stage];
-                  const visibleLeads = allStageLeads.slice(0, limit);
-                  return (
-                    <MobileColumn
-                      key={stage}
-                      stage={stage}
-                      leads={visibleLeads}
-                      totalCount={allStageLeads.length}
-                      onMove={moveLeadToStage}
-                      onSelectLead={setPanelLeadId}
-                      onShowMore={() => handleShowMore(stage)}
-                      hasMore={visibleLeads.length < allStageLeads.length}
-                      isReadOnly={isReadOnly}
-                    />
-                  );
-                })}
-              </div>
-            </div>
-          ) : (
-            /* ── DESKTOP: Full drag-and-drop ── */
-            <DndContext
-              sensors={sensors}
-              collisionDetection={collisionDetectionStrategy}
-              onDragStart={handleDragStart}
-              onDragOver={handleDragOver}
-              onDragEnd={handleDragEnd}
-              onDragCancel={handleDragCancel}
-            >
-              <div
-                className="flex-1 min-h-0 min-w-0 overflow-hidden px-3 md:px-4 lg:px-6 py-4 md:py-5"
-                style={{
-                  touchAction: 'pan-y',
-                }}
-              >
-                <div className="flex gap-2.5 lg:gap-3 xl:gap-3.5 h-full items-start w-full">
+                <div className="flex gap-2.5 lg:gap-3 h-full items-stretch min-w-full w-max px-3 md:px-4 lg:px-6">
                   {visibleStages.map(stage => {
                     const allStageLeads = groupedLeads[stage];
                     const limit = visibleCounts[stage];
                     const visibleLeads = allStageLeads.slice(0, limit);
-                    // Fix #2: pass pre-computed primitives so React.memo skips
-                    // non-targeted columns on every overId change.
                     const isTarget = targetColumnInfo.targetStage === stage;
                     return (
                       <Column
@@ -1279,6 +1128,7 @@ export default function PipelinePage() {
                         totalCount={allStageLeads.length}
                         isTargetColumn={isTarget}
                         onSelectLead={setPanelLeadId}
+                        onMoveLead={moveLeadToStage}
                         onShowMore={() => handleShowMore(stage)}
                         hasMore={visibleLeads.length < allStageLeads.length}
                         isReadOnly={isReadOnly}
@@ -1287,17 +1137,17 @@ export default function PipelinePage() {
                   })}
                 </div>
               </div>
+            </div>
 
-              {/* Drag overlay – the floating "ghost" card (instant 0ms drop, no animation delay) */}
-              <DragOverlay dropAnimation={null}>
-                {activeLead ? (
-                  <div className="w-[180px] max-w-[220px] pointer-events-none">
-                    <LeadCard lead={activeLead} isDragging />
-                  </div>
-                ) : null}
-              </DragOverlay>
-            </DndContext>
-          )}
+            {/* Drag overlay – the floating "ghost" card (instant 0ms drop, no animation delay) */}
+            <DragOverlay dropAnimation={null}>
+              {activeLead ? (
+                <div className="w-[200px] max-w-[220px] pointer-events-none">
+                  <LeadCard lead={activeLead} isDragging />
+                </div>
+              ) : null}
+            </DragOverlay>
+          </DndContext>
         </>
       )}
 
@@ -1336,7 +1186,7 @@ export default function PipelinePage() {
 
           {/* Content */}
           <div className="p-6 flex-1">
-            {(panelLead.stage === "Audition Booked" || panelConv?.auditionOutcome || panelConv?.auditionDate) ? (
+            {(panelLead.stage === "Audition Booked" || panelConv?.auditionDate || (panelConv?.auditionOutcome && panelConv.auditionOutcome !== "joining-later")) ? (
               <div
                 className="mb-5 p-3.5 rounded-xl border"
                 style={{
@@ -1537,7 +1387,7 @@ export default function PipelinePage() {
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase">Follow-up</h3>
-                  {panelConv?.auditionOutcome === 'joining-later' && (
+                  {(panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later') && (
                     <span
                       className="text-[9px] font-medium px-1.5 py-0.5 rounded-full"
                       style={{
@@ -1561,7 +1411,7 @@ export default function PipelinePage() {
               <div className="flex items-center gap-2 mb-2">
                 <input
                   type="text"
-                  placeholder={panelConv?.auditionOutcome === 'joining-later' ? "e.g. Joining in summer" : "e.g. Call back about Sunday"}
+                  placeholder={(panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later') ? "e.g. Joining in summer" : "e.g. Call back about Sunday"}
                   value={followUpNote}
                   onChange={(e) => setFollowUpNote(e.target.value)}
                   onKeyDown={(e) => {
@@ -1576,20 +1426,27 @@ export default function PipelinePage() {
                 <label
                   className="flex items-center gap-1.5 shrink-0 cursor-pointer select-none py-1.5 px-2.5 rounded-[6px] border transition-colors h-[32px]"
                   style={{
-                    background: panelConv?.auditionOutcome === 'joining-later' ? 'var(--bg-pill)' : 'var(--bg-input)',
+                    background: (panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later') ? 'var(--bg-pill)' : 'var(--bg-input)',
                     borderColor: 'var(--border-input)',
                   }}
                   title="Mark as joining later"
                 >
                   <input
                     type="checkbox"
-                    checked={panelConv?.auditionOutcome === 'joining-later'}
+                    checked={panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later'}
                     disabled={isReadOnly}
                     onChange={async () => {
                       if (isReadOnly || !panelLead) return;
-                      const isJL = panelConv?.auditionOutcome === 'joining-later';
+                      const isJL = panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later';
                       if (isJL) {
-                        await patchConversation(panelLead.id, { auditionOutcome: '' });
+                        const fallbackStage: Stage = panelConv?.auditionDate ? 'Audition Booked' : 'Contacted';
+                        if (panelLead.stage === 'Joining Later') {
+                          setStageOverrides((prev) => ({ ...prev, [panelLead.id]: fallbackStage }));
+                        }
+                        await patchConversation(panelLead.id, {
+                          auditionOutcome: '',
+                          pipeline: panelLead.stage === 'Joining Later' ? fallbackStage : panelLead.stage,
+                        });
                       } else {
                         const d = new Date();
                         d.setDate(d.getDate() + 14);
@@ -1599,6 +1456,7 @@ export default function PipelinePage() {
                         const defaultDate = `${y}-${m}-${day}`;
 
                         const updates: Record<string, any> = {
+                          pipeline: 'Joining Later',
                           auditionOutcome: 'joining-later',
                           followUpCompleted: false,
                         };
@@ -1610,9 +1468,7 @@ export default function PipelinePage() {
                           updates.followUpNote = 'Joining Later - Follow up';
                           setFollowUpNote('Joining Later - Follow up');
                         }
-                        if (panelLead.stage === 'Audition Booked') {
-                          moveLeadToStage(panelLead.id, 'Contacted');
-                        }
+                        setStageOverrides((prev) => ({ ...prev, [panelLead.id]: 'Joining Later' }));
                         await patchConversation(panelLead.id, updates);
                       }
                     }}
@@ -1621,7 +1477,7 @@ export default function PipelinePage() {
                   <span
                     className="text-[12px] font-medium whitespace-nowrap"
                     style={{
-                      color: panelConv?.auditionOutcome === 'joining-later' ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      color: (panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later') ? 'var(--text-primary)' : 'var(--text-secondary)',
                     }}
                   >
                     Joining later

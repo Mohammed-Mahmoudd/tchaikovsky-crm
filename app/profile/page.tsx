@@ -465,7 +465,7 @@ export default function ProfilePage() {
       }
 
       // 2. Stage Progression Activity
-      if (isAssigned && ["Contacted", "Unqualified", "Lost"].includes(c.pipeline)) {
+      if (isAssigned && ["Contacted", "Qualified", "Joining Later", "Unqualified", "Lost"].includes(c.pipeline)) {
         const stageTime = getUpdatedTime(c);
         if (inTimeRange(stageTime)) {
           totalActivities += 1;

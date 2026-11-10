@@ -192,7 +192,7 @@ async function preUploadFile(
       body: blob,
     });
     if (res.ok) {
-      const json = await res.json();
+      const json = await res.json().catch(() => null);
       if (json?.success && json?.data?.storedFileName) {
         return {
           type: json.data.type || type,
