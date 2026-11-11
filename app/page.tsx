@@ -432,7 +432,7 @@ export default function InboxPage() {
   const agentClean = (activeConv?.agent || "").trim().toLowerCase();
   const isAssigned = !!agentClean && agentClean !== "unassigned";
   const isAssignedToMe = isAssigned && !!userClean && userClean === agentClean;
-  const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager";
+  const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager" || user?.role === "enrollment_director";
   const isAdmission = user?.role === "admission_officer" || user?.role === "agent";
   const isAssignedToOther = isAssigned && !isAssignedToMe;
   const canSendMessages = !isReadOnly;

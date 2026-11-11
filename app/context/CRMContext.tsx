@@ -418,30 +418,45 @@ function getCachedConversations(): Conversation[] {
 let cachePersistTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingCacheSnapshot: Conversation[] | null = null;
 
-function persistConversationsCache(convs: Conversation[]) {
+function flushCacheSnapshotSync() {
+  if (typeof window === "undefined" || !pendingCacheSnapshot) return;
+  const snapshot = pendingCacheSnapshot;
+  pendingCacheSnapshot = null;
+  if (cachePersistTimer !== null) {
+    clearTimeout(cachePersistTimer);
+    cachePersistTimer = null;
+  }
+  try {
+    localStorage.removeItem(LEGACY_CACHE_KEY);
+    localStorage.removeItem(V2_CACHE_KEY);
+    const slimmed = slimConversationsForStorage(snapshot);
+    localStorage.setItem(CACHE_KEY, JSON.stringify(slimmed));
+  } catch {
+    try {
+      const fallbackSlim = slimConversationsForStorage(snapshot, 1500);
+      localStorage.setItem(CACHE_KEY, JSON.stringify(fallbackSlim));
+    } catch {}
+  }
+  saveConversationsToIDB(snapshot).catch(() => {});
+}
+
+function persistConversationsCache(convs: Conversation[], immediate = false) {
   if (typeof window === "undefined") return;
   pendingCacheSnapshot = convs;
+  if (immediate) {
+    flushCacheSnapshotSync();
+    return;
+  }
   if (cachePersistTimer !== null) return;
   cachePersistTimer = setTimeout(() => {
     cachePersistTimer = null;
-    const snapshot = pendingCacheSnapshot;
-    pendingCacheSnapshot = null;
-    if (!snapshot) return;
-    // 1. Save full untruncated dataset (including all activityLog entries) to IndexedDB
-    saveConversationsToIDB(snapshot).catch(() => {});
-    // 2. Save compact full list to localStorage for synchronous 0ms hydration on reload
-    try {
-      localStorage.removeItem(LEGACY_CACHE_KEY);
-      localStorage.removeItem(V2_CACHE_KEY);
-      const slimmed = slimConversationsForStorage(snapshot);
-      localStorage.setItem(CACHE_KEY, JSON.stringify(slimmed));
-    } catch {
-      try {
-        const fallbackSlim = slimConversationsForStorage(snapshot, 1500);
-        localStorage.setItem(CACHE_KEY, JSON.stringify(fallbackSlim));
-      } catch {}
-    }
+    flushCacheSnapshotSync();
   }, 120);
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", flushCacheSnapshotSync);
+  window.addEventListener("pagehide", flushCacheSnapshotSync);
 }
 
 function safeDateIso(val: any): string {
@@ -591,12 +606,26 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       setConversations((prev) => {
-        if (prev.length > idbConvs.length) return prev;
-        const idbWithMessages = idbConvs.map((c) => ({
-          ...c,
-          messages: messagesCacheRef.current.get(c.id) || c.messages || [],
-        }));
-        return idbWithMessages;
+        if (prev.length === 0) {
+          return idbConvs.map((c) => ({
+            ...c,
+            messages: messagesCacheRef.current.get(c.id) || c.messages || [],
+          }));
+        }
+        const idbMap = new Map<string, Conversation>(idbConvs.map((c) => [c.id, c]));
+        return prev.map((current) => {
+          const idbC = idbMap.get(current.id);
+          if (!idbC) return current;
+          return {
+            ...idbC,
+            ...current, // Preserve newer in-memory/localStorage fields (agent, pipeline, notes, status, etc.)
+            activityLog:
+              Array.isArray(idbC.activityLog) && idbC.activityLog.length > (current.activityLog?.length || 0)
+                ? idbC.activityLog
+                : current.activityLog,
+            messages: messagesCacheRef.current.get(current.id) || current.messages || [],
+          };
+        });
       });
       setLoading(false);
     });
@@ -663,7 +692,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const allMembers = Array.from(mergedMap.values());
         setTeamMembers(allMembers);
 
-        const allowedRoles = ["chairman", "owner", "manager", "admission_officer", "agent"];
+        const allowedRoles = ["chairman", "owner", "manager", "enrollment_director", "admission_officer", "agent"];
         const filtered = allMembers.filter((a: AssignableAgent) =>
           allowedRoles.includes((a.role || "").toLowerCase().trim())
         );
@@ -2224,7 +2253,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         }
 
         const next = prev.map((c) => (c.id === id ? { ...c, ...enrichedUpdates } : c));
-        persistConversationsCache(next);
+        persistConversationsCache(next, true);
         return next;
       });
 
@@ -2276,16 +2305,16 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     } as Conversation) // keep loaded messages & newer message timestamps
                   : c
               );
-              persistConversationsCache(next);
+              persistConversationsCache(next, true);
               return next;
             });
           }
-          // Keep a short 5s post-write guard in case an older slim poll is already in-flight
+          // Keep a 15s post-write guard in case an older slim poll is already in-flight
           const currentPending = pendingPatchesRef.current.get(id);
           if (currentPending) {
             pendingPatchesRef.current.set(id, {
               updates: currentPending.updates,
-              expiresAt: Date.now() + 5000,
+              expiresAt: Date.now() + 15000,
             });
           }
         } else if (res.status === 404 && recentlyCreatedRef.current.has(id)) {
@@ -2305,7 +2334,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                       ? ({ ...confirmed, messages: c.messages } as Conversation)
                       : c
                   );
-                  persistConversationsCache(next);
+                  persistConversationsCache(next, true);
                   return next;
                 });
               }
@@ -2314,6 +2343,16 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           if (json && json.error && typeof window !== "undefined") {
             const parsed = formatMetaErrorMessage(json.error);
             console.warn(`Conversation update notice: ${parsed.title} - ${parsed.message}`);
+            try {
+              window.dispatchEvent(
+                new CustomEvent("crm:toast", {
+                  detail: {
+                    type: "error",
+                    message: json.error || parsed.message || "Failed to update lead",
+                  },
+                })
+              );
+            } catch {}
           }
         }
       } catch (err) {

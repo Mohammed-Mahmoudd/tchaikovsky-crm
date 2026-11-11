@@ -466,7 +466,7 @@ const Column = React.memo(function Column({
 export default function PipelinePage() {
   const { conversations, patchConversation, openChat, setPollPaused, assignableAgents } = useCRM();
   const { isReadOnly, user } = useAuth();
-  const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager";
+  const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager" || user?.role === "enrollment_director";
   const isAdmission = user?.role === "admission_officer" || user?.role === "agent";
   const userClean = (user?.name || "").trim().toLowerCase();
 

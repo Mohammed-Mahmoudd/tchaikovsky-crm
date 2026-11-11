@@ -949,7 +949,7 @@ export default function LeadsPage() {
   const { isReadOnly, user } = useAuth();
 
   const isChairman =
-    user?.role === "chairman" || user?.role === "owner" || user?.role === "manager";
+    user?.role === "chairman" || user?.role === "owner" || user?.role === "manager" || user?.role === "enrollment_director";
   const isAdmission =
     user?.role === "admission_officer" || user?.role === "agent";
   const userClean = (user?.name || "").trim().toLowerCase();
