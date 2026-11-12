@@ -308,10 +308,8 @@ export default function InboxPage() {
   // ── Pre-date filter conversations (tab filter + search query) for live preset badge counts ──
   const tabAndSearchFilteredConvs = useMemo(() => {
     return conversations.filter((conv) => {
-      if (activeFilter === "Mine") {
-        const isMine = isConvAssignedToUser(conv.agent, user?.name);
-        const isNewUnassigned = isUnassignedNewLead(conv);
-        if (!isMine && !isNewUnassigned) return false;
+      if (activeFilter === "Mine" && !isConvAssignedToUser(conv.agent, user?.name)) {
+        return false;
       }
       if (activeFilter === "Unassigned" && !isConvUnassigned(conv.agent)) return false;
       if (activeFilter === "Open" && conv.status !== "Open") return false;
