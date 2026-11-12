@@ -8,6 +8,7 @@ import { useAuth } from "../components/AuthProvider";
 import { formatLastMessageTime } from "../utils/time";
 import { useBranches } from "../lib/branches";
 import { BranchSelect } from "../components/BranchSelect";
+import { ConversationChatView } from "../components/ConversationChatView";
 
 import {
   DndContext,
@@ -474,6 +475,7 @@ export default function PipelinePage() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
   const [panelLeadId, setPanelLeadId] = useState<string | null>(null);
+  const [panelTab, setPanelTab] = useState<"details" | "chat">("details");
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   // Audition booking modal state
@@ -790,6 +792,7 @@ export default function PipelinePage() {
       // 2. Close confirmation modal & side panel immediately
       setShowDeleteConfirm(false);
       setPanelLeadId(null);
+      setPanelTab("details");
       // 3. Persist pipeline removal to backend: setting pipeline to "direct"
       // removes it from the pipeline, but keeps conversation, contact and all messages intact
       await patchConversation(targetId, { pipeline: "direct" });
@@ -810,6 +813,7 @@ export default function PipelinePage() {
           setShowDeleteConfirm(false);
         } else if (panelLeadId) {
           setPanelLeadId(null);
+          setPanelTab("details");
         }
       }
     };
@@ -992,7 +996,10 @@ export default function PipelinePage() {
               {filteredLeads.map((lead, idx) => (
                 <tr
                   key={lead.id}
-                  onClick={() => setPanelLeadId(lead.id)}
+                  onClick={() => {
+                    setPanelLeadId(lead.id);
+                    setPanelTab("details");
+                  }}
                   className={`cursor-pointer transition-colors`}
                   style={{ borderBottom: '1px solid var(--border-main)', background: idx % 2 === 0 ? 'var(--bg-table-alt)' : 'var(--bg-card)' }}
                 >
@@ -1127,7 +1134,10 @@ export default function PipelinePage() {
                         leads={visibleLeads}
                         totalCount={allStageLeads.length}
                         isTargetColumn={isTarget}
-                        onSelectLead={setPanelLeadId}
+                        onSelectLead={(id) => {
+                          setPanelLeadId(id);
+                          setPanelTab("details");
+                        }}
                         onMoveLead={moveLeadToStage}
                         onShowMore={() => handleShowMore(stage)}
                         hasMore={visibleLeads.length < allStageLeads.length}
@@ -1153,39 +1163,133 @@ export default function PipelinePage() {
 
       {/* Side Panel Overlay */}
       {panelLead && (
-        <div className="absolute right-0 top-0 h-full w-full sm:w-[360px] z-50 flex flex-col overflow-y-auto" style={{ background: 'var(--bg-panel)', borderLeft: '1px solid var(--border-main)', boxShadow: '-10px 0 20px rgba(0,0,0,0.05)' }}>
-          {/* Header */}
-          <div className="px-6 py-4 flex items-start justify-between" style={{ borderBottom: '1px solid var(--border-main)' }}>
-            <div>
-              <h2 className="text-lg font-bold leading-tight" style={{ color: 'var(--text-primary)' }}>{panelLead.name}</h2>
-              <p className="text-[11px] mt-1" style={{ color: 'var(--text-secondary)' }}>Lead added {panelLead.date.split(",")[0]}</p>
-            </div>
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                title="Delete from Pipeline"
-                disabled={isReadOnly}
-                onClick={() => setShowDeleteConfirm(true)}
-                className="p-1 rounded-md transition-colors cursor-pointer text-[var(--text-secondary)] hover:text-[#FF3B30] hover:bg-[rgba(255,59,48,0.1)] disabled:opacity-40"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setPanelLeadId(null);
-                  setShowDeleteConfirm(false);
-                }}
-                className="p-1 rounded-md transition-colors cursor-pointer"
-                style={{ color: 'var(--text-secondary)' }}
-              >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
-              </button>
-            </div>
-          </div>
+        <div
+          className={`absolute right-0 top-0 h-full z-50 flex flex-col transition-[width] duration-200 ease-in-out ${
+            panelTab === "chat"
+              ? "w-full sm:w-[500px] md:w-[540px] xl:w-[580px]"
+              : "w-full sm:w-[360px]"
+          }`}
+          style={{
+            background: 'var(--bg-panel)',
+            borderLeft: '1px solid var(--border-main)',
+            boxShadow: '-10px 0 20px rgba(0,0,0,0.08)',
+          }}
+        >
+          {panelTab === "chat" ? (
+            <ConversationChatView
+              conversationId={panelLead.id}
+              onClose={() => {
+                setPanelLeadId(null);
+                setShowDeleteConfirm(false);
+                setPanelTab("details");
+              }}
+              onBackToDetails={() => setPanelTab("details")}
+              showBackToDetails={true}
+              extraHeaderActions={
+                <div className="flex items-center gap-1.5">
+                  <select
+                    disabled={isReadOnly}
+                    value={panelLead.stage}
+                    onChange={(e) => moveLeadToStage(panelLead.id, e.target.value as Stage)}
+                    className="rounded-[6px] text-[11px] sm:text-[12px] py-1 px-2 outline-none disabled:opacity-60 cursor-pointer font-medium transition-colors"
+                    style={{
+                      border: '1px solid var(--border-input)',
+                      background: 'var(--bg-input)',
+                      color: 'var(--text-primary)',
+                    }}
+                    title="Change pipeline stage"
+                  >
+                    {STAGES.map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
 
-          {/* Content */}
-          <div className="p-6 flex-1">
+                  <button
+                    type="button"
+                    disabled={isReadOnly}
+                    onClick={handleOpenBookingModal}
+                    className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1 text-[11px] sm:text-[12px] font-semibold rounded-[6px] text-white bg-[#0066FF] hover:bg-[#0055d4] transition-colors cursor-pointer disabled:opacity-50"
+                    title="Book audition"
+                  >
+                    <Calendar className="w-3.5 h-3.5" />
+                    <span>Audition</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setPanelTab("details")}
+                    className="px-2.5 py-1 text-[11px] sm:text-[12px] font-semibold rounded-[6px] transition-colors cursor-pointer hover:bg-[var(--bg-hover)]"
+                    style={{
+                      border: '1px solid var(--border-input)',
+                      background: 'var(--bg-pill)',
+                      color: 'var(--text-secondary)',
+                    }}
+                    title="View lead details"
+                  >
+                    Details
+                  </button>
+                </div>
+              }
+            />
+          ) : (
+            <>
+              {/* Header */}
+              <div className="px-6 py-4 flex items-start justify-between" style={{ borderBottom: '1px solid var(--border-main)' }}>
+                <div>
+                  <h2 className="text-lg font-bold leading-tight" style={{ color: 'var(--text-primary)' }}>{panelLead.name}</h2>
+                  <p className="text-[11px] mt-1" style={{ color: 'var(--text-secondary)' }}>Lead added {panelLead.date.split(",")[0]}</p>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    title="Delete from Pipeline"
+                    disabled={isReadOnly}
+                    onClick={() => setShowDeleteConfirm(true)}
+                    className="p-1 rounded-md transition-colors cursor-pointer text-[var(--text-secondary)] hover:text-[#FF3B30] hover:bg-[rgba(255,59,48,0.1)] disabled:opacity-40"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPanelLeadId(null);
+                      setShowDeleteConfirm(false);
+                      setPanelTab("details");
+                    }}
+                    className="p-1 rounded-md transition-colors cursor-pointer"
+                    style={{ color: 'var(--text-secondary)' }}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                  </button>
+                </div>
+              </div>
+
+              {/* View Switcher Tabs (Details / Conversation) */}
+              <div className="px-6 py-2 flex items-center gap-2 border-b shrink-0 select-none" style={{ borderColor: 'var(--border-main)', background: 'var(--bg-card)' }}>
+                <button
+                  type="button"
+                  onClick={() => setPanelTab("details")}
+                  className="px-3 py-1 text-[12px] font-semibold rounded-[6px] transition-colors cursor-pointer bg-[#0066FF] text-white shadow-xs"
+                >
+                  Details
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPanelTab("chat")}
+                  className="px-3 py-1 text-[12px] font-semibold rounded-[6px] transition-colors cursor-pointer text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] flex items-center gap-1.5"
+                >
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  <span>Conversation</span>
+                  {(panelConv?.unreadCount || 0) > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-[#FF3B30] text-white">
+                      {panelConv?.unreadCount}
+                    </span>
+                  )}
+                </button>
+              </div>
+
+              {/* Content */}
+              <div className="p-6 flex-1 overflow-y-auto">
             {(panelLead.stage === "Audition Booked" || panelConv?.auditionDate || (panelConv?.auditionOutcome && panelConv.auditionOutcome !== "joining-later")) ? (
               <div
                 className="mb-5 p-3.5 rounded-xl border"
@@ -1247,11 +1351,12 @@ export default function PipelinePage() {
             )}
 
             <button
-              onClick={() => openChat(panelLead.id)}
+              type="button"
+              onClick={() => setPanelTab("chat")}
               className="w-full flex items-center justify-center gap-2 py-2 px-3 mb-5 rounded-lg bg-[#0066FF] text-white text-[13px] font-semibold hover:bg-[#0055d4] transition-colors shadow-sm cursor-pointer"
             >
               <MessageSquare className="w-4 h-4" />
-              Open Conversation in Inbox
+              Open Conversation
             </button>
 
             <div className="mb-6">
@@ -1529,8 +1634,10 @@ export default function PipelinePage() {
               )}
             </div>
           </div>
-        </div>
+        </>
       )}
+    </div>
+  )}
 
       {/* Book Audition Modal */}
       {showAuditionModal && panelLead && (

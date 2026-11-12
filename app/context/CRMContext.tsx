@@ -215,6 +215,7 @@ type CRMContextType = {
   reactToMessage: (chatId: string, messageId: string, emoji: string) => Promise<boolean>;
   addOptimisticMessages: (chatId: string, msgs: Message[]) => void;
   finalizeOptimisticMessages: (chatId: string, tempIds: string[], confirmedRawMessages?: any[]) => void;
+  fetchChatMessages: (chatId: string) => Promise<void>;
 };
 
 const CRMContext = createContext<CRMContextType | undefined>(undefined);
@@ -3148,6 +3149,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         reactToMessage,
         addOptimisticMessages,
         finalizeOptimisticMessages,
+        fetchChatMessages: fetchActiveChat,
       }}
     >
       {children}
