@@ -1268,23 +1268,6 @@ export default function PipelinePage() {
                   showBackToDetails={true}
                   extraHeaderActions={
                     <div className="flex items-center gap-1.5">
-                      <select
-                        disabled={isReadOnly}
-                        value={panelLead.stage}
-                        onChange={(e) => moveLeadToStage(panelLead.id, e.target.value as Stage)}
-                        className="rounded-[6px] text-[11px] sm:text-[12px] py-1 px-2 outline-none disabled:opacity-60 cursor-pointer font-medium transition-colors"
-                        style={{
-                          border: '1px solid var(--border-input)',
-                          background: 'var(--bg-input)',
-                          color: 'var(--text-primary)',
-                        }}
-                        title="Change pipeline stage"
-                      >
-                        {STAGES.map((s) => (
-                          <option key={s} value={s}>{s}</option>
-                        ))}
-                      </select>
-
                       <button
                         type="button"
                         disabled={isReadOnly}
