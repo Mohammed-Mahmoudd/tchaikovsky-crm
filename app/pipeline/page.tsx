@@ -9,6 +9,8 @@ import { formatLastMessageTime } from "../utils/time";
 import { useBranches } from "../lib/branches";
 import { BranchSelect } from "../components/BranchSelect";
 import { ConversationChatView } from "../components/ConversationChatView";
+import { ConversationDetailsSidebar } from "../components/ConversationDetailsSidebar";
+import { Conversation } from "../context/CRMContext";
 
 import {
   DndContext,
@@ -476,6 +478,10 @@ export default function PipelinePage() {
   const [overId, setOverId] = useState<string | null>(null);
   const [panelLeadId, setPanelLeadId] = useState<string | null>(null);
   const [panelTab, setPanelTab] = useState<"details" | "chat">("details");
+  const [showChatDetails, setShowChatDetails] = useState(false);
+  const [isClosing, setIsClosing] = useState(false);
+  const closeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   // Audition booking modal state
@@ -486,6 +492,51 @@ export default function PipelinePage() {
   const [auditionBranch, setAuditionBranch] = useState("");
   const { branchGroups } = useBranches();
   const [isBookingAudition, setIsBookingAudition] = useState(false);
+
+  const handleOpenPanel = useCallback((leadId: string, tab: "details" | "chat" = "details") => {
+    if (closeTimeoutRef.current) {
+      clearTimeout(closeTimeoutRef.current);
+      closeTimeoutRef.current = null;
+    }
+    setPanelLeadId(leadId);
+    setPanelTab(tab);
+    setShowChatDetails(false);
+    setIsClosing(false);
+  }, []);
+
+  const handleClosePanel = useCallback(() => {
+    if (!panelLeadId || isClosing) return;
+    setIsClosing(true);
+    setShowChatDetails(false);
+    setShowDeleteConfirm(false);
+    if (closeTimeoutRef.current) clearTimeout(closeTimeoutRef.current);
+    closeTimeoutRef.current = setTimeout(() => {
+      setPanelLeadId(null);
+      setIsClosing(false);
+      setPanelTab("details");
+      setShowChatDetails(false);
+    }, 240);
+  }, [panelLeadId, isClosing]);
+
+  const handlePanelAnimationEnd = useCallback((e: React.AnimationEvent) => {
+    if (e.target === panelRef.current && isClosing) {
+      if (closeTimeoutRef.current) {
+        clearTimeout(closeTimeoutRef.current);
+        closeTimeoutRef.current = null;
+      }
+      setPanelLeadId(null);
+      setIsClosing(false);
+      setPanelTab("details");
+      setShowChatDetails(false);
+      setShowDeleteConfirm(false);
+    }
+  }, [isClosing]);
+
+  useEffect(() => {
+    return () => {
+      if (closeTimeoutRef.current) clearTimeout(closeTimeoutRef.current);
+    };
+  }, []);
 
   // Periodic refresh every 30s to keep relative timestamps live
   const [, setTimeTick] = useState(0);
@@ -699,6 +750,21 @@ export default function PipelinePage() {
   const activeLead = useMemo(() => activeId ? leads.find(l => l.id === activeId) ?? null : null, [activeId, leads]);
   const panelLead = useMemo(() => panelLeadId ? leads.find(l => l.id === panelLeadId) ?? null : null, [panelLeadId, leads]);
   const panelConv = useMemo(() => panelLeadId ? conversations.find(c => c.id === panelLeadId) ?? null : null, [panelLeadId, conversations]);
+  const effectiveConv = useMemo(() => {
+    if (panelConv) return panelConv;
+    if (!panelLead) return null;
+    return {
+      id: panelLead.id,
+      name: panelLead.name,
+      leadName: panelLead.name,
+      phone: panelLead.phone,
+      pipeline: panelLead.stage,
+      agent: panelLead.agent,
+      channel: "WA" as const,
+      unreadCount: 0,
+      messages: [],
+    } as unknown as Conversation;
+  }, [panelConv, panelLead]);
 
   // Pre-compute which column is the hover target so React.memo skips non-targeted columns
   const targetColumnInfo = useMemo(() => {
@@ -811,15 +877,16 @@ export default function PipelinePage() {
           setShowAuditionModal(false);
         } else if (showDeleteConfirm) {
           setShowDeleteConfirm(false);
+        } else if (showChatDetails) {
+          setShowChatDetails(false);
         } else if (panelLeadId) {
-          setPanelLeadId(null);
-          setPanelTab("details");
+          handleClosePanel();
         }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showAuditionModal, showDeleteConfirm, panelLeadId]);
+  }, [showAuditionModal, showDeleteConfirm, showChatDetails, panelLeadId, handleClosePanel]);
 
   const handleOpenBookingModal = useCallback(() => {
     if (!panelLead) return;
@@ -930,7 +997,6 @@ export default function PipelinePage() {
     }
   }, [leads, overId, patchConversation, isReadOnly]);
 
-
   return (
     <div className="flex flex-col h-full min-h-0 min-w-0 relative overflow-hidden" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
 
@@ -997,8 +1063,7 @@ export default function PipelinePage() {
                 <tr
                   key={lead.id}
                   onClick={() => {
-                    setPanelLeadId(lead.id);
-                    setPanelTab("details");
+                    handleOpenPanel(lead.id, "details");
                   }}
                   className={`cursor-pointer transition-colors`}
                   style={{ borderBottom: '1px solid var(--border-main)', background: idx % 2 === 0 ? 'var(--bg-table-alt)' : 'var(--bg-card)' }}
@@ -1135,8 +1200,7 @@ export default function PipelinePage() {
                         totalCount={allStageLeads.length}
                         isTargetColumn={isTarget}
                         onSelectLead={(id) => {
-                          setPanelLeadId(id);
-                          setPanelTab("details");
+                          handleOpenPanel(id, "details");
                         }}
                         onMoveLead={moveLeadToStage}
                         onShowMore={() => handleShowMore(stage)}
@@ -1161,78 +1225,130 @@ export default function PipelinePage() {
         </>
       )}
 
+      {/* Mobile backdrop for instant tap-outside dismissal */}
+      {panelLead && (
+        <div
+          className={`fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px] sm:hidden ${
+            isClosing ? "animate-backdrop-out pointer-events-none" : "animate-backdrop-in"
+          }`}
+          onClick={handleClosePanel}
+        />
+      )}
+
       {/* Side Panel Overlay */}
       {panelLead && (
         <div
-          className={`absolute right-0 top-0 h-full z-50 flex flex-col transition-[width] duration-200 ease-in-out ${
+          ref={panelRef}
+          onAnimationEnd={handlePanelAnimationEnd}
+          className={`absolute right-0 top-0 h-full z-50 flex flex-col transition-[width] duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] will-change-[width,transform] shadow-2xl ${
+            isClosing ? "animate-drawer-out pointer-events-none" : "animate-drawer-in"
+          } ${
             panelTab === "chat"
-              ? "w-full sm:w-[500px] md:w-[540px] xl:w-[580px]"
+              ? showChatDetails
+                ? "w-full sm:w-[820px] md:w-[860px] xl:w-[900px] max-w-[96vw]"
+                : "w-full sm:w-[500px] md:w-[540px] xl:w-[580px]"
               : "w-full sm:w-[360px]"
           }`}
           style={{
             background: 'var(--bg-panel)',
             borderLeft: '1px solid var(--border-main)',
-            boxShadow: '-10px 0 20px rgba(0,0,0,0.08)',
+            boxShadow: '-10px 0 25px rgba(0,0,0,0.12)',
           }}
         >
           {panelTab === "chat" ? (
-            <ConversationChatView
-              conversationId={panelLead.id}
-              onClose={() => {
-                setPanelLeadId(null);
-                setShowDeleteConfirm(false);
-                setPanelTab("details");
-              }}
-              onBackToDetails={() => setPanelTab("details")}
-              showBackToDetails={true}
-              extraHeaderActions={
-                <div className="flex items-center gap-1.5">
-                  <select
-                    disabled={isReadOnly}
-                    value={panelLead.stage}
-                    onChange={(e) => moveLeadToStage(panelLead.id, e.target.value as Stage)}
-                    className="rounded-[6px] text-[11px] sm:text-[12px] py-1 px-2 outline-none disabled:opacity-60 cursor-pointer font-medium transition-colors"
-                    style={{
-                      border: '1px solid var(--border-input)',
-                      background: 'var(--bg-input)',
-                      color: 'var(--text-primary)',
-                    }}
-                    title="Change pipeline stage"
-                  >
-                    {STAGES.map((s) => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
+            <div className="flex h-full w-full overflow-hidden relative animate-panel-fade">
+              <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
+                <ConversationChatView
+                  conversationId={panelLead.id}
+                  onClose={handleClosePanel}
+                  onBackToDetails={() => {
+                    setPanelTab("details");
+                    setShowChatDetails(false);
+                  }}
+                  showBackToDetails={true}
+                  extraHeaderActions={
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        disabled={isReadOnly}
+                        value={panelLead.stage}
+                        onChange={(e) => moveLeadToStage(panelLead.id, e.target.value as Stage)}
+                        className="rounded-[6px] text-[11px] sm:text-[12px] py-1 px-2 outline-none disabled:opacity-60 cursor-pointer font-medium transition-colors"
+                        style={{
+                          border: '1px solid var(--border-input)',
+                          background: 'var(--bg-input)',
+                          color: 'var(--text-primary)',
+                        }}
+                        title="Change pipeline stage"
+                      >
+                        {STAGES.map((s) => (
+                          <option key={s} value={s}>{s}</option>
+                        ))}
+                      </select>
 
-                  <button
-                    type="button"
-                    disabled={isReadOnly}
-                    onClick={handleOpenBookingModal}
-                    className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1 text-[11px] sm:text-[12px] font-semibold rounded-[6px] text-white bg-[#0066FF] hover:bg-[#0055d4] transition-colors cursor-pointer disabled:opacity-50"
-                    title="Book audition"
-                  >
-                    <Calendar className="w-3.5 h-3.5" />
-                    <span>Audition</span>
-                  </button>
+                      <button
+                        type="button"
+                        disabled={isReadOnly}
+                        onClick={handleOpenBookingModal}
+                        className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1 text-[11px] sm:text-[12px] font-semibold rounded-[6px] text-white bg-[#0066FF] hover:bg-[#0055d4] active:scale-95 transition-all duration-150 cursor-pointer disabled:opacity-50 select-none"
+                        title="Book audition"
+                      >
+                        <Calendar className="w-3.5 h-3.5" />
+                        <span>Audition</span>
+                      </button>
 
-                  <button
-                    type="button"
-                    onClick={() => setPanelTab("details")}
-                    className="px-2.5 py-1 text-[11px] sm:text-[12px] font-semibold rounded-[6px] transition-colors cursor-pointer hover:bg-[var(--bg-hover)]"
-                    style={{
-                      border: '1px solid var(--border-input)',
-                      background: 'var(--bg-pill)',
-                      color: 'var(--text-secondary)',
-                    }}
-                    title="View lead details"
-                  >
-                    Details
-                  </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowChatDetails((prev) => !prev)}
+                        className={`px-2.5 py-1 text-[11px] sm:text-[12px] font-semibold rounded-[6px] active:scale-95 transition-all duration-150 cursor-pointer select-none ${
+                          showChatDetails
+                            ? "bg-[#0066FF] text-white shadow-xs"
+                            : "hover:bg-[var(--bg-hover)] text-[var(--text-secondary)]"
+                        }`}
+                        style={{
+                          border: showChatDetails ? "1px solid #0066FF" : "1px solid var(--border-input)",
+                          background: showChatDetails ? "#0066FF" : "var(--bg-pill)",
+                        }}
+                        title={showChatDetails ? "Hide lead details" : "View lead details"}
+                      >
+                        Details
+                      </button>
+                    </div>
+                  }
+                />
+              </div>
+
+              {/* Right Sidebar Details Panel (Exact Inbox Screen Design) */}
+              <div
+                className={`
+                  shrink-0 h-full flex flex-col overflow-hidden
+                  transition-all duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] will-change-[transform,width,opacity]
+                  absolute sm:relative inset-0 sm:inset-auto z-20 sm:z-auto
+                  border-l
+                  ${
+                    showChatDetails
+                      ? "w-full sm:w-[320px] opacity-100 translate-x-0"
+                      : "w-full sm:w-0 opacity-0 sm:opacity-0 translate-x-full sm:translate-x-0 pointer-events-none border-l-0"
+                  }
+                `}
+                style={{
+                  borderColor: "var(--border-main)",
+                  background: "var(--bg-panel)",
+                }}
+              >
+                <div className="w-full sm:w-[320px] h-full flex flex-col min-w-[300px] sm:min-w-[320px]">
+                  {effectiveConv && (
+                    <ConversationDetailsSidebar
+                      conversation={effectiveConv}
+                      showOpenConversationButton={false}
+                      onOpenBookingModal={handleOpenBookingModal}
+                      onClose={() => setShowChatDetails(false)}
+                    />
+                  )}
                 </div>
-              }
-            />
+              </div>
+            </div>
           ) : (
-            <>
+            <div className="w-full h-full flex flex-col overflow-hidden animate-panel-fade">
               {/* Header */}
               <div className="px-6 py-4 flex items-start justify-between" style={{ borderBottom: '1px solid var(--border-main)' }}>
                 <div>
@@ -1251,11 +1367,7 @@ export default function PipelinePage() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => {
-                      setPanelLeadId(null);
-                      setShowDeleteConfirm(false);
-                      setPanelTab("details");
-                    }}
+                    onClick={handleClosePanel}
                     className="p-1 rounded-md transition-colors cursor-pointer"
                     style={{ color: 'var(--text-secondary)' }}
                   >
@@ -1264,380 +1376,356 @@ export default function PipelinePage() {
                 </div>
               </div>
 
-              {/* View Switcher Tabs (Details / Conversation) */}
-              <div className="px-6 py-2 flex items-center gap-2 border-b shrink-0 select-none" style={{ borderColor: 'var(--border-main)', background: 'var(--bg-card)' }}>
-                <button
-                  type="button"
-                  onClick={() => setPanelTab("details")}
-                  className="px-3 py-1 text-[12px] font-semibold rounded-[6px] transition-colors cursor-pointer bg-[#0066FF] text-white shadow-xs"
-                >
-                  Details
-                </button>
+              {/* Content */}
+              <div className="p-6 flex-1 overflow-y-auto">
+                {(panelLead.stage === "Audition Booked" || panelConv?.auditionDate || (panelConv?.auditionOutcome && panelConv.auditionOutcome !== "joining-later")) ? (
+                  <div
+                    className="mb-5 p-3.5 rounded-xl border"
+                    style={{
+                      background: 'var(--bg-pill)',
+                      borderColor: 'var(--border-input)',
+                    }}
+                  >
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[12px] font-bold flex items-center gap-1.5" style={{ color: 'var(--text-primary)' }}>
+                        <CheckCircle2 className="w-4 h-4" style={{ color: '#0066FF' }} />
+                        {panelConv?.auditionOutcome === 'registered' && 'Registered'}
+                        {panelConv?.auditionOutcome === 'schedule-followup' && 'Schedule Follow up'}
+                        {panelConv?.auditionOutcome === 'paid-trial' && 'Paid Trial'}
+                        {panelConv?.auditionOutcome === 'joining-later' && 'Joining Later'}
+                        {panelConv?.auditionOutcome === 'no-show' && 'No Show'}
+                        {!panelConv?.auditionOutcome && 'Audition Booked'}
+                      </span>
+                      <Link
+                        href={`/auditions?date=${panelConv?.auditionDate || panelConv?.followUpDate || ''}&id=${panelLead.id}`}
+                        className="text-[11px] font-semibold text-[#0066FF] hover:underline flex items-center gap-1"
+                      >
+                        <Calendar className="w-3.5 h-3.5" />
+                        Calendar →
+                      </Link>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {(panelConv?.auditionDate || followUpDate || panelConv?.followUpDate) && (
+                        <span className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                          {panelConv?.auditionDate || followUpDate || panelConv?.followUpDate}
+                        </span>
+                      )}
+                      {panelConv?.branch && (
+                        <span className="text-[11px] font-medium" style={{ color: 'var(--text-muted)' }}>
+                          · {panelConv.branch}
+                        </span>
+                      )}
+                    </div>
+                    {!isReadOnly && (
+                      <button
+                        type="button"
+                        onClick={handleOpenBookingModal}
+                        className="mt-2 text-[11px] font-semibold text-[#0066FF] hover:underline cursor-pointer block text-left"
+                      >
+                        Reschedule or edit audition details
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={isReadOnly}
+                    onClick={handleOpenBookingModal}
+                    className="w-full bg-[#0066FF] text-white font-semibold py-2.5 rounded-lg mb-4 hover:bg-[#0055d4] transition-colors shadow-sm cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2 text-[13px]"
+                  >
+                    <Calendar className="w-4 h-4" />
+                    Book audition
+                  </button>
+                )}
+
                 <button
                   type="button"
                   onClick={() => setPanelTab("chat")}
-                  className="px-3 py-1 text-[12px] font-semibold rounded-[6px] transition-colors cursor-pointer text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] flex items-center gap-1.5"
+                  className="w-full flex items-center justify-center gap-2 py-2 px-3 mb-5 rounded-lg bg-[#0066FF] text-white text-[13px] font-semibold hover:bg-[#0055d4] transition-colors shadow-sm cursor-pointer"
                 >
-                  <MessageSquare className="w-3.5 h-3.5" />
-                  <span>Conversation</span>
-                  {(panelConv?.unreadCount || 0) > 0 && (
-                    <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-[#FF3B30] text-white">
-                      {panelConv?.unreadCount}
-                    </span>
-                  )}
+                  <MessageSquare className="w-4 h-4" />
+                  Open Conversation
                 </button>
-              </div>
 
-              {/* Content */}
-              <div className="p-6 flex-1 overflow-y-auto">
-            {(panelLead.stage === "Audition Booked" || panelConv?.auditionDate || (panelConv?.auditionOutcome && panelConv.auditionOutcome !== "joining-later")) ? (
-              <div
-                className="mb-5 p-3.5 rounded-xl border"
-                style={{
-                  background: 'var(--bg-pill)',
-                  borderColor: 'var(--border-input)',
-                }}
-              >
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-[12px] font-bold flex items-center gap-1.5" style={{ color: 'var(--text-primary)' }}>
-                    <CheckCircle2 className="w-4 h-4" style={{ color: '#0066FF' }} />
-                    {panelConv?.auditionOutcome === 'registered' && 'Registered'}
-                    {panelConv?.auditionOutcome === 'schedule-followup' && 'Schedule Follow up'}
-                    {panelConv?.auditionOutcome === 'paid-trial' && 'Paid Trial'}
-                    {panelConv?.auditionOutcome === 'joining-later' && 'Joining Later'}
-                    {panelConv?.auditionOutcome === 'no-show' && 'No Show'}
-                    {!panelConv?.auditionOutcome && 'Audition Booked'}
-                  </span>
-                  <Link
-                    href={`/auditions?date=${panelConv?.auditionDate || panelConv?.followUpDate || ''}&id=${panelLead.id}`}
-                    className="text-[11px] font-semibold text-[#0066FF] hover:underline flex items-center gap-1"
-                  >
-                    <Calendar className="w-3.5 h-3.5" />
-                    Calendar →
-                  </Link>
+                <div className="mb-6">
+                  <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Contact</h3>
+                  <p className="text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>{panelLead.phone || "—"}</p>
                 </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  {(panelConv?.auditionDate || followUpDate || panelConv?.followUpDate) && (
-                    <span className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>
-                      {panelConv?.auditionDate || followUpDate || panelConv?.followUpDate}
-                    </span>
-                  )}
-                  {panelConv?.branch && (
-                    <span className="text-[11px] font-medium" style={{ color: 'var(--text-muted)' }}>
-                      · {panelConv.branch}
-                    </span>
-                  )}
-                </div>
-                {!isReadOnly && (
-                  <button
-                    type="button"
-                    onClick={handleOpenBookingModal}
-                    className="mt-2 text-[11px] font-semibold text-[#0066FF] hover:underline cursor-pointer block text-left"
-                  >
-                    Reschedule or edit audition details
-                  </button>
-                )}
-              </div>
-            ) : (
-              <button
-                type="button"
-                disabled={isReadOnly}
-                onClick={handleOpenBookingModal}
-                className="w-full bg-[#0066FF] text-white font-semibold py-2.5 rounded-lg mb-4 hover:bg-[#0055d4] transition-colors shadow-sm cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2 text-[13px]"
-              >
-                <Calendar className="w-4 h-4" />
-                Book audition
-              </button>
-            )}
 
-            <button
-              type="button"
-              onClick={() => setPanelTab("chat")}
-              className="w-full flex items-center justify-center gap-2 py-2 px-3 mb-5 rounded-lg bg-[#0066FF] text-white text-[13px] font-semibold hover:bg-[#0055d4] transition-colors shadow-sm cursor-pointer"
-            >
-              <MessageSquare className="w-4 h-4" />
-              Open Conversation
-            </button>
+                <div className="mb-6">
+                  <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Lead Management</h3>
+                  <div className="flex gap-3">
+                    <div className="flex-1">
+                      <label className="text-[11px] block mb-1" style={{ color: 'var(--text-secondary)' }}>Assigned to</label>
+                      {(() => {
+                        const agentClean = (panelLead.agent || "").trim().toLowerCase();
+                        const isLeadUnassigned = !agentClean || agentClean === "unassigned";
+                        const isAssignedToMe = !isLeadUnassigned && !!userClean && userClean === agentClean;
+                        const isAssignedToOther = !isLeadUnassigned && !isAssignedToMe;
+                        const canAssignToSelf = !isReadOnly && isAdmission && (isLeadUnassigned || isAssignedToMe);
+                        const canEditPanelAgent = !isReadOnly && (isChairman || canAssignToSelf);
 
-            <div className="mb-6">
-              <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Contact</h3>
-              <p className="text-[13px] font-medium" style={{ color: 'var(--text-primary)' }}>{panelLead.phone || "—"}</p>
-            </div>
-
-            <div className="mb-6">
-              <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Lead Management</h3>
-              <div className="flex gap-3">
-                <div className="flex-1">
-                  <label className="text-[11px] block mb-1" style={{ color: 'var(--text-secondary)' }}>Assigned to</label>
-                  {(() => {
-                    const agentClean = (panelLead.agent || "").trim().toLowerCase();
-                    const isLeadUnassigned = !agentClean || agentClean === "unassigned";
-                    const isAssignedToMe = !isLeadUnassigned && !!userClean && userClean === agentClean;
-                    const isAssignedToOther = !isLeadUnassigned && !isAssignedToMe;
-                    const canAssignToSelf = !isReadOnly && isAdmission && (isLeadUnassigned || isAssignedToMe);
-                    const canEditPanelAgent = !isReadOnly && (isChairman || canAssignToSelf);
-
-                    return (
-                      <div className="space-y-1.5">
-                        <select
-                          disabled={!canEditPanelAgent}
-                          title={
-                            !canEditPanelAgent
-                              ? isAssignedToOther
-                                ? `Assigned to ${panelLead.agent}. Only Chairman can reassign.`
-                                : "Only Chairman or Admission can assign leads"
-                              : undefined
-                          }
-                          value={panelLead.agent || "Unassigned"}
-                          onChange={(e) => patchConversation(panelLead.id, { agent: e.target.value })}
-                          className="w-full rounded-[6px] text-[13px] py-1.5 px-2 outline-none disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed font-medium transition-colors"
-                          style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
-                        >
-                          {isChairman ? (
-                            <>
-                              <option value="Unassigned">Unassigned</option>
-                              {panelLead.agent && panelLead.agent !== "Unassigned" && !assignableAgents.some(a => a.name === panelLead.agent) && (
-                                <option value={panelLead.agent}>{panelLead.agent}</option>
-                              )}
-                              {assignableAgents.map((a) => (
-                                <option key={a.name} value={a.name}>
-                                  {a.name}
-                                </option>
-                              ))}
-                            </>
-                          ) : isAdmission ? (
-                            <>
-                              {isLeadUnassigned ? (
+                        return (
+                          <div className="space-y-1.5">
+                            <select
+                              disabled={!canEditPanelAgent}
+                              title={
+                                !canEditPanelAgent
+                                  ? isAssignedToOther
+                                    ? `Assigned to ${panelLead.agent}. Only Chairman can reassign.`
+                                    : "Only Chairman or Admission can assign leads"
+                                  : undefined
+                              }
+                              value={panelLead.agent || "Unassigned"}
+                              onChange={(e) => patchConversation(panelLead.id, { agent: e.target.value })}
+                              className="w-full rounded-[6px] text-[13px] py-1.5 px-2 outline-none disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed font-medium transition-colors"
+                              style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
+                            >
+                              {isChairman ? (
                                 <>
                                   <option value="Unassigned">Unassigned</option>
-                                  {user?.name && <option value={user.name}>{user.name} (Assign to me)</option>}
+                                  {panelLead.agent && panelLead.agent !== "Unassigned" && !assignableAgents.some(a => a.name === panelLead.agent) && (
+                                    <option value={panelLead.agent}>{panelLead.agent}</option>
+                                  )}
+                                  {assignableAgents.map((a) => (
+                                    <option key={a.name} value={a.name}>
+                                      {a.name}
+                                    </option>
+                                  ))}
                                 </>
-                              ) : isAssignedToMe ? (
+                              ) : isAdmission ? (
                                 <>
-                                  <option value={user?.name || panelLead.agent}>{user?.name || panelLead.agent}</option>
-                                  <option value="Unassigned">Unassigned</option>
+                                  {isLeadUnassigned ? (
+                                    <>
+                                      <option value="Unassigned">Unassigned</option>
+                                      {user?.name && <option value={user.name}>{user.name} (Assign to me)</option>}
+                                    </>
+                                  ) : isAssignedToMe ? (
+                                    <>
+                                      <option value={user?.name || panelLead.agent}>{user?.name || panelLead.agent}</option>
+                                      <option value="Unassigned">Unassigned</option>
+                                    </>
+                                  ) : (
+                                    <option value={panelLead.agent}>{panelLead.agent}</option>
+                                  )}
                                 </>
                               ) : (
-                                <option value={panelLead.agent}>{panelLead.agent}</option>
+                                <option value={panelLead.agent || "Unassigned"}>{panelLead.agent || "Unassigned"}</option>
                               )}
-                            </>
-                          ) : (
-                            <option value={panelLead.agent || "Unassigned"}>{panelLead.agent || "Unassigned"}</option>
-                          )}
-                        </select>
-                        {isLeadUnassigned && isAdmission && user?.name && !isReadOnly && (
-                          <button
-                            type="button"
-                            onClick={() => patchConversation(panelLead.id, { agent: user.name })}
-                            className="w-full text-center text-[11px] font-semibold text-[#0066FF] hover:underline cursor-pointer py-0.5"
-                          >
-                            + Assign to me
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })()}
+                            </select>
+                            {isLeadUnassigned && isAdmission && user?.name && !isReadOnly && (
+                              <button
+                                type="button"
+                                onClick={() => patchConversation(panelLead.id, { agent: user.name })}
+                                className="w-full text-center text-[11px] font-semibold text-[#0066FF] hover:underline cursor-pointer py-0.5"
+                              >
+                                + Assign to me
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                    <div className="flex-1">
+                      <label className="text-[11px] block mb-1" style={{ color: 'var(--text-secondary)' }}>Stage</label>
+                      <select
+                        disabled={isReadOnly}
+                        value={panelLead.stage}
+                        onChange={(e) => moveLeadToStage(panelLead.id, e.target.value as Stage)}
+                        className="w-full rounded-[6px] text-[13px] py-1.5 px-2 outline-none disabled:opacity-60 cursor-pointer"
+                        style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
+                      >
+                        {STAGES.map((s) => (
+                          <option key={s} value={s}>{s}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
                 </div>
-                <div className="flex-1">
-                  <label className="text-[11px] block mb-1" style={{ color: 'var(--text-secondary)' }}>Stage</label>
-                  <select
-                    disabled={isReadOnly}
-                    value={panelLead.stage}
-                    onChange={(e) => moveLeadToStage(panelLead.id, e.target.value as Stage)}
-                    className="w-full rounded-[6px] text-[13px] py-1.5 px-2 outline-none disabled:opacity-60 cursor-pointer"
-                    style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
-                  >
-                    {STAGES.map((s) => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
+
+                <div className="mb-6">
+                  <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Source</h3>
+                  <p className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{panelLead.campaign}</p>
                 </div>
-              </div>
-            </div>
 
-            <div className="mb-6">
-              <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Source</h3>
-              <p className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{panelLead.campaign}</p>
-            </div>
-
-            <div className="mb-6">
-              <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Cash In</h3>
-              <div className="flex gap-2">
-                <input
-                  type="number"
-                  placeholder="0"
-                  value={cashVal}
-                  onChange={(e) => setCashVal(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      handleSaveCash();
-                    }
-                  }}
-                  className="flex-1 rounded-[6px] text-[13px] py-1.5 px-3 outline-none"
-                  style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
-                />
-                <button
-                  type="button"
-                  disabled={isReadOnly}
-                  onClick={handleSaveCash}
-                  className="bg-[#0066FF] text-white font-semibold text-[13px] px-4 rounded-[6px] shadow-sm hover:bg-[#0055d4] transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  {cashSaved ? "Saved ✓" : "Save"}
-                </button>
-              </div>
-            </div>
-
-            <div className="mb-6">
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase">Follow-up</h3>
-                  {(panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later') && (
-                    <span
-                      className="text-[9px] font-medium px-1.5 py-0.5 rounded-full"
-                      style={{
-                        background: 'var(--bg-pill)',
-                        color: 'var(--text-secondary)',
-                        border: '1px solid var(--border-main)',
+                <div className="mb-6">
+                  <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Cash In</h3>
+                  <div className="flex gap-2">
+                    <input
+                      type="number"
+                      placeholder="0"
+                      value={cashVal}
+                      onChange={(e) => setCashVal(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          handleSaveCash();
+                        }
                       }}
+                      className="flex-1 rounded-[6px] text-[13px] py-1.5 px-3 outline-none"
+                      style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
+                    />
+                    <button
+                      type="button"
+                      disabled={isReadOnly}
+                      onClick={handleSaveCash}
+                      className="bg-[#0066FF] text-white font-semibold text-[13px] px-4 rounded-[6px] shadow-sm hover:bg-[#0055d4] transition-colors cursor-pointer disabled:opacity-50"
                     >
-                      Joining Later
-                    </span>
+                      {cashSaved ? "Saved ✓" : "Save"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mb-6">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase">Follow-up</h3>
+                      {(panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later') && (
+                        <span
+                          className="text-[9px] font-medium px-1.5 py-0.5 rounded-full"
+                          style={{
+                            background: 'var(--bg-pill)',
+                            color: 'var(--text-secondary)',
+                            border: '1px solid var(--border-main)',
+                          }}
+                        >
+                          Joining Later
+                        </span>
+                      )}
+                    </div>
+                    <Link
+                      href="/follow-ups"
+                      className="text-[11px] font-semibold text-[#0066FF] hover:underline flex items-center gap-0.5"
+                    >
+                      Follow-ups →
+                    </Link>
+                  </div>
+
+                  <div className="flex items-center gap-2 mb-2">
+                    <input
+                      type="text"
+                      placeholder={(panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later') ? "e.g. Joining in summer" : "e.g. Call back about Sunday"}
+                      value={followUpNote}
+                      onChange={(e) => setFollowUpNote(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          handleSaveFollowUp();
+                        }
+                      }}
+                      className="flex-1 min-w-0 rounded-[6px] text-[13px] py-1.5 px-3 outline-none placeholder-gray-400"
+                      style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
+                    />
+                    <label
+                      className="flex items-center gap-1.5 shrink-0 cursor-pointer select-none py-1.5 px-2.5 rounded-[6px] border transition-colors h-[32px]"
+                      style={{
+                        background: (panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later') ? 'var(--bg-pill)' : 'var(--bg-input)',
+                        borderColor: 'var(--border-input)',
+                      }}
+                      title="Mark as joining later"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later'}
+                        disabled={isReadOnly}
+                        onChange={async () => {
+                          if (isReadOnly || !panelLead) return;
+                          const isJL = panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later';
+                          if (isJL) {
+                            const fallbackStage: Stage = panelConv?.auditionDate ? 'Audition Booked' : 'Contacted';
+                            if (panelLead.stage === 'Joining Later') {
+                              setStageOverrides((prev) => ({ ...prev, [panelLead.id]: fallbackStage }));
+                            }
+                            await patchConversation(panelLead.id, {
+                              auditionOutcome: '',
+                              pipeline: panelLead.stage === 'Joining Later' ? fallbackStage : panelLead.stage,
+                            });
+                          } else {
+                            const d = new Date();
+                            d.setDate(d.getDate() + 14);
+                            const y = d.getFullYear();
+                            const m = String(d.getMonth() + 1).padStart(2, '0');
+                            const day = String(d.getDate()).padStart(2, '0');
+                            const defaultDate = `${y}-${m}-${day}`;
+
+                            const updates: Record<string, any> = {
+                              pipeline: 'Joining Later',
+                              auditionOutcome: 'joining-later',
+                              followUpCompleted: false,
+                            };
+                            if (!followUpDate) {
+                              updates.followUpDate = defaultDate;
+                              setFollowUpDate(defaultDate);
+                            }
+                            if (!followUpNote || !followUpNote.trim()) {
+                              updates.followUpNote = 'Joining Later - Follow up';
+                              setFollowUpNote('Joining Later - Follow up');
+                            }
+                            setStageOverrides((prev) => ({ ...prev, [panelLead.id]: 'Joining Later' }));
+                            await patchConversation(panelLead.id, updates);
+                          }
+                        }}
+                        className="w-3.5 h-3.5 rounded cursor-pointer accent-[#0066FF]"
+                      />
+                      <span
+                        className="text-[12px] font-medium whitespace-nowrap"
+                        style={{
+                          color: (panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later') ? 'var(--text-primary)' : 'var(--text-secondary)',
+                        }}
+                      >
+                        Joining later
+                      </span>
+                    </label>
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="date"
+                      value={followUpDate}
+                      onChange={(e) => setFollowUpDate(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          handleSaveFollowUp();
+                        }
+                      }}
+                      className="flex-1 rounded-[6px] px-3 py-1.5 text-[13px] outline-none cursor-pointer"
+                      style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
+                    />
+                    <button
+                      type="button"
+                      disabled={isReadOnly}
+                      onClick={handleSaveFollowUp}
+                      className="bg-[#0066FF] text-white font-semibold text-[13px] px-4 rounded-[6px] shadow-sm hover:bg-[#0055d4] transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      {followUpSaved ? "Saved ✓" : "Add"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mb-6">
+                  <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Form Answers</h3>
+                  <div className="mb-1">
+                    <p className="text-[11px] mb-0.5" style={{ color: 'var(--text-secondary)' }}>full name</p>
+                    <p className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{panelConv?.profileName || panelLead.name}</p>
+                  </div>
+                  {panelConv?.formAnswers?.instrument && (
+                    <div className="mb-1">
+                      <p className="text-[11px] mb-0.5" style={{ color: 'var(--text-secondary)' }}>instrument</p>
+                      <p className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{panelConv.formAnswers.instrument}</p>
+                    </div>
+                  )}
+                  {panelConv?.formAnswers?.studentAge && (
+                    <div>
+                      <p className="text-[11px] mb-0.5" style={{ color: 'var(--text-secondary)' }}>student age</p>
+                      <p className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{panelConv.formAnswers.studentAge}</p>
+                    </div>
                   )}
                 </div>
-                <Link
-                  href="/follow-ups"
-                  className="text-[11px] font-semibold text-[#0066FF] hover:underline flex items-center gap-0.5"
-                >
-                  Follow-ups →
-                </Link>
-              </div>
-
-              <div className="flex items-center gap-2 mb-2">
-                <input
-                  type="text"
-                  placeholder={(panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later') ? "e.g. Joining in summer" : "e.g. Call back about Sunday"}
-                  value={followUpNote}
-                  onChange={(e) => setFollowUpNote(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      handleSaveFollowUp();
-                    }
-                  }}
-                  className="flex-1 min-w-0 rounded-[6px] text-[13px] py-1.5 px-3 outline-none placeholder-gray-400"
-                  style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
-                />
-                <label
-                  className="flex items-center gap-1.5 shrink-0 cursor-pointer select-none py-1.5 px-2.5 rounded-[6px] border transition-colors h-[32px]"
-                  style={{
-                    background: (panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later') ? 'var(--bg-pill)' : 'var(--bg-input)',
-                    borderColor: 'var(--border-input)',
-                  }}
-                  title="Mark as joining later"
-                >
-                  <input
-                    type="checkbox"
-                    checked={panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later'}
-                    disabled={isReadOnly}
-                    onChange={async () => {
-                      if (isReadOnly || !panelLead) return;
-                      const isJL = panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later';
-                      if (isJL) {
-                        const fallbackStage: Stage = panelConv?.auditionDate ? 'Audition Booked' : 'Contacted';
-                        if (panelLead.stage === 'Joining Later') {
-                          setStageOverrides((prev) => ({ ...prev, [panelLead.id]: fallbackStage }));
-                        }
-                        await patchConversation(panelLead.id, {
-                          auditionOutcome: '',
-                          pipeline: panelLead.stage === 'Joining Later' ? fallbackStage : panelLead.stage,
-                        });
-                      } else {
-                        const d = new Date();
-                        d.setDate(d.getDate() + 14);
-                        const y = d.getFullYear();
-                        const m = String(d.getMonth() + 1).padStart(2, '0');
-                        const day = String(d.getDate()).padStart(2, '0');
-                        const defaultDate = `${y}-${m}-${day}`;
-
-                        const updates: Record<string, any> = {
-                          pipeline: 'Joining Later',
-                          auditionOutcome: 'joining-later',
-                          followUpCompleted: false,
-                        };
-                        if (!followUpDate) {
-                          updates.followUpDate = defaultDate;
-                          setFollowUpDate(defaultDate);
-                        }
-                        if (!followUpNote || !followUpNote.trim()) {
-                          updates.followUpNote = 'Joining Later - Follow up';
-                          setFollowUpNote('Joining Later - Follow up');
-                        }
-                        setStageOverrides((prev) => ({ ...prev, [panelLead.id]: 'Joining Later' }));
-                        await patchConversation(panelLead.id, updates);
-                      }
-                    }}
-                    className="w-3.5 h-3.5 rounded cursor-pointer accent-[#0066FF]"
-                  />
-                  <span
-                    className="text-[12px] font-medium whitespace-nowrap"
-                    style={{
-                      color: (panelLead.stage === 'Joining Later' || panelConv?.auditionOutcome === 'joining-later') ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    }}
-                  >
-                    Joining later
-                  </span>
-                </label>
-              </div>
-              <div className="flex gap-2">
-                <input
-                  type="date"
-                  value={followUpDate}
-                  onChange={(e) => setFollowUpDate(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      handleSaveFollowUp();
-                    }
-                  }}
-                  className="flex-1 rounded-[6px] px-3 py-1.5 text-[13px] outline-none cursor-pointer"
-                  style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
-                />
-                <button
-                  type="button"
-                  disabled={isReadOnly}
-                  onClick={handleSaveFollowUp}
-                  className="bg-[#0066FF] text-white font-semibold text-[13px] px-4 rounded-[6px] shadow-sm hover:bg-[#0055d4] transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  {followUpSaved ? "Saved ✓" : "Add"}
-                </button>
               </div>
             </div>
-
-            <div className="mb-6">
-              <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Form Answers</h3>
-              <div className="mb-1">
-                <p className="text-[11px] mb-0.5" style={{ color: 'var(--text-secondary)' }}>full name</p>
-                <p className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{panelConv?.profileName || panelLead.name}</p>
-              </div>
-              {panelConv?.formAnswers?.instrument && (
-                <div className="mb-1">
-                  <p className="text-[11px] mb-0.5" style={{ color: 'var(--text-secondary)' }}>instrument</p>
-                  <p className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{panelConv.formAnswers.instrument}</p>
-                </div>
-              )}
-              {panelConv?.formAnswers?.studentAge && (
-                <div>
-                  <p className="text-[11px] mb-0.5" style={{ color: 'var(--text-secondary)' }}>student age</p>
-                  <p className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{panelConv.formAnswers.studentAge}</p>
-                </div>
-              )}
-            </div>
-          </div>
-        </>
+          )}
+        </div>
       )}
-    </div>
-  )}
 
       {/* Book Audition Modal */}
       {showAuditionModal && panelLead && (
