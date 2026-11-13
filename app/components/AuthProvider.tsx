@@ -2,93 +2,37 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import {
+  type CanonicalRole,
+  type Role,
+  type RoleOption,
+  ROLE_OPTIONS,
+  normalizeRole,
+  getRoleDisplayName,
+  isReadOnlyRole,
+  canManageTeamRole,
+  isDirectorOrChairmanRole,
+  isAdmissionRole,
+  isAssignableRole,
+  canAccessRoute,
+  getDefaultRouteForRole,
+} from "../utils/roles";
 
-export type Role =
-  | "chairman"
-  | "enrollment_director"
-  | "admission_officer"
-  | "finance"
-  | "marketing"
-  | "owner"
-  | "manager"
-  | "agent"
-  | "analyst";
-
-export function normalizeRole(role?: string): "chairman" | "enrollment_director" | "admission_officer" | "finance" | "marketing" {
-  if (!role) return "admission_officer";
-  const r = role.toLowerCase().trim();
-  if (r === "chairman" || r === "owner" || r === "manager") return "chairman";
-  if (r === "enrollment_director") return "enrollment_director";
-  if (r === "admission_officer" || r === "agent") return "admission_officer";
-  if (r === "finance" || r === "analyst") return "finance";
-  if (r === "marketing") return "marketing";
-  return "admission_officer";
-}
-
-export function getRoleDisplayName(role?: string): string {
-  const norm = normalizeRole(role);
-  switch (norm) {
-    case "chairman":
-      return "Chairman";
-    case "enrollment_director":
-      return "Enrollment Director";
-    case "admission_officer":
-      return "Admission Officer";
-    case "finance":
-      return "Finance";
-    case "marketing":
-      return "Marketing";
-    default:
-      return "Admission Officer";
-  }
-}
-
-export function isReadOnlyRole(role?: string): boolean {
-  return normalizeRole(role) === "marketing";
-}
-
-export function canManageTeamRole(role?: string): boolean {
-  return normalizeRole(role) === "chairman";
-}
-
-export function canAccessRoute(role: string | undefined, pathname: string): boolean {
-  if (pathname === "/login") return true;
-  if (pathname === "/profile") return true;
-  const norm = normalizeRole(role);
-
-  if (norm === "chairman" || norm === "marketing") {
-    return true;
-  }
-
-  if (norm === "enrollment_director") {
-    return pathname === "/auditions" || pathname === "/settings";
-  }
-
-  if (norm === "finance") {
-    return pathname === "/pipeline" || pathname === "/reports" || pathname === "/settings";
-  }
-
-  if (norm === "admission_officer") {
-    return pathname !== "/reports" && pathname !== "/team-performance";
-  }
-
-  return true;
-}
-
-export function getDefaultRouteForRole(role?: string): string {
-  const norm = normalizeRole(role);
-  switch (norm) {
-    case "enrollment_director":
-      return "/auditions";
-    case "finance":
-      return "/pipeline";
-    case "admission_officer":
-    case "chairman":
-    case "marketing":
-    default:
-      return "/";
-  }
-}
+export {
+  type CanonicalRole,
+  type Role,
+  type RoleOption,
+  ROLE_OPTIONS,
+  normalizeRole,
+  getRoleDisplayName,
+  isReadOnlyRole,
+  canManageTeamRole,
+  isDirectorOrChairmanRole,
+  isAdmissionRole,
+  isAssignableRole,
+  canAccessRoute,
+  getDefaultRouteForRole,
+};
 
 export interface AuthUser {
   id: string;

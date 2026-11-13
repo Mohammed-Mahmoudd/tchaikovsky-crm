@@ -4,6 +4,7 @@ import React, { useState, useMemo, useCallback, useEffect, useRef, useDeferredVa
 import { useSearchParams } from 'next/navigation';
 import { useCRM, Conversation, ActivityLogEntry } from '../context/CRMContext';
 import { isAutomatedTemplateMsg } from '../utils/conversationMessages';
+import { formatRoleLabel, isAdmissionRole } from '../utils/roles';
 import {
   clampRatePct,
   collectLoggedMessageKeys,
@@ -170,17 +171,6 @@ function getCampaignName(c: Conversation): string {
     return c.source.trim();
   }
   return 'Direct';
-}
-
-function formatRoleLabel(role?: string): string {
-  if (!role) return 'Admission Officer';
-  const r = role.toLowerCase().trim();
-  if (r === 'chairman' || r === 'owner' || r === 'manager') return 'Chairman';
-  if (r === 'enrollment_director') return 'Enrollment Director';
-  if (r === 'admission_officer' || r === 'agent') return 'Admission Officer';
-  if (r === 'finance' || r === 'analyst') return 'Finance';
-  if (r === 'marketing') return 'Marketing';
-  return role.replace(/_/g, ' ');
 }
 
 function formatOutcomeLabel(outcome?: string): string {
@@ -1685,7 +1675,7 @@ function TeamActivitiesPageInner() {
     return staffList.filter((st) => {
       if (agentRoleFilter !== 'all') {
         const r = st.role.toLowerCase();
-        if (agentRoleFilter === 'admission' && !['admission_officer', 'agent'].includes(r)) return false;
+        if (agentRoleFilter === 'admission' && !isAdmissionRole(st.role)) return false;
         if (agentRoleFilter === 'director' && r !== 'enrollment_director') return false;
         if (agentRoleFilter === 'finance' && r !== 'finance') return false;
         if (agentRoleFilter === 'chairman' && !['chairman', 'owner', 'manager'].includes(r)) return false;

@@ -2,7 +2,7 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { useAuth } from "../components/AuthProvider";
+import { useAuth, isAssignableRole } from "../components/AuthProvider";
 import { formatMetaErrorMessage } from "../utils/errorParser";
 import {
   computeUnreadFromMessages,
@@ -658,9 +658,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const allMembers = Array.from(mergedMap.values());
         setTeamMembers(allMembers);
 
-        const allowedRoles = ["chairman", "owner", "manager", "enrollment_director", "admission_officer", "agent"];
         const filtered = allMembers.filter((a: AssignableAgent) =>
-          allowedRoles.includes((a.role || "").toLowerCase().trim())
+          isAssignableRole(a.role)
         );
         setAssignableAgents(filtered);
       }

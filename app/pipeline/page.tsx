@@ -4,7 +4,7 @@ import React, { useState, useMemo, useEffect, useRef, useCallback } from "react"
 import Link from "next/link";
 import { MessageSquare, Trash2, AlertTriangle, Calendar, CheckCircle2, Clock, X, ChevronLeft, ChevronRight } from "lucide-react";
 import { useCRM } from "../context/CRMContext";
-import { useAuth } from "../components/AuthProvider";
+import { useAuth, isDirectorOrChairmanRole, isAdmissionRole } from "../components/AuthProvider";
 import { formatLastMessageTime } from "../utils/time";
 import { useBranches } from "../lib/branches";
 import { BranchSelect } from "../components/BranchSelect";
@@ -469,8 +469,8 @@ const Column = React.memo(function Column({
 export default function PipelinePage() {
   const { conversations, patchConversation, openChat, setPollPaused, assignableAgents } = useCRM();
   const { isReadOnly, user } = useAuth();
-  const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager" || user?.role === "enrollment_director";
-  const isAdmission = user?.role === "admission_officer" || user?.role === "agent";
+  const isChairman = isDirectorOrChairmanRole(user?.role);
+  const isAdmission = isAdmissionRole(user?.role);
   const userClean = (user?.name || "").trim().toLowerCase();
 
   const [view, setView] = useState<"pipeline" | "table">("pipeline");

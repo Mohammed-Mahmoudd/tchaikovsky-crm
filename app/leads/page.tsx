@@ -9,7 +9,7 @@ import {
   CreateManualLeadInput,
   CreateManualLeadResult,
 } from "../context/CRMContext";
-import { useAuth } from "../components/AuthProvider";
+import { useAuth, isDirectorOrChairmanRole, isAdmissionRole } from "../components/AuthProvider";
 import { useBranches } from "../lib/branches";
 import { BranchSelect } from "../components/BranchSelect";
 import { matchLeadSearch } from "../utils/search";
@@ -948,10 +948,8 @@ export default function LeadsPage() {
   } = useCRM();
   const { isReadOnly, user } = useAuth();
 
-  const isChairman =
-    user?.role === "chairman" || user?.role === "owner" || user?.role === "manager" || user?.role === "enrollment_director";
-  const isAdmission =
-    user?.role === "admission_officer" || user?.role === "agent";
+  const isChairman = isDirectorOrChairmanRole(user?.role);
+  const isAdmission = isAdmissionRole(user?.role);
   const userClean = (user?.name || "").trim().toLowerCase();
 
   const [filterStage, setFilterStage] = useState("All");

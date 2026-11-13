@@ -4,7 +4,7 @@ import React from "react";
 import Link from "next/link";
 import { ExternalLink, CheckCircle2, Calendar, Trash2, X, MessageSquare } from "lucide-react";
 import { useCRM, Conversation } from "../context/CRMContext";
-import { useAuth } from "./AuthProvider";
+import { useAuth, canAccessRoute, isDirectorOrChairmanRole, isAdmissionRole } from "./AuthProvider";
 
 const PIPELINE_STAGES = [
   "New",
@@ -56,18 +56,9 @@ export function ConversationDetailsSidebar({
   const agentClean = (conversation?.agent || "").trim().toLowerCase();
   const isAssigned = !!agentClean && agentClean !== "unassigned";
   const isAssignedToMe = isAssigned && !!userClean && userClean === agentClean;
-  const isChairman =
-    user?.role === "chairman" ||
-    user?.role === "owner" ||
-    user?.role === "manager" ||
-    user?.role === "enrollment_director";
-  const isAdmission = user?.role === "admission_officer" || user?.role === "agent";
-  const canViewTeamActivity =
-    user?.role === "chairman" ||
-    user?.role === "owner" ||
-    user?.role === "manager" ||
-    user?.role === "admission_officer" ||
-    user?.role === "enrollment_director";
+  const isChairman = isDirectorOrChairmanRole(user?.role);
+  const isAdmission = isAdmissionRole(user?.role);
+  const canViewTeamActivity = isChairman || canAccessRoute(user?.role, "/team-performance");
 
   const isJoiningLater =
     conversation.pipeline === "Joining Later" ||

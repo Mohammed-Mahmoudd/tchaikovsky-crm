@@ -82,7 +82,7 @@ type Conversation = {
 // Removed dummy data
 
 import { useCRM, isLastMessageFromLead } from "./context/CRMContext";
-import { useAuth, canAccessRoute } from "./components/AuthProvider";
+import { useAuth, canAccessRoute, isDirectorOrChairmanRole, isAdmissionRole } from "./components/AuthProvider";
 import { formatLastMessageTime } from "./utils/time";
 import MessageTemplate, { parseTemplateAttachment } from "./components/MessageTemplate";
 import InstagramMedia from "./components/InstagramMedia";
@@ -430,8 +430,8 @@ export default function InboxPage() {
   const agentClean = (activeConv?.agent || "").trim().toLowerCase();
   const isAssigned = !!agentClean && agentClean !== "unassigned";
   const isAssignedToMe = isAssigned && !!userClean && userClean === agentClean;
-  const isChairman = user?.role === "chairman" || user?.role === "owner" || user?.role === "manager" || user?.role === "enrollment_director";
-  const isAdmission = user?.role === "admission_officer" || user?.role === "agent";
+  const isChairman = isDirectorOrChairmanRole(user?.role);
+  const isAdmission = isAdmissionRole(user?.role);
   const isAssignedToOther = isAssigned && !isAssignedToMe;
   const canSendMessages = !isReadOnly;
   const canAssignToSelf = !isReadOnly && (isAdmission || isChairman) && (!isAssigned || isAssignedToMe);

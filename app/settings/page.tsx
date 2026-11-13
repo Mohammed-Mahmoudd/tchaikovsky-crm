@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { useAuth, Role, getRoleDisplayName, normalizeRole, canManageTeamRole } from "../components/AuthProvider";
+import { useAuth, Role, ROLE_OPTIONS, getRoleDisplayName, normalizeRole, canManageTeamRole } from "../components/AuthProvider";
 import { useCRM } from "../context/CRMContext";
 import { useBranches } from "../lib/branches";
 import { ChevronDown, Check, Trash2, Search, X, AlertTriangle } from "lucide-react";
@@ -1010,27 +1010,23 @@ export default function SettingsPage() {
                 </div>
 
                 {/* Actions */}
-                <div className="flex items-center gap-1.5 shrink-0">
+                <div className="flex items-center gap-1.5 flex-wrap sm:flex-nowrap shrink-0">
 
                   {/* Quick role select */}
                   <select
                     disabled={!canEditThisMember}
                     value={normMemberRole}
                     onChange={(e) => handleUpdateMember(member.id, { role: e.target.value as Role })}
-                    className="h-[26px] text-[11px] rounded-[6px] px-2 outline-none shrink-0 w-[130px] transition-colors"
+                    className="h-[26px] text-[11px] rounded-[6px] px-2 outline-none shrink-0 w-[155px] transition-colors"
                     style={{
                       background: "var(--bg-input)",
                       border: "1px solid var(--border-input)",
                       color: "var(--text-primary)",
                     }}
                   >
-                    <option value="admission_officer">Admission Officer</option>
-                    <option value="enrollment_director">Enrollment Director</option>
-                    <option value="finance">Finance</option>
-                    <option value="marketing">Marketing</option>
-                    {userIsChairman && (
-                      <option value="chairman">Chairman</option>
-                    )}
+                    {ROLE_OPTIONS.filter((opt) => !opt.chairmanOnly || userIsChairman).map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
                   </select>
 
                   {/* Primary: Activate / Deactivate */}
@@ -1224,23 +1220,19 @@ export default function SettingsPage() {
                   ? "They will receive an invitation email to set up their account."
                   : "Account will be created immediately with this password."}
               </p>
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-2 shrink-0 flex-wrap">
                 <select
                   disabled={isSeatLimitReached}
                   value={newRole}
                   onChange={(e) => setNewRole(e.target.value as Role)}
-                  className={`h-[28px] text-[11px] rounded-[6px] px-2 outline-none w-[140px] ${
+                  className={`h-[28px] text-[11px] rounded-[6px] px-2 outline-none flex-1 sm:flex-none sm:w-[155px] ${
                     isSeatLimitReached ? "opacity-60 cursor-not-allowed" : ""
                   }`}
                   style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)", color: "var(--text-primary)" }}
                 >
-                  <option value="admission_officer">Admission Officer</option>
-                  <option value="enrollment_director">Enrollment Director</option>
-                  <option value="finance">Finance</option>
-                  <option value="marketing">Marketing</option>
-                  {normalizeRole(user?.role) === "chairman" && (
-                    <option value="chairman">Chairman</option>
-                  )}
+                  {ROLE_OPTIONS.filter((opt) => !opt.chairmanOnly || isChairman).map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
                 </select>
                 <button
                   type="submit"
@@ -1302,6 +1294,9 @@ export default function SettingsPage() {
             </li>
             <li>
               <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Admission Officer</span> — agent features: live chat inbox, pipeline management, leads, bookings, and follow-ups.
+            </li>
+            <li>
+              <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Admission (Advanced)</span> — admission officer access plus Reports and Team Activities.
             </li>
             <li>
               <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Enrollment Director</span> — access to auditions only: schedule auditions, manage applicants, and track attendance.
@@ -1832,13 +1827,9 @@ export default function SettingsPage() {
                     color: "var(--text-primary)",
                   }}
                 >
-                  <option value="admission_officer">Admission Officer</option>
-                  <option value="enrollment_director">Enrollment Director</option>
-                  <option value="finance">Finance</option>
-                  <option value="marketing">Marketing</option>
-                  {normalizeRole(user?.role) === "chairman" && (
-                    <option value="chairman">Chairman</option>
-                  )}
+                  {ROLE_OPTIONS.filter((opt) => !opt.chairmanOnly || isChairman).map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
                 </select>
               </div>
 

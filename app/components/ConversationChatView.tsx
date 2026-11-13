@@ -20,7 +20,7 @@ import {
   SmilePlus,
 } from "lucide-react";
 import { useCRM, Message, Conversation } from "../context/CRMContext";
-import { useAuth } from "./AuthProvider";
+import { useAuth, isDirectorOrChairmanRole, isAdmissionRole } from "./AuthProvider";
 import { ChatInputBar, OutgoingAttachmentPayload, formatFileSize } from "./ChatInputBar";
 import { renderWhatsAppText } from "../utils/messageFormatting";
 import { EmojiPicker, WHATSAPP_QUICK_REACTIONS, recordRecentEmoji } from "./EmojiPicker";
@@ -185,12 +185,8 @@ export const ConversationChatView = React.memo(function ConversationChatView({
   const agentClean = (activeConv?.agent || "").trim().toLowerCase();
   const isAssigned = !!agentClean && agentClean !== "unassigned";
   const isAssignedToMe = isAssigned && !!userClean && userClean === agentClean;
-  const isChairman =
-    user?.role === "chairman" ||
-    user?.role === "owner" ||
-    user?.role === "manager" ||
-    user?.role === "enrollment_director";
-  const isAdmission = user?.role === "admission_officer" || user?.role === "agent";
+  const isChairman = isDirectorOrChairmanRole(user?.role);
+  const isAdmission = isAdmissionRole(user?.role);
   const isAssignedToOther = isAssigned && !isAssignedToMe;
   const canSendMessages = !isReadOnly;
 

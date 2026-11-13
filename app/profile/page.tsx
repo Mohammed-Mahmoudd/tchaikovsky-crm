@@ -143,6 +143,13 @@ function getRoleBadgeStyle(role?: string) {
         border: "rgba(0,102,255,0.25)",
         icon: Target,
       };
+    case "admission_advanced":
+      return {
+        bg: "rgba(0,102,255,0.12)",
+        text: "#0066FF",
+        border: "rgba(0,102,255,0.25)",
+        icon: Award,
+      };
     case "finance":
       return {
         bg: "rgba(52,199,89,0.12)",
