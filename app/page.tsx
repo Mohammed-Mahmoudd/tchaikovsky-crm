@@ -81,7 +81,7 @@ type Conversation = {
 
 // Removed dummy data
 
-import { useCRM } from "./context/CRMContext";
+import { useCRM, isLastMessageFromLead } from "./context/CRMContext";
 import { useAuth, canAccessRoute } from "./components/AuthProvider";
 import { formatLastMessageTime } from "./utils/time";
 import MessageTemplate, { parseTemplateAttachment } from "./components/MessageTemplate";
@@ -1207,6 +1207,7 @@ export default function InboxPage() {
             filteredConversations.map((conv) => {
               const isActive = conv.id === activeChatId;
               const timeStr = formatLastMessageTime(conv.lastMessageAt);
+              const showLeadTimer = Boolean(timeStr) && isLastMessageFromLead(conv);
               return (
                 <div
                   key={conv.id}
@@ -1240,13 +1241,20 @@ export default function InboxPage() {
                     <div className="flex items-center gap-1.5 mt-auto">
                       {timeStr && (
                         <span
-                          className="text-[10px] font-medium"
+                          className="inline-flex items-center gap-1 text-[10px] font-medium whitespace-nowrap"
                           style={{
                             color: isActive ? "#0066FF" : "var(--text-muted)",
                             opacity: isActive ? 0.9 : 0.85,
                           }}
+                          title={showLeadTimer ? "Waiting for reply — last message from lead" : undefined}
                         >
-                          {timeStr}
+                          {showLeadTimer && (
+                            <Clock className="w-3 h-3 shrink-0" aria-hidden="true" />
+                          )}
+                          <span>{timeStr}</span>
+                          {showLeadTimer && (
+                            <span className="sr-only"> (last message from lead)</span>
+                          )}
                         </span>
                       )}
                       {Boolean(conv.unreadCount && conv.unreadCount > 0) && (

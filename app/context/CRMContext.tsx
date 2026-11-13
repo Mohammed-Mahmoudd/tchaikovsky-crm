@@ -4,6 +4,13 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { useRouter } from "next/navigation";
 import { useAuth } from "../components/AuthProvider";
 import { formatMetaErrorMessage } from "../utils/errorParser";
+import {
+  computeUnreadFromMessages,
+  getLastRealMessageDirection,
+  isLastMessageFromLead,
+} from "../utils/conversationMessages";
+
+export { computeUnreadFromMessages, getLastRealMessageDirection, isLastMessageFromLead };
 
 export type Channel = "WA" | "IG" | "FB";
 
@@ -460,13 +467,18 @@ if (typeof window !== "undefined") {
   window.addEventListener("pagehide", flushCacheSnapshotSync);
 }
 
+const UTC_ISO_DATETIME_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|1\d|2[0-8])T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d{1,3})?Z$/;
+
 function safeDateIso(val: any): string {
   if (!val) return "";
-  if (typeof val === "string" && /^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
+  if (typeof val === "string") {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
+    if (UTC_ISO_DATETIME_RE.test(val)) return val.slice(0, 10);
+  }
   try {
     const d = new Date(val);
     if (isNaN(d.getTime())) return "";
-    return d.toISOString().split("T")[0];
+    return d.toISOString().slice(0, 10);
   } catch {
     return "";
   }
@@ -493,53 +505,6 @@ function isReviewerAllowedConversation(c: any): boolean {
   const norm = (s: any) => (typeof s === "string" ? s.toLowerCase().trim() : "");
   const fields = [norm(c.name), norm(c.leadName), norm(c.profileName)];
   return REVIEWER_ALLOWED_NAMES.some((target) => fields.some((f) => f.includes(target)));
-}
-
-function isAutomatedTemplateMsg(m: Message): boolean {
-  if (m.senderName && m.senderName !== "Staff") return false;
-  const t = (m.text || "").trim();
-  if (
-    t === "Template" ||
-    t === "[Form / Template]" ||
-    t === "Form / Template" ||
-    /^Thanks,\s*you['’]re all set/i.test(t) ||
-    /Thank you for connecting with us/i.test(t) ||
-    /شكرًا، لقد أكملت/i.test(t)
-  ) {
-    return true;
-  }
-  if (Array.isArray(m.attachments) && m.attachments.length > 0) {
-    const first = m.attachments[0];
-    if (first && first.type === "template") {
-      const elements =
-        first.payload?.generic?.elements ||
-        first.payload?.button?.elements ||
-        first.payload?.elements ||
-        first.elements ||
-        [];
-      if (elements.length === 0) return true;
-      const firstTitle = elements[0]?.title || "";
-      if (/Thanks,\s*you['’]re all set|Thank you for connecting with us/i.test(firstTitle)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-export function computeUnreadFromMessages(messages?: Message[]): number {
-  if (!Array.isArray(messages) || messages.length === 0) return 0;
-  let count = 0;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (!m) continue;
-    if (isAutomatedTemplateMsg(m)) continue;
-    if (!m.isIncoming) {
-      break;
-    }
-    count++;
-  }
-  return count;
 }
 
 export function CRMProvider({ children }: { children: React.ReactNode }) {
@@ -821,23 +786,45 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const topLog = Array.isArray(c.activityLog) ? c.activityLog : [];
         const srcLog = typeof c.source === "object" && Array.isArray(c.source?.activityLog) ? c.source.activityLog : [];
         if (topLog.length === 0 && srcLog.length === 0) return [];
-        const byId = new Map<string, ActivityLogEntry>();
-        [...srcLog, ...topLog].forEach((entry: any) => {
-          if (entry && entry.id && entry.type) {
-            byId.set(String(entry.id), {
-              id: String(entry.id),
-              type: entry.type,
-              actor: String(entry.actor || "Staff"),
-              actorRole: entry.actorRole ? String(entry.actorRole) : undefined,
-              summary: String(entry.summary || ""),
-              detail: entry.detail ? String(entry.detail) : undefined,
-              fromValue: entry.fromValue ? String(entry.fromValue) : undefined,
-              toValue: entry.toValue ? String(entry.toValue) : undefined,
-              timestamp: Number(entry.timestamp) || Date.now(),
-            });
-          }
+        const normalizeEntry = (entry: any): ActivityLogEntry => ({
+          id: String(entry.id),
+          type: entry.type,
+          actor: String(entry.actor || "Staff"),
+          actorRole: entry.actorRole ? String(entry.actorRole) : undefined,
+          summary: String(entry.summary || ""),
+          detail: entry.detail ? String(entry.detail) : undefined,
+          fromValue: entry.fromValue ? String(entry.fromValue) : undefined,
+          toValue: entry.toValue ? String(entry.toValue) : undefined,
+          timestamp: Number(entry.timestamp) || Date.now(),
         });
-        return Array.from(byId.values()).sort((a, b) => b.timestamp - a.timestamp);
+        if (srcLog.length === 0 && topLog.length === 1) {
+          const single = topLog[0];
+          return single && single.id && single.type ? [normalizeEntry(single)] : [];
+        }
+        const out: ActivityLogEntry[] = [];
+        const indexById = new Map<string, number>();
+        let isDescending = true;
+        let prevTs = Infinity;
+        const appendList = (list: any[]) => {
+          for (let i = 0; i < list.length; i++) {
+            const entry = list[i];
+            if (!entry || !entry.id || !entry.type) continue;
+            const norm = normalizeEntry(entry);
+            const existingIdx = indexById.get(norm.id);
+            if (existingIdx !== undefined) {
+              out[existingIdx] = norm;
+              isDescending = false;
+            } else {
+              if (norm.timestamp > prevTs) isDescending = false;
+              prevTs = norm.timestamp;
+              indexById.set(norm.id, out.length);
+              out.push(norm);
+            }
+          }
+        };
+        if (srcLog.length > 0) appendList(srcLog);
+        if (topLog.length > 0) appendList(topLog);
+        return isDescending ? out : out.sort((a, b) => b.timestamp - a.timestamp);
       })(),
       branch: c.branch || "",
       formAnswers: c.formAnswers || {},
@@ -1191,8 +1178,16 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         // Update the messages cache
         messagesCacheRef.current.set(chatId, newMessages);
         const computedUnread = computeUnreadFromMessages(newMessages);
+        const computedDirection = getLastRealMessageDirection(newMessages);
+        const lastMsgTs =
+          newMessages.length > 0 ? newMessages[newMessages.length - 1]?.timestamp || 0 : 0;
         const pending = pendingPatchesRef.current.get(chatId);
         const hasActivePending = Boolean(pending && Date.now() <= pending.expiresAt);
+        const keepPendingDirection = Boolean(
+          hasActivePending &&
+            pending?.updates.lastMessageDirection &&
+            (pending?.updates.lastMessageAt || 0) >= lastMsgTs
+        );
         const normActive = normalizeConversationMeta(json.data);
 
         // Merge into conversations state (touch active conversation's messages and metadata)
@@ -1204,6 +1199,17 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   messages: newMessages,
                   unreadCount: computedUnread,
                   lastMessageAt: Math.max(c.lastMessageAt || 0, normActive.lastMessageAt || 0),
+                  lastMessageDirection: keepPendingDirection
+                    ? pending?.updates.lastMessageDirection
+                    : computedDirection ?? normActive.lastMessageDirection ?? c.lastMessageDirection,
+                  lastOutgoingAt:
+                    hasActivePending && pending?.updates.lastOutgoingAt
+                      ? Math.max(
+                          pending.updates.lastOutgoingAt,
+                          normActive.lastOutgoingAt || 0,
+                          c.lastOutgoingAt || 0
+                        )
+                      : normActive.lastOutgoingAt ?? c.lastOutgoingAt,
                   pipeline: (hasActivePending && pending?.updates.pipeline) || normActive.pipeline || c.pipeline,
                   auditionOutcome:
                     hasActivePending && pending?.updates.auditionOutcome !== undefined
@@ -1452,7 +1458,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                       message?.timestamp || Date.now()
                     ),
                     lastMessageText: msgPreview || existing.lastMessageText,
-                    lastMessageDirection: isOutgoing ? "outgoing" : "incoming",
+                    lastMessageDirection:
+                      (updatedMessagesForConv
+                        ? getLastRealMessageDirection(updatedMessagesForConv)
+                        : undefined) ||
+                      normRemote?.lastMessageDirection ||
+                      (isOutgoing ? "outgoing" : "incoming"),
                     lastOutgoingAt: isOutgoing
                       ? Math.max(
                           existing.lastOutgoingAt || 0,
@@ -1476,7 +1487,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     {
                       ...normRemote,
                       lastMessageText: msgPreview || normRemote.lastMessageText,
-                      lastMessageDirection: (isOutgoing ? "outgoing" : "incoming") as "incoming" | "outgoing",
+                      lastMessageDirection:
+                        (updatedMessagesForConv
+                          ? getLastRealMessageDirection(updatedMessagesForConv)
+                          : undefined) ||
+                        normRemote.lastMessageDirection ||
+                        ((isOutgoing ? "outgoing" : "incoming") as "incoming" | "outgoing"),
                       messages: updatedMessagesForConv || [],
                     },
                     ...prev,

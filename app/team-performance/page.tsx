@@ -1,11 +1,9 @@
 "use client";
 
-import React, { useState, useMemo, useCallback, useEffect, Suspense } from 'react';
+import React, { useState, useMemo, useCallback, useEffect, useRef, useDeferredValue, memo, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useCRM, Conversation, ActivityLogEntry } from '../context/CRMContext';
 import {
-  ChevronLeft,
-  ChevronRight,
   Calendar,
   MessageSquare,
   Search,
@@ -13,20 +11,38 @@ import {
   Clock,
   ArrowRight,
   UserCheck,
-  FileText,
   Banknote,
   Award,
   Users,
   X,
   List,
   GitCommit,
-  ExternalLink,
   Mail,
   Activity,
   TrendingUp,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
 
 /* ── Date Helpers (Saudi / Cairo week: Sat–Fri) ── */
+
+const SHORT_DATE_FORMATTER = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' });
+const FULL_DAY_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  weekday: 'short',
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+});
+const TIME_12_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: true,
+});
+const COMPACT_TIME_12_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  hour: 'numeric',
+  minute: '2-digit',
+  hour12: true,
+});
 
 function addDays(date: Date, days: number): Date {
   const d = new Date(date);
@@ -41,42 +57,52 @@ function isoDate(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+function isoDateFromMs(timestamp: number): string {
+  return isoDate(new Date(timestamp));
+}
+
+function parseIsoInputDate(val: string, fallback: Date): Date {
+  if (!val) return getDayStart(fallback);
+  const parts = val.split('-').map(Number);
+  if (parts.length !== 3 || parts.some((n) => isNaN(n))) return getDayStart(fallback);
+  const [y, m, d] = parts;
+  const parsed = new Date(y, m - 1, d);
+  if (isNaN(parsed.getTime())) return getDayStart(fallback);
+  parsed.setHours(0, 0, 0, 0);
+  return parsed;
+}
+
 function formatRangeLabel(start: Date, end: Date): string {
-  const opts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
   const yr = start.getFullYear() !== end.getFullYear() ? `, ${start.getFullYear()}` : '';
   const endYr = `, ${end.getFullYear()}`;
-  return `${start.toLocaleDateString('en-US', opts)}${yr} – ${end.toLocaleDateString('en-US', opts)}${endYr}`;
+  return `${SHORT_DATE_FORMATTER.format(start)}${yr} – ${SHORT_DATE_FORMATTER.format(end)}${endYr}`;
 }
 
 function formatDayLabel(d: Date): string {
-  return d.toLocaleDateString('en-US', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  });
+  return FULL_DAY_FORMATTER.format(d);
 }
 
 function formatTime24Or12(timestamp: number): string {
-  if (!timestamp) return '—';
-  const d = new Date(timestamp);
-  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+  if (!timestamp || isNaN(timestamp)) return '—';
+  return TIME_12_FORMATTER.format(timestamp);
 }
 
-function formatCompactRelativeTime(timestamp?: number): string {
-  if (!timestamp) return '—';
-  const now = new Date();
-  const d = new Date(timestamp);
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+function formatCompactRelativeTime(timestamp?: number, todayStartOverride?: number): string {
+  if (!timestamp || isNaN(timestamp)) return '—';
+  let todayStart = todayStartOverride;
+  if (todayStart === undefined) {
+    const now = new Date();
+    todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  }
   const yesterdayStart = todayStart - 86400000;
 
   if (timestamp >= todayStart) {
-    return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    return COMPACT_TIME_12_FORMATTER.format(timestamp);
   }
   if (timestamp >= yesterdayStart) {
     return 'Yesterday';
   }
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return SHORT_DATE_FORMATTER.format(timestamp);
 }
 
 function formatDayGroupHeader(dateKey: string, todayKey: string, yesterdayKey: string): string {
@@ -84,13 +110,7 @@ function formatDayGroupHeader(dateKey: string, todayKey: string, yesterdayKey: s
   if (dateKey === yesterdayKey) return 'Yesterday';
   const [y, m, d] = dateKey.split('-').map(Number);
   if (!y || !m || !d) return dateKey;
-  const dt = new Date(y, m - 1, d);
-  return dt.toLocaleDateString('en-US', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  });
+  return FULL_DAY_FORMATTER.format(new Date(y, m - 1, d));
 }
 
 function getDayStart(from: Date): Date {
@@ -123,17 +143,24 @@ function getWeekEnd(start: Date): Date {
 
 /* ── Conversation Timestamp & Attribution Helpers ── */
 
+function parseValidTs(val?: string | number | null): number {
+  if (val === undefined || val === null || val === '') return 0;
+  if (typeof val === 'number') return isNaN(val) ? 0 : val;
+  const t = Date.parse(val);
+  return isNaN(t) ? 0 : t;
+}
+
 function getCreatedTime(c: Conversation): number {
   if (c.createdAt) {
-    const t = new Date(c.createdAt).getTime();
+    const t = Date.parse(c.createdAt);
     if (!isNaN(t)) return t;
   }
-  return c.lastMessageAt || (c.updatedAt ? new Date(c.updatedAt).getTime() : 0);
+  return c.lastMessageAt || (c.updatedAt ? parseValidTs(c.updatedAt) : 0);
 }
 
 function getUpdatedTime(c: Conversation): number {
   if (c.updatedAt) {
-    const t = new Date(c.updatedAt).getTime();
+    const t = Date.parse(c.updatedAt);
     if (!isNaN(t)) return t;
   }
   return getCreatedTime(c);
@@ -161,7 +188,7 @@ function getBookedTime(c: Conversation): number | null {
     c.auditionBookedAt ||
     (typeof c.source === 'object' && c.source?.auditionBookedAt ? c.source.auditionBookedAt : undefined);
   if (explicit) {
-    const t = new Date(explicit).getTime();
+    const t = Date.parse(explicit);
     if (!isNaN(t)) return t;
   }
   if (c.pipeline === 'Audition Booked') {
@@ -186,7 +213,7 @@ function getAttendedTime(c: Conversation): number | null {
     c.attendedAt ||
     (typeof c.source === 'object' && c.source?.attendedAt ? c.source.attendedAt : undefined);
   if (explicit) {
-    const t = new Date(explicit).getTime();
+    const t = Date.parse(explicit);
     if (!isNaN(t)) return t;
   }
   if (c.auditionDate && /^\d{4}-\d{2}-\d{2}$/.test(c.auditionDate)) {
@@ -205,7 +232,7 @@ function getConvertedTime(c: Conversation): number | null {
     c.paidAt ||
     (typeof c.source === 'object' ? c.source?.enrolledAt || c.source?.paidAt : undefined);
   if (explicit) {
-    const t = new Date(explicit).getTime();
+    const t = Date.parse(explicit);
     if (!isNaN(t)) return t;
   }
   return getUpdatedTime(c);
@@ -295,13 +322,6 @@ function getChannelColor(channel?: string): string {
     return '#0084FF';
   }
   return '#0084FF';
-}
-
-function getInitials(name: string): string {
-  if (!name) return '?';
-  const parts = name.trim().split(/\s+/);
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
 /* ── Unified Activity Model ── */
@@ -425,24 +445,995 @@ function getNaturalActionPhrase(act: EnrichedActivity): string {
   }
 }
 
+/* ── Per-Conversation WeakMap Cache (Zero Re-parse Across Polls & Staff Switches) ── */
+
+type RawConvEvent = {
+  id: string;
+  type: ActivityLogEntry['type'];
+  category: Exclude<ActivityCategory, 'all'>;
+  rawActor: string;
+  actorLower: string;
+  rawRole?: string;
+  summary: string;
+  detail: string;
+  fromValue?: string;
+  toValue?: string;
+  timestamp: number;
+  cashVal: number;
+};
+
+type ConvActorStats = {
+  actorLower: string;
+  sampleActor: string;
+  sampleRole?: string;
+  maxTimestamp: number;
+  count: number;
+  messages: number;
+  booked: number;
+  attended: number;
+  enrolled: number;
+  cash: number;
+};
+
+type ParsedConversationData = {
+  leadName: string;
+  leadNameLower: string;
+  leadPhone: string;
+  leadPhoneLower: string;
+  channel: string;
+  branch: string;
+  branchLower: string;
+  pipeline: string;
+  pipelineLower: string;
+  assignedAgent: string;
+  assignedAgentLower: string;
+  createdTs: number;
+  waitingReply: boolean;
+  bookedLead: boolean;
+  bookActor: string;
+  attendedLead: boolean;
+  attActor: string;
+  convertedLead: boolean;
+  convActor: string;
+  cashInNum: number;
+  events: RawConvEvent[];
+  actorStats: ConvActorStats[];
+  involvedActors: Set<string>;
+};
+
+const conversationParseCache = new WeakMap<Conversation, ParsedConversationData>();
+
+function getParsedConversationData(c: Conversation): ParsedConversationData {
+  const cached = conversationParseCache.get(c);
+  if (cached) return cached;
+
+  const leadName = getDisplayName(c);
+  const leadPhone = c.phone || '';
+  const channel = c.metaChannel ? `${c.channel} · ${c.metaChannel}` : (c.channel || 'WA');
+  const branch = c.branch || '';
+  const pipeline = c.pipeline || 'New';
+  const assignedAgent = (c.agent || 'Unassigned').trim();
+  const assignedAgentLower = assignedAgent.toLowerCase();
+  const createdTs = getCreatedTime(c);
+  const cashInNum = Number(c.cashIn) || 0;
+
+  const events: RawConvEvent[] = [];
+  const actorStats: ConvActorStats[] = [];
+  const involvedActors = new Set<string>();
+  const seenTypes = new Set<string>();
+
+  const findOrCreateStat = (actorLower: string, sampleActor: string, sampleRole?: string): ConvActorStats => {
+    for (let i = 0; i < actorStats.length; i++) {
+      if (actorStats[i].actorLower === actorLower) {
+        if (!actorStats[i].sampleRole && sampleRole) {
+          actorStats[i].sampleRole = sampleRole;
+        }
+        return actorStats[i];
+      }
+    }
+    const created: ConvActorStats = {
+      actorLower,
+      sampleActor,
+      sampleRole,
+      maxTimestamp: 0,
+      count: 0,
+      messages: 0,
+      booked: 0,
+      attended: 0,
+      enrolled: 0,
+      cash: 0,
+    };
+    actorStats.push(created);
+    return created;
+  };
+
+  const pushRawEvent = (
+    id: string,
+    type: ActivityLogEntry['type'],
+    rawActor: string,
+    rawRole: string | undefined,
+    summary: string,
+    detail: string,
+    timestamp: number,
+    fromValue?: string,
+    toValue?: string
+  ) => {
+    if (!timestamp || isNaN(timestamp) || timestamp <= 0) return;
+    const cleanActor = (rawActor || assignedAgent || 'Unassigned').trim();
+    if (!cleanActor || cleanActor === 'Unassigned' || cleanActor === 'Staff') return;
+
+    const actorLower = cleanActor.toLowerCase();
+    involvedActors.add(actorLower);
+
+    let cashVal = 0;
+    if (type === 'cash_recorded') {
+      const parsedCash = toValue ? Number(String(toValue).replace(/[^\d.]/g, '')) : 0;
+      cashVal = parsedCash > 0 ? parsedCash : cashInNum;
+    }
+
+    const stat = findOrCreateStat(actorLower, cleanActor, rawRole);
+    if (timestamp > stat.maxTimestamp) stat.maxTimestamp = timestamp;
+    stat.count += 1;
+    if (type === 'message_sent') stat.messages += 1;
+    if (type === 'audition_booked') stat.booked += 1;
+    if (type === 'audition_outcome' && toValue !== 'no-show') stat.attended += 1;
+    if (type === 'cash_recorded' || (type === 'audition_outcome' && toValue === 'registered')) {
+      stat.enrolled += 1;
+    }
+    if (type === 'cash_recorded') {
+      stat.cash += cashVal;
+    }
+
+    events.push({
+      id,
+      type,
+      category: mapTypeToCategory(type),
+      rawActor: cleanActor,
+      actorLower,
+      rawRole,
+      summary,
+      detail,
+      fromValue,
+      toValue,
+      timestamp,
+      cashVal,
+    });
+  };
+
+  if (Array.isArray(c.activityLog) && c.activityLog.length > 0) {
+    for (let i = 0; i < c.activityLog.length; i++) {
+      const entry = c.activityLog[i];
+      seenTypes.add(entry.type);
+      pushRawEvent(
+        `${c.id}_${entry.id}`,
+        entry.type,
+        entry.actor || assignedAgent,
+        entry.actorRole,
+        entry.summary,
+        entry.detail || '',
+        entry.timestamp,
+        entry.fromValue,
+        entry.toValue
+      );
+    }
+  }
+
+  if (!seenTypes.has('message_sent')) {
+    const channelLabel = c.channel === 'WA' ? 'WhatsApp' : c.channel === 'IG' ? 'Instagram' : 'Messenger';
+    if (Array.isArray(c.messages) && c.messages.length > 0) {
+      for (let i = 0; i < c.messages.length; i++) {
+        const m = c.messages[i];
+        if (!m.isIncoming && m.timestamp) {
+          const sender = m.senderName && m.senderName !== 'Staff' ? m.senderName : assignedAgent;
+          pushRawEvent(
+            `${c.id}_msg_${m.id}`,
+            'message_sent',
+            sender,
+            undefined,
+            `Sent ${channelLabel} reply`,
+            (m.text || '').slice(0, 160),
+            m.timestamp
+          );
+        }
+      }
+    } else if (c.lastOutgoingAt && assignedAgent !== 'Unassigned') {
+      pushRawEvent(
+        `${c.id}_lastout_${c.lastOutgoingAt}`,
+        'message_sent',
+        assignedAgent,
+        undefined,
+        `Sent ${channelLabel} reply`,
+        c.lastMessageDirection === 'outgoing' ? (c.lastMessageText || '').slice(0, 160) : '',
+        c.lastOutgoingAt
+      );
+    } else if (c.lastMessageDirection === 'outgoing' && c.lastMessageAt && assignedAgent !== 'Unassigned') {
+      pushRawEvent(
+        `${c.id}_lastdir_${c.lastMessageAt}`,
+        'message_sent',
+        assignedAgent,
+        undefined,
+        `Sent ${channelLabel} reply`,
+        (c.lastMessageText || '').slice(0, 160),
+        c.lastMessageAt
+      );
+    }
+  }
+
+  if (!seenTypes.has('lead_assigned') && assignedAgent !== 'Unassigned') {
+    pushRawEvent(
+      `${c.id}_assigned`,
+      'lead_assigned',
+      assignedAgent,
+      undefined,
+      'Claimed lead',
+      `Campaign: ${getCampaignName(c)}`,
+      createdTs,
+      'Unassigned',
+      assignedAgent
+    );
+  }
+
+  if (
+    !seenTypes.has('stage_changed') &&
+    assignedAgent !== 'Unassigned' &&
+    ['Contacted', 'Qualified', 'Joining Later', 'Unqualified', 'Lost'].includes(c.pipeline)
+  ) {
+    pushRawEvent(
+      `${c.id}_stage_${c.pipeline}`,
+      'stage_changed',
+      assignedAgent,
+      undefined,
+      `Moved stage to ${c.pipeline}`,
+      `New → ${c.pipeline}`,
+      getUpdatedTime(c),
+      'New',
+      c.pipeline
+    );
+  }
+
+  const bookedLead = isBookedLead(c) || Boolean(c.auditionDate);
+  const bookActor = (c.bookedBy || assignedAgent).trim();
+  if (!seenTypes.has('audition_booked') && bookedLead) {
+    const bookedTs = getBookedTime(c);
+    if (bookedTs) {
+      pushRawEvent(
+        `${c.id}_booked`,
+        'audition_booked',
+        bookActor,
+        undefined,
+        c.auditionDate ? `Booked audition for ${c.auditionDate}` : 'Booked Audition',
+        c.branch ? `Branch: ${c.branch}` : 'Audition Booked',
+        bookedTs,
+        'Contacted',
+        'Audition Booked'
+      );
+    }
+  }
+
+  const attendedLead = isAttendedLead(c) || Boolean(c.auditionOutcome && c.auditionOutcome !== 'booked');
+  const attActor = (c.attendedBy || assignedAgent).trim();
+  if (!seenTypes.has('audition_outcome') && attendedLead) {
+    const attTs = getAttendedTime(c);
+    if (attTs) {
+      const outLabel = c.auditionOutcome
+        ? `Marked outcome: ${formatOutcomeLabel(c.auditionOutcome)}`
+        : 'Marked audition attended';
+      pushRawEvent(
+        `${c.id}_attended`,
+        'audition_outcome',
+        attActor,
+        undefined,
+        outLabel,
+        c.branch ? `Branch: ${c.branch}` : '',
+        attTs,
+        'Audition Booked',
+        c.auditionOutcome ? formatOutcomeLabel(c.auditionOutcome) : 'Attended'
+      );
+    }
+  }
+
+  if (c.followUpCompleted && !seenTypes.has('followup_completed')) {
+    const compTs = c.followUpCompletedAt ? parseValidTs(c.followUpCompletedAt) : getUpdatedTime(c);
+    pushRawEvent(
+      `${c.id}_fu_done`,
+      'followup_completed',
+      assignedAgent,
+      undefined,
+      'Completed follow-up task',
+      c.followUpNote || '',
+      compTs,
+      'Pending',
+      'Completed'
+    );
+  } else if (
+    !c.followUpCompleted &&
+    !seenTypes.has('followup_scheduled') &&
+    (c.followUpDate || c.followUpNote) &&
+    c.pipeline !== 'Audition Booked'
+  ) {
+    pushRawEvent(
+      `${c.id}_fu_sched`,
+      'followup_scheduled',
+      assignedAgent,
+      undefined,
+      c.followUpDate ? `Scheduled follow-up for ${c.followUpDate}` : 'Added follow-up task',
+      c.followUpNote || '',
+      getUpdatedTime(c),
+      '',
+      c.followUpDate || ''
+    );
+  }
+
+  const convertedLead = isConvertedLead(c);
+  const convActor = (c.enrolledBy || assignedAgent).trim();
+  if (!seenTypes.has('cash_recorded') && convertedLead) {
+    const convTs = getConvertedTime(c);
+    if (convTs) {
+      pushRawEvent(
+        `${c.id}_enrolled`,
+        'cash_recorded',
+        convActor,
+        undefined,
+        cashInNum > 0 ? `Recorded payment: ${cashInNum.toLocaleString()} EGP` : 'Enrolled student',
+        c.branch ? `Branch: ${c.branch}` : 'Enrolled',
+        convTs,
+        'Attended',
+        cashInNum > 0 ? `${cashInNum.toLocaleString()} EGP` : 'Enrolled'
+      );
+    }
+  }
+
+  if (!seenTypes.has('note_updated') && c.notes && c.notes.trim() && assignedAgent !== 'Unassigned') {
+    pushRawEvent(
+      `${c.id}_note`,
+      'note_updated',
+      assignedAgent,
+      undefined,
+      'Updated lead notes',
+      c.notes.trim().slice(0, 160),
+      getUpdatedTime(c)
+    );
+  }
+
+  const parsed: ParsedConversationData = {
+    leadName,
+    leadNameLower: leadName.toLowerCase(),
+    leadPhone,
+    leadPhoneLower: leadPhone.toLowerCase(),
+    channel,
+    branch,
+    branchLower: branch.toLowerCase(),
+    pipeline,
+    pipelineLower: pipeline.toLowerCase(),
+    assignedAgent,
+    assignedAgentLower,
+    createdTs,
+    waitingReply: Boolean((c.unreadCount && c.unreadCount > 0) || c.pipeline === 'New'),
+    bookedLead,
+    bookActor,
+    attendedLead,
+    attActor,
+    convertedLead,
+    convActor,
+    cashInNum,
+    events,
+    actorStats,
+    involvedActors,
+  };
+
+  conversationParseCache.set(c, parsed);
+  return parsed;
+}
+
+const ALL_AGENTS_ID = '__all__';
+const TIMELINE_BATCH_SIZE = 50;
+const LEADS_BATCH_SIZE = 50;
+
+const TimelineSkeleton = memo(function TimelineSkeleton() {
+  return (
+    <div className="w-full space-y-6" aria-busy="true" aria-label="Loading timeline activities">
+      <div className="flex items-center gap-3">
+        <div className="h-5 w-20 rounded-md animate-pulse" style={{ background: 'var(--bg-pill)' }} />
+        <div className="h-[1px] flex-1" style={{ background: 'var(--border-main)' }} />
+      </div>
+      <div className="space-y-4 pl-1 sm:pl-2">
+        {[0, 1, 2, 3, 4, 5].map((idx) => (
+          <div key={idx} className="relative pl-8 sm:pl-10">
+            <div
+              className="absolute left-0 top-0.5 w-[26px] sm:w-[28px] h-[26px] sm:h-[28px] rounded-full animate-pulse"
+              style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+            />
+            <div
+              className="p-3.5 rounded-xl space-y-2.5 animate-pulse"
+              style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 flex-1">
+                  <div className="h-3.5 w-36 rounded" style={{ background: 'var(--bg-pill)' }} />
+                  <div className="h-3.5 w-24 rounded" style={{ background: 'var(--bg-pill)' }} />
+                </div>
+                <div className="h-5 w-16 rounded" style={{ background: 'var(--bg-pill)' }} />
+              </div>
+              <div className="h-8 w-3/4 rounded-lg" style={{ background: 'var(--bg-pill)' }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+});
+
+const TimelineEventCard = memo(function TimelineEventCard({
+  act,
+  showActor = false,
+  onOpenChat,
+  onSelectAgent,
+}: {
+  act: EnrichedActivity;
+  showActor?: boolean;
+  onOpenChat: (conversationId: string) => void;
+  onSelectAgent?: (name: string) => void;
+}) {
+  const actionPhrase = getNaturalActionPhrase(act);
+  const phraseText = showActor
+    ? actionPhrase
+    : actionPhrase.charAt(0).toUpperCase() + actionPhrase.slice(1);
+  const isMessage = act.type === 'message_sent';
+  const isAudition = act.type === 'audition_booked' || act.type === 'audition_outcome';
+  const isPayment = act.type === 'cash_recorded';
+  const isStage = act.type === 'stage_changed';
+  const isFollowup = act.type === 'followup_scheduled' || act.type === 'followup_completed';
+  const isAssignment = act.type === 'lead_assigned';
+
+  let NodeIcon = Clock;
+  if (isPayment) NodeIcon = Banknote;
+  else if (isAudition) NodeIcon = act.type === 'audition_outcome' ? Award : Calendar;
+  else if (isMessage) NodeIcon = MessageSquare;
+  else if (isStage) NodeIcon = ArrowRight;
+  else if (isAssignment) NodeIcon = UserCheck;
+  else if (isFollowup) NodeIcon = act.type === 'followup_completed' ? CheckCircle2 : Clock;
+
+  return (
+    <div
+      className="relative pl-8 sm:pl-10 group"
+      style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 88px' }}
+    >
+      {/* Vertical connecting spine */}
+      <div
+        className="absolute left-[13px] sm:left-[15px] top-7 bottom-[-16px] w-[1.5px] group-last:hidden"
+        style={{ background: 'var(--border-main)' }}
+      />
+
+      {/* Node icon pill on the spine */}
+      <div
+        className="absolute left-0 top-0.5 w-[26px] sm:w-[28px] h-[26px] sm:h-[28px] rounded-full flex items-center justify-center shrink-0 z-10 transition-colors"
+        style={{
+          background: 'var(--bg-card)',
+          color: 'var(--text-secondary)',
+          border: '1px solid var(--border-main)',
+        }}
+      >
+        <NodeIcon className="w-3.5 h-3.5" />
+      </div>
+
+      {/* Event Main Block */}
+      <div
+        className="p-3.5 rounded-xl transition-all"
+        style={{
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border-main)',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.02)',
+        }}
+      >
+        {/* Top Bar: Actor (Team mode) + Natural Action + Lead + Timestamp + Chat Hover Button */}
+        <div className="flex items-start sm:items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+            {showActor && (
+              <button
+                type="button"
+                onClick={() => onSelectAgent?.(act.actor)}
+                className="text-[11px] font-bold px-2 py-0.5 rounded-md hover:underline cursor-pointer shrink-0"
+                style={{
+                  background: 'var(--bg-pill)',
+                  color: 'var(--text-primary)',
+                  border: '1px solid var(--border-input)',
+                }}
+                title={`Filter by ${act.actor}`}
+              >
+                {act.actor}
+              </button>
+            )}
+            <span className="text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+              {phraseText}
+            </span>
+            <button
+              type="button"
+              onClick={() => onOpenChat(act.conversationId)}
+              className="font-bold text-[12px] hover:underline cursor-pointer truncate max-w-[220px]"
+              style={{ color: 'var(--text-primary)' }}
+              title="Open conversation"
+            >
+              {act.leadName}
+            </button>
+            <span
+              className="text-[9px] font-bold px-1.5 py-0.2 rounded"
+              style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}
+            >
+              {act.channel}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-[11px] font-mono" style={{ color: 'var(--text-muted)' }}>
+              {formatTime24Or12(act.timestamp)}
+            </span>
+            <button
+              type="button"
+              onClick={() => onOpenChat(act.conversationId)}
+              className="h-6 px-2.5 rounded-[5px] text-[10px] font-semibold flex items-center gap-1 transition-opacity opacity-75 group-hover:opacity-100 cursor-pointer"
+              style={{
+                background: 'var(--bg-pill)',
+                border: '1px solid var(--border-input)',
+                color: 'var(--text-primary)',
+              }}
+            >
+              <MessageSquare className="w-3 h-3" />
+              Chat
+            </button>
+          </div>
+        </div>
+
+        {/* Substance / Detail Box (Indented & Elegant) */}
+        {isMessage && act.detail && (
+          <div
+            className="mt-2.5 p-2.5 rounded-lg text-[11px] leading-relaxed max-w-3xl"
+            style={{
+              background: 'var(--bg-pill)',
+              color: 'var(--text-primary)',
+              border: '1px solid var(--border-input)',
+            }}
+          >
+            <span className="italic select-none opacity-60 mr-1">“</span>
+            <span>{act.detail}</span>
+            <span className="italic select-none opacity-60 ml-1">”</span>
+          </div>
+        )}
+
+        {isAudition && (
+          <div className="mt-2.5 flex items-center gap-2 flex-wrap text-[11px]">
+            <div
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-semibold"
+              style={{ background: 'var(--bg-pill)', color: 'var(--text-primary)', border: '1px solid var(--border-input)' }}
+            >
+              <Calendar className="w-3 h-3 text-[var(--text-muted)]" />
+              <span>{act.summary}</span>
+            </div>
+            {act.branch && (
+              <div
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md"
+                style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}
+              >
+                <span>{act.branch}</span>
+              </div>
+            )}
+            <span
+              className="text-[10px] font-semibold px-2 py-0.5 rounded-full inline-flex items-center gap-1"
+              style={getStageBadgeStyle(act.pipeline)}
+            >
+              <span
+                className="w-1.5 h-1.5 rounded-full"
+                style={{ background: getStageColor(act.pipeline) }}
+              />
+              {act.pipeline}
+            </span>
+          </div>
+        )}
+
+        {isPayment && (
+          <div className="mt-2.5 flex items-center gap-2.5 flex-wrap text-[11px]">
+            <div
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md font-bold"
+              style={{
+                background: 'var(--bg-pill)',
+                border: '1px solid var(--border-input)',
+                color: 'var(--text-primary)',
+              }}
+            >
+              <Banknote className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+              <span>{act.summary}</span>
+            </div>
+            {act.branch && (
+              <span style={{ color: 'var(--text-secondary)' }}>· {act.branch}</span>
+            )}
+            {act.detail && act.detail !== act.summary && (
+              <span style={{ color: 'var(--text-muted)' }}>({act.detail})</span>
+            )}
+          </div>
+        )}
+
+        {isStage && (
+          <div className="mt-2 flex items-center gap-1.5 text-[11px]">
+            <span
+              className="px-2 py-0.5 rounded-md font-semibold"
+              style={getStageBadgeStyle(act.fromValue || 'New')}
+            >
+              {act.fromValue || 'New'}
+            </span>
+            <ArrowRight className="w-3 h-3" style={{ color: 'var(--text-muted)' }} />
+            <span
+              className="px-2.5 py-0.5 rounded-md font-semibold"
+              style={getStageBadgeStyle(act.toValue || act.pipeline)}
+            >
+              {act.toValue || act.pipeline}
+            </span>
+          </div>
+        )}
+
+        {isFollowup && (
+          <div className="mt-2 flex items-center gap-2 text-[11px]">
+            <div
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium"
+              style={{ background: 'var(--bg-pill)', color: 'var(--text-primary)' }}
+            >
+              {act.type === 'followup_completed' ? (
+                <CheckCircle2 className="w-3 h-3 text-emerald-500 shrink-0" />
+              ) : (
+                <Clock className="w-3 h-3 text-amber-500 shrink-0" />
+              )}
+              <span>{act.summary}</span>
+            </div>
+            {act.detail && (
+              <span className="truncate" style={{ color: 'var(--text-secondary)' }}>
+                {act.detail}
+              </span>
+            )}
+          </div>
+        )}
+
+        {!isMessage && !isAudition && !isPayment && !isStage && !isFollowup && act.detail && (
+          <div className="mt-2 text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>
+            {act.detail}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
+
+const CompactEventRow = memo(function CompactEventRow({
+  act,
+  showActor = false,
+  onOpenChat,
+  onSelectAgent,
+}: {
+  act: EnrichedActivity;
+  showActor?: boolean;
+  onOpenChat: (conversationId: string) => void;
+  onSelectAgent?: (name: string) => void;
+}) {
+  const actionPhrase = getNaturalActionPhrase(act);
+  const phraseText = showActor
+    ? actionPhrase
+    : actionPhrase.charAt(0).toUpperCase() + actionPhrase.slice(1);
+
+  return (
+    <div
+      className="px-4 py-2.5 flex items-center justify-between gap-3 hover:bg-black/5 dark:hover:bg-white/5 transition-colors group"
+      style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 42px' }}
+    >
+      {/* Time + Actor (Team mode) + Action Phrase + Lead Name */}
+      <div className="flex items-center gap-3 min-w-0 flex-1">
+        <span
+          className="text-[11px] font-mono shrink-0 w-[58px]"
+          style={{ color: 'var(--text-muted)' }}
+        >
+          {formatTime24Or12(act.timestamp)}
+        </span>
+
+        <div className="min-w-0 flex items-center gap-1.5 flex-wrap flex-1 text-[12px]">
+          {showActor && (
+            <button
+              type="button"
+              onClick={() => onSelectAgent?.(act.actor)}
+              className="text-[10px] font-bold px-1.5 py-0.5 rounded hover:underline cursor-pointer shrink-0"
+              style={{
+                background: 'var(--bg-pill)',
+                color: 'var(--text-primary)',
+                border: '1px solid var(--border-input)',
+              }}
+              title={`Filter by ${act.actor}`}
+            >
+              {act.actor}
+            </button>
+          )}
+          <span style={{ color: 'var(--text-secondary)' }}>
+            {phraseText}
+          </span>
+          <button
+            type="button"
+            onClick={() => onOpenChat(act.conversationId)}
+            className="font-bold hover:underline cursor-pointer truncate max-w-[180px]"
+            style={{ color: 'var(--text-primary)' }}
+          >
+            {act.leadName}
+          </button>
+          <span
+            className="text-[9px] font-bold px-1.5 py-0.2 rounded shrink-0"
+            style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}
+          >
+            {act.channel}
+          </span>
+
+          {/* Short substance tag */}
+          {act.type === 'cash_recorded' && (
+            <span className="font-bold shrink-0" style={{ color: 'var(--text-primary)' }}>
+              · {act.summary}
+            </span>
+          )}
+          {act.type === 'message_sent' && act.detail && (
+            <span className="text-[11px] truncate max-w-xs" style={{ color: 'var(--text-muted)' }}>
+              — “{act.detail}”
+            </span>
+          )}
+          {act.type === 'audition_booked' && (
+            <span className="text-[11px] font-medium shrink-0" style={{ color: 'var(--text-secondary)' }}>
+              · {act.summary}
+            </span>
+          )}
+          {act.type === 'stage_changed' && (
+            <span className="inline-flex items-center gap-1 text-[10px] shrink-0">
+              <span
+                className="px-1.5 py-0.2 rounded font-semibold"
+                style={getStageBadgeStyle(act.fromValue || 'New')}
+              >
+                {act.fromValue || 'New'}
+              </span>
+              <ArrowRight className="w-2.5 h-2.5" style={{ color: 'var(--text-muted)' }} />
+              <span
+                className="px-1.5 py-0.2 rounded font-semibold"
+                style={getStageBadgeStyle(act.toValue || act.pipeline)}
+              >
+                {act.toValue || act.pipeline}
+              </span>
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Quick chat button */}
+      <button
+        type="button"
+        onClick={() => onOpenChat(act.conversationId)}
+        className="h-6 px-2 rounded text-[10px] font-semibold flex items-center gap-1 transition-opacity opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100 cursor-pointer shrink-0"
+        style={{
+          background: 'var(--bg-pill)',
+          border: '1px solid var(--border-input)',
+          color: 'var(--text-primary)',
+        }}
+      >
+        <MessageSquare className="w-2.5 h-2.5" />
+        Chat
+      </button>
+    </div>
+  );
+});
+
+const StaffSidebarRow = memo(function StaffSidebarRow({
+  st,
+  isSelected,
+  isAllTime,
+  periodDescription,
+  todayStartMs,
+  onSelect,
+}: {
+  st: StaffSummary;
+  isSelected: boolean;
+  isAllTime: boolean;
+  periodDescription: string;
+  todayStartMs: number;
+  onSelect: (name: string) => void;
+}) {
+  const lastTimeStr = formatCompactRelativeTime(st.lastActiveAt, todayStartMs);
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(st.name)}
+      className="w-full text-left flex items-start justify-between px-3 py-2.5 cursor-pointer transition-colors"
+      style={{
+        borderBottom: '1px solid var(--border-main)',
+        background: isSelected ? 'var(--bg-selected)' : undefined,
+      }}
+    >
+      <div className="flex items-start gap-2.5 min-w-0 pr-2 flex-1">
+        <img
+          src={st.avatar || '/logo.png'}
+          alt={st.name}
+          loading="lazy"
+          decoding="async"
+          onError={(e) => {
+            (e.currentTarget as HTMLImageElement).src = '/logo.png';
+          }}
+          className="w-9 h-9 rounded-xl object-cover shrink-0 mt-0.5 shadow-xs"
+          style={{ border: '1px solid var(--border-input)' }}
+        />
+        <div className="min-w-0 flex-1">
+          <span
+            className="block text-[12px] font-semibold leading-tight truncate"
+            style={{ color: 'var(--text-primary)' }}
+          >
+            {st.name}
+          </span>
+          <span
+            className="block text-[10px] truncate mt-0.5"
+            style={{ color: 'var(--text-secondary)' }}
+          >
+            {formatRoleLabel(st.role)}
+          </span>
+          <div className="flex items-center gap-1.5 text-[9px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
+            <span>{isAllTime ? st.totalLeadsAssigned : st.periodLeadsAssigned} leads</span>
+            {st.bookedInPeriod > 0 && <span>· {st.bookedInPeriod} booked</span>}
+            {st.enrolledInPeriod > 0 && <span>· {st.enrolledInPeriod} enrolled</span>}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-col items-end justify-between shrink-0 self-stretch gap-1">
+        <span
+          className="text-[9px] font-bold tracking-wide px-1.5 py-0.5 rounded"
+          style={{
+            background: isSelected ? 'var(--bg-card)' : 'var(--bg-pill)',
+            color: isSelected ? 'var(--text-primary)' : 'var(--text-secondary)',
+          }}
+          title={`${st.periodActivitiesCount} events in ${periodDescription}`}
+        >
+          {st.periodActivitiesCount} act
+        </span>
+        {st.lastActiveAt > 0 && (
+          <span
+            className="text-[9px] font-medium mt-auto"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            {lastTimeStr}
+          </span>
+        )}
+      </div>
+    </button>
+  );
+});
+
+const AllAgentsSidebarRow = memo(function AllAgentsSidebarRow({
+  staffCount,
+  activeStaffCount,
+  totalActivitiesCount,
+  totalLeadsAssigned,
+  bookedCount,
+  enrolledCount,
+  lastActiveAt,
+  isSelected,
+  periodDescription,
+  todayStartMs,
+  onSelect,
+}: {
+  staffCount: number;
+  activeStaffCount: number;
+  totalActivitiesCount: number;
+  totalLeadsAssigned: number;
+  bookedCount: number;
+  enrolledCount: number;
+  lastActiveAt: number;
+  isSelected: boolean;
+  periodDescription: string;
+  todayStartMs: number;
+  onSelect: (name: string) => void;
+}) {
+  const lastTimeStr = formatCompactRelativeTime(lastActiveAt, todayStartMs);
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(ALL_AGENTS_ID)}
+      className="w-full text-left flex items-start justify-between px-3 py-2.5 cursor-pointer transition-colors"
+      style={{
+        borderBottom: '1px solid var(--border-main)',
+        background: isSelected ? 'var(--bg-selected)' : undefined,
+      }}
+    >
+      <div className="flex items-start gap-2.5 min-w-0 pr-2 flex-1">
+        <div
+          className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 mt-0.5 shadow-xs"
+          style={{
+            background: 'var(--bg-pill)',
+            border: '1px solid var(--border-input)',
+            color: 'var(--text-primary)',
+          }}
+        >
+          <Users className="w-4 h-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <span
+            className="block text-[12px] font-bold leading-tight truncate"
+            style={{ color: 'var(--text-primary)' }}
+          >
+            All Agents
+          </span>
+          <span
+            className="block text-[10px] truncate mt-0.5"
+            style={{ color: 'var(--text-secondary)' }}
+          >
+            {staffCount} staff · {activeStaffCount} active
+          </span>
+          <div className="flex items-center gap-1.5 text-[9px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
+            <span>{totalLeadsAssigned} leads</span>
+            {bookedCount > 0 && <span>· {bookedCount} booked</span>}
+            {enrolledCount > 0 && <span>· {enrolledCount} enrolled</span>}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-col items-end justify-between shrink-0 self-stretch gap-1">
+        <span
+          className="text-[9px] font-bold tracking-wide px-1.5 py-0.5 rounded"
+          style={{
+            background: isSelected ? 'var(--bg-card)' : 'var(--bg-pill)',
+            color: isSelected ? 'var(--text-primary)' : 'var(--text-secondary)',
+          }}
+          title={`${totalActivitiesCount} team events in ${periodDescription}`}
+        >
+          {totalActivitiesCount} act
+        </span>
+        {lastActiveAt > 0 && (
+          <span
+            className="text-[9px] font-medium mt-auto"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            {lastTimeStr}
+          </span>
+        )}
+      </div>
+    </button>
+  );
+});
+
+type TimelineEventRef = {
+  conversationId: string;
+  parsed: ParsedConversationData;
+  ev: RawConvEvent;
+  actor: string;
+  actorRole: string;
+};
+
+type TeamAggregateSummary = {
+  totalActivitiesCount: number;
+  totalLeadsAssigned: number;
+  periodLeadsAssigned: number;
+  waitingReplyCount: number;
+  booked: number;
+  attended: number;
+  enrolled: number;
+  cash: number;
+  lastActiveAt: number;
+  activeStaffCount: number;
+};
+
 function TeamActivitiesPageInner() {
   const { conversations, assignableAgents, teamMembers, loading, openChat } = useCRM();
   const searchParams = useSearchParams();
   const urlAgent = searchParams.get('agent') || searchParams.get('officer');
 
   // Date filter state
-  const [filterMode, setFilterMode] = useState<'all' | 'day' | 'week'>('all');
+  const [filterMode, setFilterMode] = useState<'all' | 'day' | 'week' | 'range'>('all');
   const [currentDate, setCurrentDate] = useState<Date>(() => getDayStart(new Date()));
+  const [customStartDate, setCustomStartDate] = useState<string>(() => isoDate(getWeekStart(new Date())));
+  const [customEndDate, setCustomEndDate] = useState<string>(() => isoDate(getDayStart(new Date())));
 
-  // Selected agent in the right sidebar (empty initially; resolves to urlAgent or most active agent staffList[0])
-  const [selectedAgent, setSelectedAgent] = useState<string>(() => (urlAgent || '').trim());
-
-  // Update selected agent if query param changes
-  useEffect(() => {
-    if (urlAgent && urlAgent.trim()) {
-      setSelectedAgent(urlAgent.trim());
-    }
-  }, [urlAgent]);
+  // Selected agent in the right sidebar (derived from URL param unless user explicitly clicked another staff member)
+  const cleanUrlAgent = (urlAgent || '').trim();
+  const [userPickedAgent, setUserPickedAgent] = useState<{ agent: string; urlAtPick: string } | null>(null);
+  const selectedAgent =
+    userPickedAgent && userPickedAgent.urlAtPick === cleanUrlAgent
+      ? userPickedAgent.agent
+      : cleanUrlAgent;
 
   // Main view mode: 'timeline' | 'funnel' | 'leads'
   const [mainTab, setMainTab] = useState<'timeline' | 'funnel' | 'leads'>('timeline');
@@ -451,20 +1442,31 @@ function TeamActivitiesPageInner() {
   const [feedViewStyle, setFeedViewStyle] = useState<'timeline' | 'compact'>('timeline');
 
   // Activity category filter
-  const [categoryFilter, setCategoryFilter] = useState<ActivityCategory>('all');
+  const [categoryFilter] = useState<ActivityCategory>('all');
 
   // Search queries
   const [activitySearch, setActivitySearch] = useState<string>('');
   const [agentSearch, setAgentSearch] = useState<string>('');
   const [agentRoleFilter, setAgentRoleFilter] = useState<string>('all');
 
+  const deferredActivitySearch = useDeferredValue(activitySearch);
+  const deferredAgentSearch = useDeferredValue(agentSearch);
+
+  // Incremental windowing counts + scroll refs
+  const [visibleTimelineCount, setVisibleTimelineCount] = useState<number>(TIMELINE_BATCH_SIZE);
+  const [visibleLeadsCount, setVisibleLeadsCount] = useState<number>(LEADS_BATCH_SIZE);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const timelineSentinelRef = useRef<HTMLDivElement>(null);
+  const leadsSentinelRef = useRef<HTMLDivElement>(null);
+
   // Mobile drawer state for right sidebar
   const [mobileAgentsOpen, setMobileAgentsOpen] = useState<boolean>(false);
 
   // Date boundaries
   const todayStart = useMemo(() => getDayStart(new Date()), []);
+  const todayStartMs = useMemo(() => todayStart.getTime(), [todayStart]);
   const yesterdayStart = useMemo(() => addDays(todayStart, -1), [todayStart]);
-  const thisWeekStart = useMemo(() => getWeekStart(new Date()), []);
+  const thisWeekStart = useMemo(() => getWeekStart(todayStart), [todayStart]);
   const lastWeekStart = useMemo(() => addDays(thisWeekStart, -7), [thisWeekStart]);
 
   const todayKey = useMemo(() => isoDate(todayStart), [todayStart]);
@@ -475,33 +1477,79 @@ function TeamActivitiesPageInner() {
   const weekStart = useMemo(() => getWeekStart(currentDate), [currentDate]);
   const weekEnd = useMemo(() => getWeekEnd(weekStart), [weekStart]);
 
+  const { rangeStart, rangeEnd } = useMemo(() => {
+    const a = parseIsoInputDate(customStartDate, todayStart);
+    const b = parseIsoInputDate(customEndDate, todayStart);
+    const start = a.getTime() <= b.getTime() ? a : b;
+    const end = a.getTime() <= b.getTime() ? b : a;
+    return { rangeStart: getDayStart(start), rangeEnd: getDayEnd(end) };
+  }, [customStartDate, customEndDate, todayStart]);
+
+  const periodStartMs = useMemo(() => {
+    if (filterMode === 'day') return dayStart.getTime();
+    if (filterMode === 'week') return weekStart.getTime();
+    if (filterMode === 'range') return rangeStart.getTime();
+    return 0;
+  }, [filterMode, dayStart, weekStart, rangeStart]);
+
+  const periodEndMs = useMemo(() => {
+    if (filterMode === 'day') return dayEnd.getTime();
+    if (filterMode === 'week') return weekEnd.getTime();
+    if (filterMode === 'range') return rangeEnd.getTime();
+    return 0;
+  }, [filterMode, dayEnd, weekEnd, rangeEnd]);
+
   const isToday = filterMode === 'day' && dayStart.getTime() === todayStart.getTime();
   const isYesterday = filterMode === 'day' && dayStart.getTime() === yesterdayStart.getTime();
   const isThisWeek = filterMode === 'week' && weekStart.getTime() === thisWeekStart.getTime();
   const isLastWeek = filterMode === 'week' && weekStart.getTime() === lastWeekStart.getTime();
 
-  const goAllTime = () => setFilterMode('all');
-  const goToday = () => { setCurrentDate(todayStart); setFilterMode('day'); };
-  const goYesterday = () => { setCurrentDate(yesterdayStart); setFilterMode('day'); };
-  const goThisWeek = () => { setCurrentDate(thisWeekStart); setFilterMode('week'); };
-  const goLastWeek = () => { setCurrentDate(lastWeekStart); setFilterMode('week'); };
-
-  const stepPrev = () => {
-    if (filterMode === 'day') {
-      setCurrentDate((d) => addDays(d, -1));
-    } else {
-      setCurrentDate((d) => addDays(d, -7));
-      setFilterMode('week');
-    }
+  const resetPagedWindows = () => {
+    setVisibleTimelineCount(TIMELINE_BATCH_SIZE);
+    setVisibleLeadsCount(LEADS_BATCH_SIZE);
   };
 
-  const stepNext = () => {
+  const goAllTime = () => {
+    setFilterMode('all');
+    resetPagedWindows();
+  };
+
+  const goToday = () => {
+    setCurrentDate(todayStart);
+    setFilterMode('day');
+    resetPagedWindows();
+  };
+
+  const goYesterday = () => {
+    setCurrentDate(yesterdayStart);
+    setFilterMode('day');
+    resetPagedWindows();
+  };
+
+  const goThisWeek = () => {
+    setCurrentDate(thisWeekStart);
+    setFilterMode('week');
+    resetPagedWindows();
+  };
+
+  const goLastWeek = () => {
+    setCurrentDate(lastWeekStart);
+    setFilterMode('week');
+    resetPagedWindows();
+  };
+
+  const goCustomRange = () => {
+    setFilterMode('range');
+    resetPagedWindows();
+  };
+
+  const stepPeriod = (dir: -1 | 1) => {
     if (filterMode === 'day') {
-      setCurrentDate((d) => addDays(d, 1));
-    } else {
-      setCurrentDate((d) => addDays(d, 7));
-      setFilterMode('week');
+      setCurrentDate((prev) => addDays(prev, dir));
+    } else if (filterMode === 'week') {
+      setCurrentDate((prev) => addDays(prev, dir * 7));
     }
+    resetPagedWindows();
   };
 
   const periodDescription = useMemo(() => {
@@ -512,8 +1560,13 @@ function TeamActivitiesPageInner() {
     if (filterMode === 'week') {
       return formatRangeLabel(weekStart, weekEnd);
     }
+    if (filterMode === 'range') {
+      return isoDate(rangeStart) === isoDate(rangeEnd)
+        ? formatDayLabel(rangeStart)
+        : formatRangeLabel(rangeStart, rangeEnd);
+    }
     return 'All Time';
-  }, [filterMode, isToday, isYesterday, dayStart, weekStart, weekEnd]);
+  }, [filterMode, isToday, isYesterday, dayStart, weekStart, weekEnd, rangeStart, rangeEnd]);
 
   // Role lookup map from both teamMembers and assignableAgents
   const roleMap = useMemo(() => {
@@ -527,23 +1580,26 @@ function TeamActivitiesPageInner() {
     return map;
   }, [teamMembers, assignableAgents]);
 
-  /* ── Core High-Performance Aggregation ── */
-  const {
-    allActivitiesInPeriod,
-    staffList,
-    teamMetrics,
-  } = useMemo(() => {
-    const startMs = filterMode === 'day' ? dayStart.getTime() : weekStart.getTime();
-    const endMs = filterMode === 'day' ? dayEnd.getTime() : weekEnd.getTime();
-
+  /* ── Step 1: Fast Staff Summary + Team Aggregate (O(conversations), WeakMap Cached) ── */
+  const { staffList, staffByLower, teamAggregate } = useMemo(() => {
+    const isAllTime = filterMode === 'all';
     const inPeriod = (ts: number | null | undefined): boolean => {
       if (!ts || ts <= 0) return false;
-      if (filterMode === 'all') return true;
-      return ts >= startMs && ts <= endMs;
+      if (isAllTime) return true;
+      return ts >= periodStartMs && ts <= periodEndMs;
     };
 
     const staffMap = new Map<string, StaffSummary>();
     const canonicalNameMap = new Map<string, string>();
+    const seedMembers = teamMembers && teamMembers.length > 0 ? teamMembers : assignableAgents;
+    const memberMetaByLower = new Map<string, (typeof seedMembers)[number]>();
+    for (let i = 0; i < seedMembers.length; i++) {
+      const m = seedMembers[i];
+      if (m.name) {
+        const lower = m.name.trim().toLowerCase();
+        if (!memberMetaByLower.has(lower)) memberMetaByLower.set(lower, m);
+      }
+    }
 
     const ensureStaff = (rawName?: string, fallbackRole?: string): StaffSummary | null => {
       const clean = (rawName || '').trim();
@@ -551,15 +1607,16 @@ function TeamActivitiesPageInner() {
         return null;
       }
       const lower = clean.toLowerCase();
-      const canonical = canonicalNameMap.get(lower) || clean;
-      if (!canonicalNameMap.has(lower)) {
+      let canonical = canonicalNameMap.get(lower);
+      if (!canonical) {
+        canonical = clean;
         canonicalNameMap.set(lower, canonical);
       }
-      if (!staffMap.has(canonical)) {
+      let existing = staffMap.get(canonical);
+      if (!existing) {
         const knownRole = roleMap.get(lower) || fallbackRole || 'admission_officer';
-        const memberMeta = (teamMembers && teamMembers.length > 0 ? teamMembers : assignableAgents)
-          ?.find((m) => m.name.toLowerCase() === lower);
-        staffMap.set(canonical, {
+        const memberMeta = memberMetaByLower.get(lower);
+        existing = {
           name: canonical,
           role: knownRole,
           email: memberMeta?.email,
@@ -579,14 +1636,14 @@ function TeamActivitiesPageInner() {
           allTimeAttended: 0,
           allTimeEnrolled: 0,
           allTimeCash: 0,
-        });
+        };
+        staffMap.set(canonical, existing);
       }
-      return staffMap.get(canonical)!;
+      return existing;
     };
 
-    // Seed known team members
-    const seedMembers = teamMembers && teamMembers.length > 0 ? teamMembers : assignableAgents;
-    seedMembers.forEach((m) => {
+    for (let i = 0; i < seedMembers.length; i++) {
+      const m = seedMembers[i];
       if (m.name) {
         const st = ensureStaff(m.name, m.role);
         if (st) {
@@ -594,321 +1651,79 @@ function TeamActivitiesPageInner() {
           if (m.avatar) st.avatar = m.avatar;
         }
       }
-    });
+    }
 
-    const activities: EnrichedActivity[] = [];
+    for (let i = 0; i < conversations.length; i++) {
+      const p = getParsedConversationData(conversations[i]);
 
-    for (const c of conversations) {
-      const leadName = getDisplayName(c);
-      const leadPhone = c.phone || '';
-      const channel = c.metaChannel ? `${c.channel} · ${c.metaChannel}` : (c.channel || 'WA');
-      const branch = c.branch || '';
-      const pipeline = c.pipeline || 'New';
-      const assignedAgent = (c.agent || 'Unassigned').trim();
-
-      if (assignedAgent && assignedAgent !== 'Unassigned') {
-        const st = ensureStaff(assignedAgent);
+      if (p.assignedAgent && p.assignedAgent !== 'Unassigned') {
+        const st = ensureStaff(p.assignedAgent);
         if (st) {
           st.totalLeadsAssigned += 1;
           st.allTimeLeads += 1;
-          if (inPeriod(getCreatedTime(c))) {
+          if (inPeriod(p.createdTs)) {
             st.periodLeadsAssigned += 1;
-          }
-          if ((c.unreadCount && c.unreadCount > 0) || c.pipeline === 'New') {
-            st.waitingReplyCount += 1;
+            if (p.waitingReply) {
+              st.waitingReplyCount += 1;
+            }
           }
         }
       }
 
-      // Track all-time funnel metrics from conversations
-      if (isBookedLead(c) || Boolean(c.auditionDate)) {
-        const bookActor = (c.bookedBy || assignedAgent).trim();
-        const bSt = ensureStaff(bookActor);
+      if (p.bookedLead) {
+        const bSt = ensureStaff(p.bookActor);
         if (bSt) bSt.allTimeBooked += 1;
       }
-      if (isAttendedLead(c) || (c.auditionOutcome && c.auditionOutcome !== 'booked')) {
-        const attActor = (c.attendedBy || assignedAgent).trim();
-        const aSt = ensureStaff(attActor);
+      if (p.attendedLead) {
+        const aSt = ensureStaff(p.attActor);
         if (aSt) aSt.allTimeAttended += 1;
       }
-      if (isConvertedLead(c)) {
-        const convActor = (c.enrolledBy || assignedAgent).trim();
-        const cSt = ensureStaff(convActor);
+      if (p.convertedLead) {
+        const cSt = ensureStaff(p.convActor);
         if (cSt) {
           cSt.allTimeEnrolled += 1;
-          cSt.allTimeCash += (Number(c.cashIn) || 0);
+          cSt.allTimeCash += p.cashInNum;
         }
       }
 
-      const convEvents: EnrichedActivity[] = [];
-      const seenTypes = new Set<string>();
-
-      const pushActivity = (
-        id: string,
-        type: ActivityLogEntry['type'],
-        rawActor: string,
-        rawRole: string | undefined,
-        summary: string,
-        detail: string,
-        timestamp: number,
-        fromValue?: string,
-        toValue?: string
-      ) => {
-        if (!timestamp || isNaN(timestamp)) return;
-        const cleanActor = (rawActor || assignedAgent || 'Unassigned').trim();
-        if (!cleanActor || cleanActor === 'Unassigned' || cleanActor === 'Staff') return;
-
-        const st = ensureStaff(cleanActor, rawRole);
-        const actorCanonical = st ? st.name : cleanActor;
-        const actorRole = st ? st.role : (rawRole || 'admission_officer');
-
-        if (st && timestamp > st.lastActiveAt) {
-          st.lastActiveAt = timestamp;
-        }
-
-        if (!inPeriod(timestamp)) return;
-
-        if (st) {
-          st.periodActivitiesCount += 1;
-          if (type === 'message_sent') st.messagesInPeriod += 1;
-          if (type === 'audition_booked') st.bookedInPeriod += 1;
-          if (type === 'audition_outcome' && toValue !== 'no-show') st.attendedInPeriod += 1;
-          if (type === 'cash_recorded' || (type === 'audition_outcome' && toValue === 'registered')) {
-            st.enrolledInPeriod += 1;
+      if (isAllTime) {
+        for (let j = 0; j < p.actorStats.length; j++) {
+          const stat = p.actorStats[j];
+          const st = ensureStaff(stat.sampleActor, stat.sampleRole);
+          if (!st) continue;
+          if (stat.maxTimestamp > st.lastActiveAt) {
+            st.lastActiveAt = stat.maxTimestamp;
           }
-          if (type === 'cash_recorded') {
-            const parsedCash = toValue ? Number(String(toValue).replace(/[^\d.]/g, '')) : 0;
-            const cashVal = parsedCash > 0 ? parsedCash : (Number(c.cashIn) || 0);
-            st.cashInPeriod += cashVal;
+          st.periodActivitiesCount += stat.count;
+          st.messagesInPeriod += stat.messages;
+          st.bookedInPeriod += stat.booked;
+          st.attendedInPeriod += stat.attended;
+          st.enrolledInPeriod += stat.enrolled;
+          st.cashInPeriod += stat.cash;
+        }
+      } else {
+        for (let j = 0; j < p.events.length; j++) {
+          const ev = p.events[j];
+          const st = ensureStaff(ev.rawActor, ev.rawRole);
+          if (!st) continue;
+          if (ev.timestamp > st.lastActiveAt) {
+            st.lastActiveAt = ev.timestamp;
           }
-        }
-
-        const dtKey = isoDate(new Date(timestamp));
-        convEvents.push({
-          id,
-          conversationId: c.id,
-          leadName,
-          leadPhone,
-          channel,
-          branch,
-          pipeline,
-          type,
-          category: mapTypeToCategory(type),
-          actor: actorCanonical,
-          actorRole,
-          summary,
-          detail,
-          fromValue,
-          toValue,
-          timestamp,
-          dateKey: dtKey,
-        });
-      };
-
-      // 1. Explicit persisted activities
-      if (Array.isArray(c.activityLog) && c.activityLog.length > 0) {
-        for (const entry of c.activityLog) {
-          seenTypes.add(entry.type);
-          pushActivity(
-            `${c.id}_${entry.id}`,
-            entry.type,
-            entry.actor || assignedAgent,
-            entry.actorRole,
-            entry.summary,
-            entry.detail || '',
-            entry.timestamp,
-            entry.fromValue,
-            entry.toValue
-          );
-        }
-      }
-
-      // 2. Synthesize milestones when not already in activityLog
-      if (!seenTypes.has('message_sent')) {
-        if (Array.isArray(c.messages) && c.messages.length > 0) {
-          c.messages.forEach((m) => {
-            if (!m.isIncoming && m.timestamp) {
-              const sender = (m.senderName && m.senderName !== 'Staff') ? m.senderName : assignedAgent;
-              pushActivity(
-                `${c.id}_msg_${m.id}`,
-                'message_sent',
-                sender,
-                undefined,
-                `Sent ${c.channel === 'WA' ? 'WhatsApp' : c.channel === 'IG' ? 'Instagram' : 'Messenger'} reply`,
-                (m.text || '').slice(0, 160),
-                m.timestamp
-              );
+          if (ev.timestamp >= periodStartMs && ev.timestamp <= periodEndMs) {
+            st.periodActivitiesCount += 1;
+            if (ev.type === 'message_sent') st.messagesInPeriod += 1;
+            if (ev.type === 'audition_booked') st.bookedInPeriod += 1;
+            if (ev.type === 'audition_outcome' && ev.toValue !== 'no-show') st.attendedInPeriod += 1;
+            if (ev.type === 'cash_recorded' || (ev.type === 'audition_outcome' && ev.toValue === 'registered')) {
+              st.enrolledInPeriod += 1;
             }
-          });
-        } else if (c.lastOutgoingAt && assignedAgent !== 'Unassigned') {
-          pushActivity(
-            `${c.id}_lastout_${c.lastOutgoingAt}`,
-            'message_sent',
-            assignedAgent,
-            undefined,
-            `Sent ${c.channel === 'WA' ? 'WhatsApp' : c.channel === 'IG' ? 'Instagram' : 'Messenger'} reply`,
-            c.lastMessageDirection === 'outgoing' ? (c.lastMessageText || '').slice(0, 160) : '',
-            c.lastOutgoingAt
-          );
-        } else if (c.lastMessageDirection === 'outgoing' && c.lastMessageAt && assignedAgent !== 'Unassigned') {
-          pushActivity(
-            `${c.id}_lastdir_${c.lastMessageAt}`,
-            'message_sent',
-            assignedAgent,
-            undefined,
-            `Sent ${c.channel === 'WA' ? 'WhatsApp' : c.channel === 'IG' ? 'Instagram' : 'Messenger'} reply`,
-            (c.lastMessageText || '').slice(0, 160),
-            c.lastMessageAt
-          );
+            if (ev.type === 'cash_recorded') {
+              st.cashInPeriod += ev.cashVal;
+            }
+          }
         }
-      }
-
-      if (!seenTypes.has('lead_assigned') && assignedAgent !== 'Unassigned') {
-        const createdTs = getCreatedTime(c);
-        pushActivity(
-          `${c.id}_assigned`,
-          'lead_assigned',
-          assignedAgent,
-          undefined,
-          `Claimed lead`,
-          `Campaign: ${getCampaignName(c)}`,
-          createdTs,
-          'Unassigned',
-          assignedAgent
-        );
-      }
-
-      if (
-        !seenTypes.has('stage_changed') &&
-        assignedAgent !== 'Unassigned' &&
-        ['Contacted', 'Qualified', 'Joining Later', 'Unqualified', 'Lost'].includes(c.pipeline)
-      ) {
-        pushActivity(
-          `${c.id}_stage_${c.pipeline}`,
-          'stage_changed',
-          assignedAgent,
-          undefined,
-          `Moved stage to ${c.pipeline}`,
-          `New → ${c.pipeline}`,
-          getUpdatedTime(c),
-          'New',
-          c.pipeline
-        );
-      }
-
-      if (!seenTypes.has('audition_booked') && (isBookedLead(c) || Boolean(c.auditionDate))) {
-        const bookedTs = getBookedTime(c);
-        const bookActor = (c.bookedBy || assignedAgent).trim();
-        if (bookedTs) {
-          pushActivity(
-            `${c.id}_booked`,
-            'audition_booked',
-            bookActor,
-            undefined,
-            c.auditionDate ? `Booked audition for ${c.auditionDate}` : 'Booked Audition',
-            c.branch ? `Branch: ${c.branch}` : 'Audition Booked',
-            bookedTs,
-            'Contacted',
-            'Audition Booked'
-          );
-        }
-      }
-
-      if (
-        !seenTypes.has('audition_outcome') &&
-        (isAttendedLead(c) || (c.auditionOutcome && c.auditionOutcome !== 'booked'))
-      ) {
-        const attTs = getAttendedTime(c);
-        const attActor = (c.attendedBy || assignedAgent).trim();
-        if (attTs) {
-          const outLabel = c.auditionOutcome
-            ? `Marked outcome: ${formatOutcomeLabel(c.auditionOutcome)}`
-            : 'Marked audition attended';
-          pushActivity(
-            `${c.id}_attended`,
-            'audition_outcome',
-            attActor,
-            undefined,
-            outLabel,
-            c.branch ? `Branch: ${c.branch}` : '',
-            attTs,
-            'Audition Booked',
-            c.auditionOutcome ? formatOutcomeLabel(c.auditionOutcome) : 'Attended'
-          );
-        }
-      }
-
-      if (c.followUpCompleted && !seenTypes.has('followup_completed')) {
-        const compTs = c.followUpCompletedAt
-          ? new Date(c.followUpCompletedAt).getTime()
-          : getUpdatedTime(c);
-        pushActivity(
-          `${c.id}_fu_done`,
-          'followup_completed',
-          assignedAgent,
-          undefined,
-          'Completed follow-up task',
-          c.followUpNote || '',
-          compTs,
-          'Pending',
-          'Completed'
-        );
-      } else if (
-        !c.followUpCompleted &&
-        !seenTypes.has('followup_scheduled') &&
-        (c.followUpDate || c.followUpNote) &&
-        c.pipeline !== 'Audition Booked'
-      ) {
-        pushActivity(
-          `${c.id}_fu_sched`,
-          'followup_scheduled',
-          assignedAgent,
-          undefined,
-          c.followUpDate ? `Scheduled follow-up for ${c.followUpDate}` : 'Added follow-up task',
-          c.followUpNote || '',
-          getUpdatedTime(c),
-          '',
-          c.followUpDate || ''
-        );
-      }
-
-      if (!seenTypes.has('cash_recorded') && isConvertedLead(c)) {
-        const convTs = getConvertedTime(c);
-        const convActor = (c.enrolledBy || assignedAgent).trim();
-        const cashVal = Number(c.cashIn) || 0;
-        if (convTs) {
-          pushActivity(
-            `${c.id}_enrolled`,
-            'cash_recorded',
-            convActor,
-            undefined,
-            cashVal > 0 ? `Recorded payment: ${cashVal.toLocaleString()} EGP` : 'Enrolled student',
-            c.branch ? `Branch: ${c.branch}` : 'Enrolled',
-            convTs,
-            'Attended',
-            cashVal > 0 ? `${cashVal.toLocaleString()} EGP` : 'Enrolled'
-          );
-        }
-      }
-
-      if (!seenTypes.has('note_updated') && c.notes && c.notes.trim() && assignedAgent !== 'Unassigned') {
-        pushActivity(
-          `${c.id}_note`,
-          'note_updated',
-          assignedAgent,
-          undefined,
-          'Updated lead notes',
-          c.notes.trim().slice(0, 160),
-          getUpdatedTime(c)
-        );
-      }
-
-      for (const ev of convEvents) {
-        activities.push(ev);
       }
     }
-
-    activities.sort((a, b) => b.timestamp - a.timestamp);
 
     const sortedStaff = Array.from(staffMap.values()).sort((a, b) => {
       if (b.periodActivitiesCount !== a.periodActivitiesCount) {
@@ -920,55 +1735,41 @@ function TeamActivitiesPageInner() {
       return b.totalLeadsAssigned - a.totalLeadsAssigned;
     });
 
-    let teamTotalLeadsInPeriod = 0;
-    let teamTotalBookedInPeriod = 0;
-    let teamTotalAttendedInPeriod = 0;
-    let teamTotalEnrolledInPeriod = 0;
-    let teamTotalCashInPeriod = 0;
-    let activeStaffCount = 0;
+    const byLower = new Map<string, StaffSummary>();
+    const aggregate: TeamAggregateSummary = {
+      totalActivitiesCount: 0,
+      totalLeadsAssigned: 0,
+      periodLeadsAssigned: 0,
+      waitingReplyCount: 0,
+      booked: 0,
+      attended: 0,
+      enrolled: 0,
+      cash: 0,
+      lastActiveAt: 0,
+      activeStaffCount: 0,
+    };
 
-    for (const st of staffMap.values()) {
-      teamTotalLeadsInPeriod += st.periodLeadsAssigned;
-      teamTotalBookedInPeriod += st.bookedInPeriod;
-      teamTotalAttendedInPeriod += st.attendedInPeriod;
-      teamTotalEnrolledInPeriod += st.enrolledInPeriod;
-      teamTotalCashInPeriod += st.cashInPeriod;
-      if (st.periodActivitiesCount > 0) activeStaffCount += 1;
+    for (let i = 0; i < sortedStaff.length; i++) {
+      const st = sortedStaff[i];
+      byLower.set(st.name.toLowerCase(), st);
+      aggregate.totalActivitiesCount += st.periodActivitiesCount;
+      aggregate.totalLeadsAssigned += st.totalLeadsAssigned;
+      aggregate.periodLeadsAssigned += st.periodLeadsAssigned;
+      aggregate.waitingReplyCount += st.waitingReplyCount;
+      aggregate.booked += isAllTime ? st.allTimeBooked : st.bookedInPeriod;
+      aggregate.attended += isAllTime ? st.allTimeAttended : st.attendedInPeriod;
+      aggregate.enrolled += isAllTime ? st.allTimeEnrolled : st.enrolledInPeriod;
+      aggregate.cash += isAllTime ? st.allTimeCash : st.cashInPeriod;
+      if (st.lastActiveAt > aggregate.lastActiveAt) aggregate.lastActiveAt = st.lastActiveAt;
+      if (st.periodActivitiesCount > 0) aggregate.activeStaffCount += 1;
     }
 
-    const teamBookingRate = teamTotalLeadsInPeriod > 0
-      ? Math.min(100, Math.round((teamTotalBookedInPeriod / teamTotalLeadsInPeriod) * 100))
-      : (teamTotalBookedInPeriod > 0 ? 100 : 0);
-
-    const teamShowRate = teamTotalBookedInPeriod > 0
-      ? Math.min(100, Math.round((teamTotalAttendedInPeriod / teamTotalBookedInPeriod) * 100))
-      : (teamTotalAttendedInPeriod > 0 ? 100 : 0);
-
-    const teamClosingRate = teamTotalBookedInPeriod > 0
-      ? Math.min(100, Math.round((teamTotalEnrolledInPeriod / teamTotalBookedInPeriod) * 100))
-      : (teamTotalEnrolledInPeriod > 0 ? 100 : 0);
-
-    const teamMetrics: TeamFunnelMetrics = {
-      totalLeads: filterMode === 'all' ? conversations.length : teamTotalLeadsInPeriod,
-      totalBooked: teamTotalBookedInPeriod,
-      totalAttended: teamTotalAttendedInPeriod,
-      totalEnrolled: teamTotalEnrolledInPeriod,
-      totalCash: teamTotalCashInPeriod,
-      activeStaffCount,
-      bookingRate: teamBookingRate,
-      showRate: teamShowRate,
-      closingRate: teamClosingRate,
-    };
-
-    return {
-      allActivitiesInPeriod: activities,
-      staffList: sortedStaff,
-      teamMetrics,
-    };
-  }, [conversations, assignableAgents, teamMembers, roleMap, filterMode, dayStart, dayEnd, weekStart, weekEnd]);
+    return { staffList: sortedStaff, staffByLower: byLower, teamAggregate: aggregate };
+  }, [conversations, assignableAgents, teamMembers, roleMap, filterMode, periodStartMs, periodEndMs]);
 
   // Filter agents in the Right Sidebar
   const filteredStaff = useMemo(() => {
+    const q = deferredAgentSearch.toLowerCase().trim();
     return staffList.filter((st) => {
       if (agentRoleFilter !== 'all') {
         const r = st.role.toLowerCase();
@@ -977,74 +1778,87 @@ function TeamActivitiesPageInner() {
         if (agentRoleFilter === 'finance' && r !== 'finance') return false;
         if (agentRoleFilter === 'chairman' && !['chairman', 'owner', 'manager'].includes(r)) return false;
       }
-      if (agentSearch.trim()) {
-        const q = agentSearch.toLowerCase().trim();
+      if (q) {
         return st.name.toLowerCase().includes(q) || formatRoleLabel(st.role).toLowerCase().includes(q);
       }
       return true;
     });
-  }, [staffList, agentRoleFilter, agentSearch]);
+  }, [staffList, agentRoleFilter, deferredAgentSearch]);
 
-  // Active agent fallback: either selectedAgent (exact or partial match in staffList) or most active agent (staffList[0])
+  // Active agent resolution: defaults to ALL_AGENTS_ID unless URL or user specifies a staff member
   const effectiveAgent = useMemo(() => {
-    if (selectedAgent) {
-      const clean = selectedAgent.trim().toLowerCase();
-      const exact = staffList.find((s) => s.name.toLowerCase() === clean);
-      if (exact) return exact.name;
-      const partial = staffList.find((s) => {
-        const sName = s.name.toLowerCase();
-        return sName.includes(clean) || clean.includes(sName);
-      });
-      if (partial) return partial.name;
-      return selectedAgent;
+    if (!selectedAgent) return ALL_AGENTS_ID;
+    const clean = selectedAgent.trim().toLowerCase();
+    if (!clean || clean === 'all' || clean === ALL_AGENTS_ID) {
+      return ALL_AGENTS_ID;
     }
-    return staffList[0]?.name || '';
+    const exact = staffList.find((s) => s.name.toLowerCase() === clean);
+    if (exact) return exact.name;
+    const partial = staffList.find((s) => {
+      const sName = s.name.toLowerCase();
+      return sName.includes(clean) || clean.includes(sName);
+    });
+    if (partial) return partial.name;
+    return selectedAgent;
   }, [selectedAgent, staffList]);
 
-  // Synchronize state with effective agent on first load or when list updates
-  useEffect(() => {
-    if (staffList.length > 0 && !selectedAgent) {
-      setSelectedAgent(staffList[0].name);
-    }
-  }, [staffList, selectedAgent]);
+  const isAllAgents = effectiveAgent === ALL_AGENTS_ID;
 
   const selectedStaffObj = useMemo(() => {
-    if (!effectiveAgent) return null;
+    if (isAllAgents || !effectiveAgent) return null;
     const clean = effectiveAgent.trim().toLowerCase();
     return (
-      staffList.find((s) => s.name.toLowerCase() === clean) ||
+      staffByLower.get(clean) ||
       staffList.find((s) => {
         const sName = s.name.toLowerCase();
         return sName.includes(clean) || clean.includes(sName);
       }) ||
-      staffList[0] ||
       null
     );
-  }, [staffList, effectiveAgent]);
+  }, [isAllAgents, effectiveAgent, staffByLower, staffList]);
 
   const selectedMetrics = useMemo(() => {
-    if (!selectedStaffObj) {
-      return {
-        totalLeads: 0,
-        totalBooked: 0,
-        totalAttended: 0,
-        totalEnrolled: 0,
-        totalCash: 0,
-        activeStaffCount: 0,
-        bookingRate: 0,
-        showRate: 0,
-        closingRate: 0,
-      };
-    }
-    const leads = filterMode === 'all' ? selectedStaffObj.totalLeadsAssigned : selectedStaffObj.periodLeadsAssigned;
-    const booked = filterMode === 'all' ? selectedStaffObj.allTimeBooked : selectedStaffObj.bookedInPeriod;
-    const attended = filterMode === 'all' ? selectedStaffObj.allTimeAttended : selectedStaffObj.attendedInPeriod;
-    const enrolled = filterMode === 'all' ? selectedStaffObj.allTimeEnrolled : selectedStaffObj.enrolledInPeriod;
-    const cash = filterMode === 'all' ? selectedStaffObj.allTimeCash : selectedStaffObj.cashInPeriod;
+    const leads = isAllAgents
+      ? filterMode === 'all'
+        ? teamAggregate.totalLeadsAssigned
+        : teamAggregate.periodLeadsAssigned
+      : selectedStaffObj
+      ? filterMode === 'all'
+        ? selectedStaffObj.totalLeadsAssigned
+        : selectedStaffObj.periodLeadsAssigned
+      : 0;
+    const booked = isAllAgents
+      ? teamAggregate.booked
+      : selectedStaffObj
+      ? filterMode === 'all'
+        ? selectedStaffObj.allTimeBooked
+        : selectedStaffObj.bookedInPeriod
+      : 0;
+    const attended = isAllAgents
+      ? teamAggregate.attended
+      : selectedStaffObj
+      ? filterMode === 'all'
+        ? selectedStaffObj.allTimeAttended
+        : selectedStaffObj.attendedInPeriod
+      : 0;
+    const enrolled = isAllAgents
+      ? teamAggregate.enrolled
+      : selectedStaffObj
+      ? filterMode === 'all'
+        ? selectedStaffObj.allTimeEnrolled
+        : selectedStaffObj.enrolledInPeriod
+      : 0;
+    const cash = isAllAgents
+      ? teamAggregate.cash
+      : selectedStaffObj
+      ? filterMode === 'all'
+        ? selectedStaffObj.allTimeCash
+        : selectedStaffObj.cashInPeriod
+      : 0;
 
-    const bookingRate = leads > 0 ? Math.min(100, Math.round((booked / leads) * 100)) : (booked > 0 ? 100 : 0);
-    const showRate = booked > 0 ? Math.min(100, Math.round((attended / booked) * 100)) : (attended > 0 ? 100 : 0);
-    const closingRate = booked > 0 ? Math.min(100, Math.round((enrolled / booked) * 100)) : (enrolled > 0 ? 100 : 0);
+    const bookingRate = leads > 0 ? Math.min(100, Math.round((booked / leads) * 100)) : booked > 0 ? 100 : 0;
+    const showRate = booked > 0 ? Math.min(100, Math.round((attended / booked) * 100)) : attended > 0 ? 100 : 0;
+    const closingRate = booked > 0 ? Math.min(100, Math.round((enrolled / booked) * 100)) : enrolled > 0 ? 100 : 0;
 
     return {
       totalLeads: leads,
@@ -1052,12 +1866,12 @@ function TeamActivitiesPageInner() {
       totalAttended: attended,
       totalEnrolled: enrolled,
       totalCash: cash,
-      activeStaffCount: 1,
+      activeStaffCount: isAllAgents ? teamAggregate.activeStaffCount : selectedStaffObj ? 1 : 0,
       bookingRate,
       showRate,
       closingRate,
     };
-  }, [selectedStaffObj, filterMode]);
+  }, [isAllAgents, teamAggregate, selectedStaffObj, filterMode]);
 
   // Funnel calculations derived from selectedMetrics
   const funnelCalcs = useMemo(() => {
@@ -1067,25 +1881,20 @@ function TeamActivitiesPageInner() {
     const enrolled = selectedMetrics.totalEnrolled;
     const cash = selectedMetrics.totalCash;
 
-    // Step 1 -> 2: Booking conversion & drop-off
     const bookingRate = leads > 0 ? (booked / leads) * 100 : 0;
     const bookingRateStr = bookingRate > 0 && bookingRate < 10 ? bookingRate.toFixed(1) : Math.round(bookingRate).toString();
     const bookingDrop = leads > 0 ? (100 - bookingRate).toFixed(1) : '0';
 
-    // Step 2 -> 3: Show-up rate & no-show drop-off
     const showRate = booked > 0 ? (attended / booked) * 100 : 0;
     const showRateStr = Math.round(showRate).toString();
     const showDrop = booked > 0 ? Math.round(100 - showRate).toString() : '0';
 
-    // Step 3 -> 4: Closing rate (Enrolled from Attended) & drop-off
     const closeRate = attended > 0 ? (enrolled / attended) * 100 : (booked > 0 ? (enrolled / booked) * 100 : 0);
     const closeRateStr = Math.round(closeRate).toString();
     const closeDrop = attended > 0 ? Math.round(100 - closeRate).toString() : '0';
 
-    // Overall End-to-End Win Rate
     const overallWinRate = leads > 0 ? ((enrolled / leads) * 100).toFixed(1) : '0';
 
-    // Average ticket per enrolled student & per lead
     const avgPerStudent = enrolled > 0 ? Math.round(cash / enrolled) : 0;
     const avgPerLead = leads > 0 ? Math.round(cash / leads) : 0;
 
@@ -1107,55 +1916,143 @@ function TeamActivitiesPageInner() {
     };
   }, [selectedMetrics]);
 
-  const agentActivities = useMemo(() => {
-    if (!effectiveAgent) return [];
-    const target = effectiveAgent.toLowerCase();
-    return allActivitiesInPeriod.filter((a) => a.actor.toLowerCase() === target);
-  }, [allActivitiesInPeriod, effectiveAgent]);
+  /* ── Step 2: Lightweight Event-Ref Index (Single Staff OR All Agents; Hydrated Only for Visible Slice) ── */
+  const effectiveAgentLower = isAllAgents ? '' : effectiveAgent.trim().toLowerCase();
+  const matchedActorName =
+    selectedStaffObj && selectedStaffObj.name.toLowerCase() === effectiveAgentLower
+      ? selectedStaffObj.name
+      : effectiveAgent;
+  const matchedActorRole =
+    selectedStaffObj && selectedStaffObj.name.toLowerCase() === effectiveAgentLower
+      ? selectedStaffObj.role
+      : roleMap.get(effectiveAgentLower) || 'admission_officer';
 
-  const categoryCounts = useMemo(() => {
-    const counts: Record<ActivityCategory, number> = {
-      all: agentActivities.length,
-      messages: 0,
-      pipeline: 0,
-      auditions: 0,
-      followups: 0,
-      payments: 0,
-      assignments: 0,
-    };
-    for (const act of agentActivities) {
-      counts[act.category] = (counts[act.category] || 0) + 1;
-    }
-    return counts;
-  }, [agentActivities]);
+  const timelineRefs = useMemo(() => {
+    const isAllTime = filterMode === 'all';
+    const startMs = isAllTime ? 0 : periodStartMs;
+    const endMs = isAllTime ? 0 : periodEndMs;
 
-  const visibleActivities = useMemo(() => {
-    return agentActivities.filter((act) => {
-      if (categoryFilter !== 'all' && act.category !== categoryFilter) return false;
-      if (activitySearch.trim()) {
-        const q = activitySearch.toLowerCase().trim();
-        const matchLead = act.leadName.toLowerCase().includes(q);
-        const matchPhone = act.leadPhone.toLowerCase().includes(q);
-        const matchSummary = act.summary.toLowerCase().includes(q);
-        const matchDetail = act.detail.toLowerCase().includes(q);
-        const matchActor = act.actor.toLowerCase().includes(q);
-        const matchBranch = act.branch.toLowerCase().includes(q);
-        if (!matchLead && !matchPhone && !matchSummary && !matchDetail && !matchActor && !matchBranch) {
-          return false;
+    const list: TimelineEventRef[] = [];
+    if (isAllAgents) {
+      for (let i = 0; i < conversations.length; i++) {
+        const c = conversations[i];
+        const p = getParsedConversationData(c);
+        for (let j = 0; j < p.events.length; j++) {
+          const ev = p.events[j];
+          const staffInfo = staffByLower.get(ev.actorLower);
+          if (!staffInfo) continue;
+          if (!isAllTime && (ev.timestamp < startMs || ev.timestamp > endMs)) continue;
+          list.push({
+            conversationId: c.id,
+            parsed: p,
+            ev,
+            actor: staffInfo.name,
+            actorRole: staffInfo.role,
+          });
         }
+      }
+    } else if (effectiveAgentLower) {
+      for (let i = 0; i < conversations.length; i++) {
+        const c = conversations[i];
+        const p = getParsedConversationData(c);
+        if (!p.involvedActors.has(effectiveAgentLower)) continue;
+
+        for (let j = 0; j < p.events.length; j++) {
+          const ev = p.events[j];
+          if (ev.actorLower !== effectiveAgentLower) continue;
+          if (!isAllTime && (ev.timestamp < startMs || ev.timestamp > endMs)) continue;
+          list.push({
+            conversationId: c.id,
+            parsed: p,
+            ev,
+            actor: matchedActorName || ev.rawActor,
+            actorRole: matchedActorRole,
+          });
+        }
+      }
+    }
+
+    list.sort((a, b) => b.ev.timestamp - a.ev.timestamp);
+    return list;
+  }, [
+    conversations,
+    isAllAgents,
+    effectiveAgentLower,
+    matchedActorName,
+    matchedActorRole,
+    staffByLower,
+    filterMode,
+    periodStartMs,
+    periodEndMs,
+  ]);
+
+  const visibleTimelineRefs = useMemo(() => {
+    if (mainTab !== 'timeline') return [];
+    const q = deferredActivitySearch.toLowerCase().trim();
+    if (categoryFilter === 'all' && !q) {
+      return timelineRefs;
+    }
+    return timelineRefs.filter((ref) => {
+      if (categoryFilter !== 'all' && ref.ev.category !== categoryFilter) return false;
+      if (q) {
+        return (
+          ref.parsed.leadNameLower.includes(q) ||
+          ref.parsed.leadPhoneLower.includes(q) ||
+          ref.ev.summary.toLowerCase().includes(q) ||
+          ref.ev.detail.toLowerCase().includes(q) ||
+          ref.actor.toLowerCase().includes(q) ||
+          ref.parsed.branchLower.includes(q)
+        );
       }
       return true;
     });
-  }, [agentActivities, categoryFilter, activitySearch]);
+  }, [mainTab, timelineRefs, categoryFilter, deferredActivitySearch]);
+
+  const displayedActivities = useMemo(() => {
+    const slice = visibleTimelineRefs.slice(0, visibleTimelineCount);
+    const out: EnrichedActivity[] = new Array(slice.length);
+    for (let i = 0; i < slice.length; i++) {
+      const ref = slice[i];
+      const p = ref.parsed;
+      const ev = ref.ev;
+      out[i] = {
+        id: ev.id,
+        conversationId: ref.conversationId,
+        leadName: p.leadName,
+        leadPhone: p.leadPhone,
+        channel: p.channel,
+        branch: p.branch,
+        pipeline: p.pipeline,
+        type: ev.type,
+        category: ev.category,
+        actor: ref.actor,
+        actorRole: ref.actorRole,
+        summary: ev.summary,
+        detail: ev.detail,
+        fromValue: ev.fromValue,
+        toValue: ev.toValue,
+        timestamp: ev.timestamp,
+        dateKey: '',
+      };
+    }
+    return out;
+  }, [visibleTimelineRefs, visibleTimelineCount]);
+
+  const hasMoreTimeline = visibleTimelineCount < visibleTimelineRefs.length;
 
   const groupedActivities = useMemo(() => {
+    if (mainTab !== 'timeline' || displayedActivities.length === 0) return [];
     const groups: { dateKey: string; label: string; items: EnrichedActivity[] }[] = [];
     const map = new Map<string, EnrichedActivity[]>();
-    for (const item of visibleActivities) {
-      if (!map.has(item.dateKey)) {
-        map.set(item.dateKey, []);
+    for (let i = 0; i < displayedActivities.length; i++) {
+      const item = displayedActivities[i];
+      const dateKey = isoDateFromMs(item.timestamp);
+      let bucket = map.get(dateKey);
+      if (!bucket) {
+        bucket = [];
+        map.set(dateKey, bucket);
       }
-      map.get(item.dateKey)!.push(item);
+      bucket.push(item);
     }
     map.forEach((items, dateKey) => {
       groups.push({
@@ -1165,51 +2062,81 @@ function TeamActivitiesPageInner() {
       });
     });
     return groups;
-  }, [visibleActivities, todayKey, yesterdayKey]);
+  }, [mainTab, displayedActivities, todayKey, yesterdayKey]);
 
   const agentAssignedLeads = useMemo(() => {
-    if (!effectiveAgent) return [];
-    const base = conversations.filter(
-      (c) => (c.agent || '').trim().toLowerCase() === effectiveAgent.toLowerCase()
-    );
+    if (!isAllAgents && !effectiveAgentLower) return [];
+    const q = deferredActivitySearch.toLowerCase().trim();
+    const res: Conversation[] = [];
+    for (let i = 0; i < conversations.length; i++) {
+      const c = conversations[i];
+      const p = getParsedConversationData(c);
+      if (isAllAgents) {
+        if (!p.assignedAgent || p.assignedAgent === 'Unassigned') continue;
+      } else if (p.assignedAgentLower !== effectiveAgentLower) {
+        continue;
+      }
+      if (filterMode !== 'all' && (!p.createdTs || p.createdTs < periodStartMs || p.createdTs > periodEndMs)) {
+        continue;
+      }
+      if (q) {
+        if (
+          !p.leadNameLower.includes(q) &&
+          !p.leadPhoneLower.includes(q) &&
+          !p.pipelineLower.includes(q) &&
+          !p.branchLower.includes(q) &&
+          !(isAllAgents && p.assignedAgentLower.includes(q))
+        ) {
+          continue;
+        }
+      }
+      res.push(c);
+    }
+    return res;
+  }, [conversations, isAllAgents, effectiveAgentLower, filterMode, periodStartMs, periodEndMs, deferredActivitySearch]);
 
-    if (!activitySearch.trim()) return base;
-    const q = activitySearch.toLowerCase().trim();
-    return base.filter((c) => {
-      const name = getDisplayName(c).toLowerCase();
-      const phone = (c.phone || '').toLowerCase();
-      const stage = (c.pipeline || '').toLowerCase();
-      const branch = (c.branch || '').toLowerCase();
-      return name.includes(q) || phone.includes(q) || stage.includes(q) || branch.includes(q);
-    });
-  }, [conversations, effectiveAgent, activitySearch]);
+  const displayedLeads = useMemo(() => {
+    if (mainTab !== 'leads') return [];
+    return agentAssignedLeads.slice(0, visibleLeadsCount);
+  }, [mainTab, agentAssignedLeads, visibleLeadsCount]);
 
-  // Operational breakdown: Current stage distribution & acquisition channels
+  const hasMoreLeads = visibleLeadsCount < agentAssignedLeads.length;
+
+  // Operational breakdown: Computed only when Funnel tab is active
   const agentPipelineBreakdown = useMemo(() => {
-    if (!effectiveAgent) return { stages: [], channels: [], total: 0 };
-    const allLeads = conversations.filter(
-      (c) => (c.agent || '').trim().toLowerCase() === effectiveAgent.toLowerCase()
-    );
-    const total = allLeads.length;
+    if (mainTab !== 'funnel' || (!isAllAgents && !effectiveAgentLower)) {
+      return { stages: [], channels: [], total: 0 };
+    }
 
+    let total = 0;
     const stageMap: Record<string, number> = {};
-    const channelMap: Record<string, number> = {};
-
-    const channelCounts: Record<"WhatsApp" | "Instagram" | "Messenger", number> = {
+    const channelCounts: Record<'WhatsApp' | 'Instagram' | 'Messenger', number> = {
       WhatsApp: 0,
       Instagram: 0,
       Messenger: 0,
     };
 
-    allLeads.forEach((c) => {
-      const s = (c.pipeline || 'New').trim();
+    for (let i = 0; i < conversations.length; i++) {
+      const c = conversations[i];
+      const p = getParsedConversationData(c);
+      if (isAllAgents) {
+        if (!p.assignedAgent || p.assignedAgent === 'Unassigned') continue;
+      } else if (p.assignedAgentLower !== effectiveAgentLower) {
+        continue;
+      }
+      if (filterMode !== 'all' && (!p.createdTs || p.createdTs < periodStartMs || p.createdTs > periodEndMs)) {
+        continue;
+      }
+
+      total += 1;
+      const s = p.pipeline.trim();
       stageMap[s] = (stageMap[s] || 0) + 1;
 
       const ch = (c.channel || '').toLowerCase();
       if (ch.includes('wa') || ch.includes('whatsapp')) channelCounts.WhatsApp += 1;
       else if (ch.includes('ig') || ch.includes('instagram')) channelCounts.Instagram += 1;
       else if (ch.includes('fb') || ch.includes('messenger') || ch.includes('facebook')) channelCounts.Messenger += 1;
-    });
+    }
 
     const orderedStages = ['New', 'Contacted', 'Qualified', 'Audition Booked', 'Attended', 'Enrolled', 'Joining Later', 'Unqualified', 'Lost'];
     Object.keys(stageMap).forEach((s) => {
@@ -1234,11 +2161,68 @@ function TeamActivitiesPageInner() {
     }));
 
     return { stages, channels, total };
-  }, [conversations, effectiveAgent]);
+  }, [mainTab, conversations, isAllAgents, effectiveAgentLower, filterMode, periodStartMs, periodEndMs]);
+
+  // Incremental loading via IntersectionObserver for Timeline and Leads tabs
+  useEffect(() => {
+    if (mainTab !== 'timeline' || !hasMoreTimeline) return;
+    const root = scrollContainerRef.current;
+    const target = timelineSentinelRef.current;
+    if (!root || !target || typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          setVisibleTimelineCount((prev) => Math.min(prev + TIMELINE_BATCH_SIZE, visibleTimelineRefs.length));
+        }
+      },
+      { root, rootMargin: '400px 0px' }
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [mainTab, hasMoreTimeline, visibleTimelineRefs.length, feedViewStyle]);
+
+  useEffect(() => {
+    if (mainTab !== 'leads' || !hasMoreLeads) return;
+    const root = scrollContainerRef.current;
+    const target = leadsSentinelRef.current;
+    if (!root || !target || typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          setVisibleLeadsCount((prev) => Math.min(prev + LEADS_BATCH_SIZE, agentAssignedLeads.length));
+        }
+      },
+      { root, rootMargin: '400px 0px' }
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [mainTab, hasMoreLeads, agentAssignedLeads.length]);
 
   const handleSelectAgent = useCallback((name: string) => {
-    setSelectedAgent(name);
+    setUserPickedAgent({ agent: name, urlAtPick: cleanUrlAgent });
     setMobileAgentsOpen(false);
+    setVisibleTimelineCount(TIMELINE_BATCH_SIZE);
+    setVisibleLeadsCount(LEADS_BATCH_SIZE);
+    scrollContainerRef.current?.scrollTo({ top: 0 });
+  }, [cleanUrlAgent]);
+
+  const handleMainTabChange = useCallback((tab: 'timeline' | 'funnel' | 'leads') => {
+    setMainTab(tab);
+    if (tab === 'timeline') setVisibleTimelineCount(TIMELINE_BATCH_SIZE);
+    if (tab === 'leads') setVisibleLeadsCount(LEADS_BATCH_SIZE);
+  }, []);
+
+  const handleFeedViewStyleChange = useCallback((style: 'timeline' | 'compact') => {
+    setFeedViewStyle(style);
+    setVisibleTimelineCount(TIMELINE_BATCH_SIZE);
+  }, []);
+
+  const handleActivitySearchChange = useCallback((value: string) => {
+    setActivitySearch(value);
+    setVisibleTimelineCount(TIMELINE_BATCH_SIZE);
+    setVisibleLeadsCount(LEADS_BATCH_SIZE);
   }, []);
 
   return (
@@ -1248,6 +2232,7 @@ function TeamActivitiesPageInner() {
     >
       {/* ── MAIN PAGE (LEFT / CENTER): Selected Agent's Activities & Leads ── */}
       <div
+        ref={scrollContainerRef}
         className="flex-1 flex flex-col min-w-0 min-h-0 overflow-y-auto"
         style={{ background: 'var(--bg-page)', color: 'var(--text-primary)', WebkitOverflowScrolling: 'touch' }}
       >
@@ -1261,64 +2246,103 @@ function TeamActivitiesPageInner() {
               border: '1px solid var(--border-main)',
             }}
           >
-            {/* Top Profile Header: Perfectly Aligned Profile Picture + Agent Identity */}
+            {/* Top Profile Header: All Agents Team Summary OR Selected Staff Profile */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5">
               <div className="flex items-center gap-5 sm:gap-6 min-w-0 flex-1">
-                {/* Profile Picture: Sized at 108px, rounded-2xl, object-cover with subtle border */}
+                {/* Profile Picture / Team Icon Container */}
                 <div className="shrink-0">
-                  <img
-                    src={selectedStaffObj?.avatar || '/logo.png'}
-                    alt={selectedStaffObj?.name || effectiveAgent}
-                    onError={(e) => {
-                      (e.currentTarget as HTMLImageElement).src = '/logo.png';
-                    }}
-                    className="w-24 h-24 sm:w-[104px] sm:h-[104px] md:w-[108px] md:h-[108px] rounded-2xl object-cover shrink-0 shadow-xs"
-                    style={{ border: '1px solid var(--border-main)' }}
-                  />
+                  {isAllAgents ? (
+                    <div
+                      className="w-24 h-24 sm:w-[104px] sm:h-[104px] md:w-[108px] md:h-[108px] rounded-2xl flex items-center justify-center shrink-0 shadow-xs"
+                      style={{
+                        background: 'var(--bg-pill)',
+                        border: '1px solid var(--border-main)',
+                        color: 'var(--text-primary)',
+                      }}
+                    >
+                      <Users className="w-10 h-10" />
+                    </div>
+                  ) : (
+                    <img
+                      src={selectedStaffObj?.avatar || '/logo.png'}
+                      alt={selectedStaffObj?.name || effectiveAgent}
+                      onError={(e) => {
+                        (e.currentTarget as HTMLImageElement).src = '/logo.png';
+                      }}
+                      className="w-24 h-24 sm:w-[104px] sm:h-[104px] md:w-[108px] md:h-[108px] rounded-2xl object-cover shrink-0 shadow-xs"
+                      style={{ border: '1px solid var(--border-main)' }}
+                    />
+                  )}
                 </div>
 
-                {/* Agent Details: Perfectly Aligned */}
+                {/* Identity & Contact/Activity Summary */}
                 <div className="min-w-0 flex-1 flex flex-col justify-center gap-1 sm:gap-1.5">
-                  {/* Name */}
                   <h1 className="text-[22px] sm:text-[24px] font-bold tracking-tight text-[var(--text-primary)] leading-tight">
-                    {selectedStaffObj?.name || effectiveAgent}
+                    {isAllAgents ? 'All Agents' : selectedStaffObj?.name || effectiveAgent}
                   </h1>
 
-                  {/* Role Under the Name (Clean text without background) */}
-                  {selectedStaffObj && (
+                  {isAllAgents ? (
                     <p
                       className="text-[13px] font-medium leading-none"
                       style={{ color: 'var(--text-secondary)' }}
                     >
-                      {formatRoleLabel(selectedStaffObj.role)}
+                      Team Operations · {staffList.length} staff members
                     </p>
-                  )}
-
-                  {/* Contact & Activity */}
-                  <div className="flex items-center gap-3 text-[12px] flex-wrap mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                    {selectedStaffObj?.email && (
-                      <a
-                        href={`mailto:${selectedStaffObj.email}`}
-                        className="inline-flex items-center gap-1.5 hover:underline truncate"
+                  ) : (
+                    selectedStaffObj && (
+                      <p
+                        className="text-[13px] font-medium leading-none"
                         style={{ color: 'var(--text-secondary)' }}
                       >
-                        <Mail className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
-                        <span className="truncate">{selectedStaffObj.email}</span>
-                      </a>
-                    )}
+                        {formatRoleLabel(selectedStaffObj.role)}
+                      </p>
+                    )
+                  )}
 
-                    {selectedStaffObj?.email && (
-                      <span style={{ color: 'var(--border-input)' }}>•</span>
-                    )}
+                  <div className="flex items-center gap-3 text-[12px] flex-wrap mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                    {isAllAgents ? (
+                      <>
+                        <span className="inline-flex items-center gap-1.5">
+                          <Users className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+                          <span>{teamAggregate.activeStaffCount} active in {periodDescription}</span>
+                        </span>
+                        <span style={{ color: 'var(--border-input)' }}>•</span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <Clock className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+                          <span>
+                            {teamAggregate.lastActiveAt > 0
+                              ? `Last active ${formatCompactRelativeTime(teamAggregate.lastActiveAt, todayStartMs)}`
+                              : 'No recent activity'}
+                          </span>
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        {selectedStaffObj?.email && (
+                          <a
+                            href={`mailto:${selectedStaffObj.email}`}
+                            className="inline-flex items-center gap-1.5 hover:underline truncate"
+                            style={{ color: 'var(--text-secondary)' }}
+                          >
+                            <Mail className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+                            <span className="truncate">{selectedStaffObj.email}</span>
+                          </a>
+                        )}
 
-                    <span className="inline-flex items-center gap-1.5">
-                      <Clock className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
-                      <span>
-                        {selectedStaffObj?.lastActiveAt && selectedStaffObj.lastActiveAt > 0
-                          ? `Last active ${formatCompactRelativeTime(selectedStaffObj.lastActiveAt)}`
-                          : 'No recent activity'}
-                      </span>
-                    </span>
+                        {selectedStaffObj?.email && (
+                          <span style={{ color: 'var(--border-input)' }}>•</span>
+                        )}
+
+                        <span className="inline-flex items-center gap-1.5">
+                          <Clock className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+                          <span>
+                            {selectedStaffObj?.lastActiveAt && selectedStaffObj.lastActiveAt > 0
+                              ? `Last active ${formatCompactRelativeTime(selectedStaffObj.lastActiveAt, todayStartMs)}`
+                              : 'No recent activity'}
+                          </span>
+                        </span>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1334,16 +2358,179 @@ function TeamActivitiesPageInner() {
                 Agents ({staffList.length})
               </button>
             </div>
+
+            {/* Date Filter Strip */}
+            <div
+              className="mt-5 pt-4 flex flex-wrap items-center justify-between gap-2.5"
+              style={{ borderTop: '1px solid var(--border-main)' }}
+            >
+              {/* Quick Date Presets */}
+              <div
+                className="flex items-center gap-1 p-1 rounded-xl flex-wrap"
+                style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}
+              >
+                {[
+                  { id: 'all', label: 'All Time', active: filterMode === 'all', onClick: goAllTime },
+                  { id: 'today', label: 'Today', active: isToday, onClick: goToday },
+                  { id: 'yesterday', label: 'Yesterday', active: isYesterday, onClick: goYesterday },
+                  { id: 'this_week', label: 'This Week', active: isThisWeek, onClick: goThisWeek },
+                  { id: 'last_week', label: 'Last Week', active: isLastWeek, onClick: goLastWeek },
+                  { id: 'range', label: 'Custom', active: filterMode === 'range', onClick: goCustomRange },
+                ].map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={preset.onClick}
+                    className="h-[26px] px-2.5 text-[11px] font-semibold rounded-lg transition-colors cursor-pointer"
+                    style={
+                      preset.active
+                        ? { background: 'var(--text-primary)', color: 'var(--bg-card)' }
+                        : { background: 'transparent', color: 'var(--text-secondary)' }
+                    }
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Date Stepper / Date Picker / Custom Range Inputs */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {filterMode === 'all' ? (
+                  <span
+                    className="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 h-[28px] rounded-[7px]"
+                    style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}
+                  >
+                    <Calendar className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                    Showing all dates
+                  </span>
+                ) : filterMode === 'range' ? (
+                  <>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+                        From
+                      </span>
+                      <input
+                        type="date"
+                        value={customStartDate}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (!val) return;
+                          setCustomStartDate(val);
+                          if (val > customEndDate) setCustomEndDate(val);
+                          resetPagedWindows();
+                        }}
+                        className="h-[28px] text-[11px] font-medium rounded-[7px] px-2 outline-none cursor-pointer transition-colors"
+                        style={{
+                          background: 'var(--bg-pill)',
+                          border: '1px solid var(--border-input)',
+                          color: 'var(--text-primary)',
+                        }}
+                        aria-label="Start date"
+                        title="Range start date"
+                      />
+                      <ArrowRight className="w-3 h-3 shrink-0" style={{ color: 'var(--text-muted)' }} />
+                      <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+                        To
+                      </span>
+                      <input
+                        type="date"
+                        value={customEndDate}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (!val) return;
+                          setCustomEndDate(val);
+                          if (val < customStartDate) setCustomStartDate(val);
+                          resetPagedWindows();
+                        }}
+                        className="h-[28px] text-[11px] font-medium rounded-[7px] px-2 outline-none cursor-pointer transition-colors"
+                        style={{
+                          background: 'var(--bg-pill)',
+                          border: '1px solid var(--border-input)',
+                          color: 'var(--text-primary)',
+                        }}
+                        aria-label="End date"
+                        title="Range end date"
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => stepPeriod(-1)}
+                      className="h-[28px] w-[28px] flex items-center justify-center rounded-[7px] transition-colors cursor-pointer hover:opacity-80"
+                      style={{
+                        background: 'var(--bg-pill)',
+                        border: '1px solid var(--border-input)',
+                        color: 'var(--text-secondary)',
+                      }}
+                      title={filterMode === 'day' ? 'Previous Day' : 'Previous Week'}
+                      aria-label={filterMode === 'day' ? 'Previous Day' : 'Previous Week'}
+                    >
+                      <ChevronLeft className="w-3.5 h-3.5" />
+                    </button>
+
+                    <div
+                      className="h-[28px] px-2.5 flex items-center gap-1.5 text-[11px] font-semibold rounded-[7px]"
+                      style={{
+                        background: 'var(--bg-pill)',
+                        border: '1px solid var(--border-input)',
+                        color: 'var(--text-primary)',
+                      }}
+                      title={periodDescription}
+                    >
+                      <Calendar className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--text-secondary)' }} />
+                      <span className="whitespace-nowrap">
+                        {filterMode === 'day' ? formatDayLabel(dayStart) : formatRangeLabel(weekStart, weekEnd)}
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => stepPeriod(1)}
+                      className="h-[28px] w-[28px] flex items-center justify-center rounded-[7px] transition-colors cursor-pointer hover:opacity-80"
+                      style={{
+                        background: 'var(--bg-pill)',
+                        border: '1px solid var(--border-input)',
+                        color: 'var(--text-secondary)',
+                      }}
+                      title={filterMode === 'day' ? 'Next Day' : 'Next Week'}
+                      aria-label={filterMode === 'day' ? 'Next Day' : 'Next Week'}
+                    >
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+
+                    <input
+                      type="date"
+                      value={isoDate(currentDate)}
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          setCurrentDate(parseIsoInputDate(e.target.value, todayStart));
+                          resetPagedWindows();
+                        }
+                      }}
+                      className="h-[28px] text-[11px] font-medium rounded-[7px] px-2 outline-none cursor-pointer transition-colors"
+                      style={{
+                        background: 'var(--bg-pill)',
+                        border: '1px solid var(--border-input)',
+                        color: 'var(--text-primary)',
+                      }}
+                      title={filterMode === 'day' ? 'Jump to date' : 'Jump to week containing date'}
+                      aria-label="Pick date"
+                    />
+                  </>
+                )}
+              </div>
+            </div>
           </div>
         </div>
 
         {/* ── TABS & STREAM CONTROLS (Moved down below the card, sticky) ── */}
         <div
-          className="sticky top-0 z-20 px-5 sm:px-7 lg:px-8 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0"
+          className="sticky top-0 z-20 px-5 sm:px-7 lg:px-8 py-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3 flex-wrap shrink-0"
           style={{
             background: 'var(--bg-page)',
             borderBottom: '1px solid var(--border-main)',
-            backdropFilter: 'blur(8px)',
           }}
         >
           {/* Left: Navigation Tabs */}
@@ -1353,7 +2540,7 @@ function TeamActivitiesPageInner() {
           >
             <button
               type="button"
-              onClick={() => setMainTab('timeline')}
+              onClick={() => handleMainTabChange('timeline')}
               className="h-[30px] px-3.5 text-[12px] font-semibold rounded-lg flex items-center gap-2 cursor-pointer transition-all"
               style={
                 mainTab === 'timeline'
@@ -1371,13 +2558,13 @@ function TeamActivitiesPageInner() {
                   border: mainTab === 'timeline' ? '1px solid var(--border-input)' : 'none',
                 }}
               >
-                {agentActivities.length}
+                {timelineRefs.length}
               </span>
             </button>
 
             <button
               type="button"
-              onClick={() => setMainTab('funnel')}
+              onClick={() => handleMainTabChange('funnel')}
               className="h-[30px] px-3.5 text-[12px] font-semibold rounded-lg flex items-center gap-2 cursor-pointer transition-all"
               style={
                 mainTab === 'funnel'
@@ -1401,7 +2588,7 @@ function TeamActivitiesPageInner() {
 
             <button
               type="button"
-              onClick={() => setMainTab('leads')}
+              onClick={() => handleMainTabChange('leads')}
               className="h-[30px] px-3.5 text-[12px] font-semibold rounded-lg flex items-center gap-2 cursor-pointer transition-all"
               style={
                 mainTab === 'leads'
@@ -1424,8 +2611,32 @@ function TeamActivitiesPageInner() {
             </button>
           </div>
 
-          {/* Right: Presentation Toggle + Search */}
-          <div className="flex items-center gap-2 shrink-0">
+          {/* Right: Active Date Pill + Presentation Toggle + Search */}
+          <div className="flex items-center gap-2 shrink-0 flex-wrap">
+            {filterMode !== 'all' && (
+              <div
+                className="h-[28px] pl-2.5 pr-1.5 rounded-[7px] flex items-center gap-1.5 text-[11px] font-semibold shrink-0"
+                style={{
+                  background: 'var(--bg-pill)',
+                  border: '1px solid var(--border-input)',
+                  color: 'var(--text-primary)',
+                }}
+                title={`Filtered by date: ${periodDescription}`}
+              >
+                <Calendar className="w-3 h-3 shrink-0" style={{ color: 'var(--text-secondary)' }} />
+                <span className="max-w-[165px] truncate">{periodDescription}</span>
+                <button
+                  type="button"
+                  onClick={goAllTime}
+                  className="p-0.5 rounded hover:opacity-70 cursor-pointer"
+                  title="Clear date filter (show All Time)"
+                  aria-label="Clear date filter"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            )}
+
             {mainTab === 'timeline' && (
               <div
                 className="flex items-center gap-0.5 p-0.5 rounded-[7px] shrink-0"
@@ -1433,7 +2644,7 @@ function TeamActivitiesPageInner() {
               >
                 <button
                   type="button"
-                  onClick={() => setFeedViewStyle('timeline')}
+                  onClick={() => handleFeedViewStyleChange('timeline')}
                   className="h-[26px] px-2.5 text-[11px] font-semibold rounded-[5px] flex items-center gap-1 cursor-pointer transition-colors"
                   style={
                     feedViewStyle === 'timeline'
@@ -1447,7 +2658,7 @@ function TeamActivitiesPageInner() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setFeedViewStyle('compact')}
+                  onClick={() => handleFeedViewStyleChange('compact')}
                   className="h-[26px] px-2.5 text-[11px] font-semibold rounded-[5px] flex items-center gap-1 cursor-pointer transition-colors"
                   style={
                     feedViewStyle === 'compact'
@@ -1471,8 +2682,16 @@ function TeamActivitiesPageInner() {
                 <input
                   type="text"
                   value={activitySearch}
-                  onChange={(e) => setActivitySearch(e.target.value)}
-                  placeholder={mainTab === 'timeline' ? 'Search event, lead...' : 'Search lead, phone...'}
+                  onChange={(e) => handleActivitySearchChange(e.target.value)}
+                  placeholder={
+                    mainTab === 'timeline'
+                      ? isAllAgents
+                        ? 'Search event, lead, staff...'
+                        : 'Search event, lead...'
+                      : isAllAgents
+                      ? 'Search lead, phone, staff...'
+                      : 'Search lead, phone...'
+                  }
                   className="w-full h-[28px] pl-8 pr-6 text-[11px] rounded-[7px] outline-none transition-colors"
                   style={{
                     background: 'var(--bg-card)',
@@ -1483,7 +2702,7 @@ function TeamActivitiesPageInner() {
                 {activitySearch && (
                   <button
                     type="button"
-                    onClick={() => setActivitySearch('')}
+                    onClick={() => handleActivitySearchChange('')}
                     className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer"
                     style={{ color: 'var(--text-muted)' }}
                   >
@@ -1498,11 +2717,7 @@ function TeamActivitiesPageInner() {
         {/* ── Content Body (Full Width: Timeline Stream OR Conversion Funnel OR Assigned Leads) ── */}
         <div className="flex-1 px-5 sm:px-7 lg:px-8 py-6">
           {loading ? (
-            <div className="flex items-center justify-center py-24">
-              <p className="text-[12px]" style={{ color: 'var(--text-secondary)' }}>
-                Loading operations stream...
-              </p>
-            </div>
+            <TimelineSkeleton />
           ) : mainTab === 'timeline' ? (
                 groupedActivities.length === 0 ? (
                   <div
@@ -1519,7 +2734,7 @@ function TeamActivitiesPageInner() {
                       No activities recorded
                     </p>
                     <p className="text-[12px] mt-1" style={{ color: 'var(--text-secondary)' }}>
-                      No actions recorded for {selectedStaffObj?.name || effectiveAgent || 'this staff member'} in {periodDescription}.
+                      No actions recorded for {isAllAgents ? 'the team' : selectedStaffObj?.name || effectiveAgent || 'this staff member'} in {periodDescription}.
                     </p>
                     {filterMode !== 'all' && (
                       <button
@@ -1533,7 +2748,7 @@ function TeamActivitiesPageInner() {
                     )}
                   </div>
                 ) : feedViewStyle === 'timeline' ? (
-                  /* ── 1. TIMELINE FEED: Elegant Full-Width Formal Stream ── */
+                  /* ── 1. TIMELINE FEED: Incremental Windowed Stream ── */
                   <div className="w-full space-y-8">
                 {groupedActivities.map((group) => (
                   <div key={group.dateKey}>
@@ -1553,335 +2768,117 @@ function TeamActivitiesPageInner() {
 
                     {/* Timeline Node Thread */}
                     <div className="space-y-4 pl-1 sm:pl-2">
-                      {group.items.map((act) => {
-                        const actionPhrase = getNaturalActionPhrase(act);
-                        const isMessage = act.type === 'message_sent';
-                        const isAudition = act.type === 'audition_booked' || act.type === 'audition_outcome';
-                        const isPayment = act.type === 'cash_recorded';
-                        const isStage = act.type === 'stage_changed';
-                        const isFollowup = act.type === 'followup_scheduled' || act.type === 'followup_completed';
-                        const isAssignment = act.type === 'lead_assigned';
-
-                        // Minimal formal node styling
-                        let NodeIcon = Clock;
-                        if (isPayment) NodeIcon = Banknote;
-                        else if (isAudition) NodeIcon = act.type === 'audition_outcome' ? Award : Calendar;
-                        else if (isMessage) NodeIcon = MessageSquare;
-                        else if (isStage) NodeIcon = ArrowRight;
-                        else if (isAssignment) NodeIcon = UserCheck;
-                        else if (isFollowup) NodeIcon = act.type === 'followup_completed' ? CheckCircle2 : Clock;
-
-                        const nodeBg = 'var(--bg-card)';
-                        const nodeColor = 'var(--text-secondary)';
-                        const nodeBorder = 'var(--border-main)';
-
-                        return (
-                          <div
-                            key={act.id}
-                            className="relative pl-8 sm:pl-10 group"
-                          >
-                            {/* Vertical connecting spine */}
-                            <div
-                              className="absolute left-[13px] sm:left-[15px] top-7 bottom-[-16px] w-[1.5px] group-last:hidden"
-                              style={{ background: 'var(--border-main)' }}
-                            />
-
-                            {/* Node icon pill on the spine */}
-                            <div
-                              className="absolute left-0 top-0.5 w-[26px] sm:w-[28px] h-[26px] sm:h-[28px] rounded-full flex items-center justify-center shrink-0 z-10 transition-colors"
-                              style={{
-                                background: nodeBg,
-                                color: nodeColor,
-                                border: `1px solid ${nodeBorder}`,
-                              }}
-                            >
-                              <NodeIcon className="w-3.5 h-3.5" />
-                            </div>
-
-                            {/* Event Main Block */}
-                            <div
-                              className="p-3.5 rounded-xl transition-all"
-                              style={{
-                                background: 'var(--bg-card)',
-                                border: '1px solid var(--border-main)',
-                                boxShadow: '0 1px 3px rgba(0,0,0,0.02)',
-                              }}
-                            >
-                              {/* Top Bar: Natural Action + Lead + Timestamp + Chat Hover Button */}
-                              <div className="flex items-start sm:items-center justify-between gap-2">
-                                <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-                                  <span className="text-[12px]" style={{ color: 'var(--text-secondary)' }}>
-                                    {actionPhrase.charAt(0).toUpperCase() + actionPhrase.slice(1)}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => openChat(act.conversationId)}
-                                    className="font-bold text-[12px] hover:underline cursor-pointer truncate max-w-[220px]"
-                                    style={{ color: 'var(--text-primary)' }}
-                                    title="Open conversation"
-                                  >
-                                    {act.leadName}
-                                  </button>
-                                  <span
-                                    className="text-[9px] font-bold px-1.5 py-0.2 rounded"
-                                    style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}
-                                  >
-                                    {act.channel}
-                                  </span>
-                                </div>
-
-                                <div className="flex items-center gap-2 shrink-0">
-                                  <span className="text-[11px] font-mono" style={{ color: 'var(--text-muted)' }}>
-                                    {formatTime24Or12(act.timestamp)}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => openChat(act.conversationId)}
-                                    className="h-6 px-2.5 rounded-[5px] text-[10px] font-semibold flex items-center gap-1 transition-opacity opacity-75 group-hover:opacity-100 cursor-pointer"
-                                    style={{
-                                      background: 'var(--bg-pill)',
-                                      border: '1px solid var(--border-input)',
-                                      color: 'var(--text-primary)',
-                                    }}
-                                  >
-                                    <MessageSquare className="w-3 h-3" />
-                                    Chat
-                                  </button>
-                                </div>
-                              </div>
-
-                              {/* Substance / Detail Box (Indented & Elegant) */}
-                              {isMessage && act.detail && (
-                                <div
-                                  className="mt-2.5 p-2.5 rounded-lg text-[11px] leading-relaxed max-w-3xl"
-                                  style={{
-                                    background: 'var(--bg-pill)',
-                                    color: 'var(--text-primary)',
-                                    border: '1px solid var(--border-input)',
-                                  }}
-                                >
-                                  <span className="italic select-none opacity-60 mr-1">“</span>
-                                  <span>{act.detail}</span>
-                                  <span className="italic select-none opacity-60 ml-1">”</span>
-                                </div>
-                              )}
-
-                              {isAudition && (
-                                <div className="mt-2.5 flex items-center gap-2 flex-wrap text-[11px]">
-                                  <div
-                                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-semibold"
-                                    style={{ background: 'var(--bg-pill)', color: 'var(--text-primary)', border: '1px solid var(--border-input)' }}
-                                  >
-                                    <Calendar className="w-3 h-3 text-[var(--text-muted)]" />
-                                    <span>{act.summary}</span>
-                                  </div>
-                                  {act.branch && (
-                                    <div
-                                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md"
-                                      style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}
-                                    >
-                                      <span>📍 {act.branch}</span>
-                                    </div>
-                                  )}
-                                  <span
-                                    className="text-[10px] font-semibold px-2 py-0.5 rounded-full inline-flex items-center gap-1"
-                                    style={getStageBadgeStyle(act.pipeline)}
-                                  >
-                                    <span
-                                      className="w-1.5 h-1.5 rounded-full"
-                                      style={{ background: getStageColor(act.pipeline) }}
-                                    />
-                                    {act.pipeline}
-                                  </span>
-                                </div>
-                              )}
-
-                              {isPayment && (
-                                <div className="mt-2.5 flex items-center gap-2.5 flex-wrap text-[11px]">
-                                  <div
-                                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md font-bold"
-                                    style={{
-                                      background: 'var(--bg-pill)',
-                                      border: '1px solid var(--border-input)',
-                                      color: 'var(--text-primary)',
-                                    }}
-                                  >
-                                    <Banknote className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-                                    <span>{act.summary}</span>
-                                  </div>
-                                  {act.branch && (
-                                    <span style={{ color: 'var(--text-secondary)' }}>· {act.branch}</span>
-                                  )}
-                                  {act.detail && act.detail !== act.summary && (
-                                    <span style={{ color: 'var(--text-muted)' }}>({act.detail})</span>
-                                  )}
-                                </div>
-                              )}
-
-                              {isStage && (
-                                <div className="mt-2 flex items-center gap-1.5 text-[11px]">
-                                  <span
-                                    className="px-2 py-0.5 rounded-md font-semibold"
-                                    style={getStageBadgeStyle(act.fromValue || 'New')}
-                                  >
-                                    {act.fromValue || 'New'}
-                                  </span>
-                                  <ArrowRight className="w-3 h-3" style={{ color: 'var(--text-muted)' }} />
-                                  <span
-                                    className="px-2.5 py-0.5 rounded-md font-semibold"
-                                    style={getStageBadgeStyle(act.toValue || act.pipeline)}
-                                  >
-                                    {act.toValue || act.pipeline}
-                                  </span>
-                                </div>
-                              )}
-
-                              {isFollowup && (
-                                <div className="mt-2 flex items-center gap-2 text-[11px]">
-                                  <div
-                                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md font-medium"
-                                    style={{ background: 'var(--bg-pill)', color: 'var(--text-primary)' }}
-                                  >
-                                    {act.type === 'followup_completed' ? (
-                                      <CheckCircle2 className="w-3 h-3 text-emerald-500 shrink-0" />
-                                    ) : (
-                                      <Clock className="w-3 h-3 text-amber-500 shrink-0" />
-                                    )}
-                                    <span>{act.summary}</span>
-                                  </div>
-                                  {act.detail && (
-                                    <span className="truncate" style={{ color: 'var(--text-secondary)' }}>
-                                      {act.detail}
-                                    </span>
-                                  )}
-                                </div>
-                              )}
-
-                              {!isMessage && !isAudition && !isPayment && !isStage && !isFollowup && act.detail && (
-                                <div className="mt-2 text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>
-                                  {act.detail}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              /* ── 2. COMPACT STREAM: Borderless, High-Density Scanning View (Full Width) ── */
-              <div
-                className="w-full rounded-xl overflow-hidden shadow-xs"
-                style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
-              >
-                {groupedActivities.map((group, groupIdx) => (
-                  <div key={group.dateKey}>
-                    {/* Compact Section Divider */}
-                    <div
-                      className="px-4 py-2 flex items-center justify-between text-[10px] font-bold uppercase tracking-wider"
-                      style={{
-                        background: 'var(--bg-table-header)',
-                        color: 'var(--text-secondary)',
-                        borderTop: groupIdx > 0 ? '1px solid var(--border-main)' : undefined,
-                      }}
-                    >
-                      <span>{group.label}</span>
-                      <span className="font-normal" style={{ color: 'var(--text-muted)' }}>
-                        {group.items.length} events
-                      </span>
-                    </div>
-
-                    <div className="divide-y" style={{ borderColor: 'var(--border-main)' }}>
                       {group.items.map((act) => (
-                        <div
+                        <TimelineEventCard
                           key={act.id}
-                          className="px-4 py-2.5 flex items-center justify-between gap-3 hover:bg-black/5 dark:hover:bg-white/5 transition-colors group"
-                        >
-                          {/* Time + Action Phrase + Lead Name */}
-                          <div className="flex items-center gap-3 min-w-0 flex-1">
-                            <span
-                              className="text-[11px] font-mono shrink-0 w-[58px]"
-                              style={{ color: 'var(--text-muted)' }}
-                            >
-                              {formatTime24Or12(act.timestamp)}
-                            </span>
-
-                            <div className="min-w-0 flex items-center gap-1.5 flex-wrap flex-1 text-[12px]">
-                              <span style={{ color: 'var(--text-secondary)' }}>
-                                {getNaturalActionPhrase(act).charAt(0).toUpperCase() + getNaturalActionPhrase(act).slice(1)}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => openChat(act.conversationId)}
-                                className="font-bold hover:underline cursor-pointer truncate max-w-[180px]"
-                                style={{ color: 'var(--text-primary)' }}
-                              >
-                                {act.leadName}
-                              </button>
-                              <span
-                                className="text-[9px] font-bold px-1.5 py-0.2 rounded shrink-0"
-                                style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}
-                              >
-                                {act.channel}
-                              </span>
-
-                              {/* Short substance tag */}
-                              {act.type === 'cash_recorded' && (
-                                <span className="font-bold shrink-0" style={{ color: 'var(--text-primary)' }}>
-                                  · {act.summary}
-                                </span>
-                              )}
-                              {act.type === 'message_sent' && act.detail && (
-                                <span className="text-[11px] truncate max-w-xs" style={{ color: 'var(--text-muted)' }}>
-                                  — “{act.detail}”
-                                </span>
-                              )}
-                              {act.type === 'audition_booked' && (
-                                <span className="text-[11px] font-medium shrink-0" style={{ color: 'var(--text-secondary)' }}>
-                                  · {act.summary}
-                                </span>
-                              )}
-                              {act.type === 'stage_changed' && (
-                                <span className="inline-flex items-center gap-1 text-[10px] shrink-0">
-                                  <span
-                                    className="px-1.5 py-0.2 rounded font-semibold"
-                                    style={getStageBadgeStyle(act.fromValue || 'New')}
-                                  >
-                                    {act.fromValue || 'New'}
-                                  </span>
-                                  <ArrowRight className="w-2.5 h-2.5" style={{ color: 'var(--text-muted)' }} />
-                                  <span
-                                    className="px-1.5 py-0.2 rounded font-semibold"
-                                    style={getStageBadgeStyle(act.toValue || act.pipeline)}
-                                  >
-                                    {act.toValue || act.pipeline}
-                                  </span>
-                                </span>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Quick chat button */}
-                          <button
-                            type="button"
-                            onClick={() => openChat(act.conversationId)}
-                            className="h-6 px-2 rounded text-[10px] font-semibold flex items-center gap-1 transition-opacity opacity-0 group-hover:opacity-100 cursor-pointer shrink-0"
-                            style={{
-                              background: 'var(--bg-pill)',
-                              border: '1px solid var(--border-input)',
-                              color: 'var(--text-primary)',
-                            }}
-                          >
-                            <MessageSquare className="w-2.5 h-2.5" />
-                            Chat
-                          </button>
-                        </div>
+                          act={act}
+                          showActor={isAllAgents}
+                          onOpenChat={openChat}
+                          onSelectAgent={handleSelectAgent}
+                        />
                       ))}
                     </div>
                   </div>
                 ))}
+
+                <div
+                  ref={timelineSentinelRef}
+                  className="pt-2 pb-4 flex flex-col sm:flex-row items-center justify-between gap-2 text-[11px]"
+                  style={{ color: 'var(--text-secondary)' }}
+                >
+                  <span>
+                    Showing {displayedActivities.length} of {visibleTimelineRefs.length}{' '}
+                    {visibleTimelineRefs.length === 1 ? 'event' : 'events'}
+                  </span>
+                  {hasMoreTimeline && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setVisibleTimelineCount((prev) =>
+                          Math.min(prev + TIMELINE_BATCH_SIZE, visibleTimelineRefs.length)
+                        )
+                      }
+                      className="h-8 px-3.5 rounded-lg text-[11px] font-semibold cursor-pointer transition-colors"
+                      style={{
+                        background: 'var(--bg-card)',
+                        border: '1px solid var(--border-input)',
+                        color: 'var(--text-primary)',
+                      }}
+                    >
+                      Show {Math.min(TIMELINE_BATCH_SIZE, visibleTimelineRefs.length - visibleTimelineCount)} more (
+                      {visibleTimelineRefs.length - visibleTimelineCount} remaining)
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              /* ── 2. COMPACT STREAM: Borderless, High-Density Scanning View (Full Width) ── */
+              <div className="w-full space-y-4">
+                <div
+                  className="w-full rounded-xl overflow-hidden shadow-xs"
+                  style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+                >
+                  {groupedActivities.map((group, groupIdx) => (
+                    <div key={group.dateKey}>
+                      {/* Compact Section Divider */}
+                      <div
+                        className="px-4 py-2 flex items-center justify-between text-[10px] font-bold uppercase tracking-wider"
+                        style={{
+                          background: 'var(--bg-table-header)',
+                          color: 'var(--text-secondary)',
+                          borderTop: groupIdx > 0 ? '1px solid var(--border-main)' : undefined,
+                        }}
+                      >
+                        <span>{group.label}</span>
+                        <span className="font-normal" style={{ color: 'var(--text-muted)' }}>
+                          {group.items.length} events
+                        </span>
+                      </div>
+
+                      <div className="divide-y" style={{ borderColor: 'var(--border-main)' }}>
+                        {group.items.map((act) => (
+                          <CompactEventRow
+                            key={act.id}
+                            act={act}
+                            showActor={isAllAgents}
+                            onOpenChat={openChat}
+                            onSelectAgent={handleSelectAgent}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div
+                  ref={timelineSentinelRef}
+                  className="pb-4 flex flex-col sm:flex-row items-center justify-between gap-2 text-[11px]"
+                  style={{ color: 'var(--text-secondary)' }}
+                >
+                  <span>
+                    Showing {displayedActivities.length} of {visibleTimelineRefs.length}{' '}
+                    {visibleTimelineRefs.length === 1 ? 'event' : 'events'}
+                  </span>
+                  {hasMoreTimeline && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setVisibleTimelineCount((prev) =>
+                          Math.min(prev + TIMELINE_BATCH_SIZE, visibleTimelineRefs.length)
+                        )
+                      }
+                      className="h-8 px-3.5 rounded-lg text-[11px] font-semibold cursor-pointer transition-colors"
+                      style={{
+                        background: 'var(--bg-card)',
+                        border: '1px solid var(--border-input)',
+                        color: 'var(--text-primary)',
+                      }}
+                    >
+                      Show {Math.min(TIMELINE_BATCH_SIZE, visibleTimelineRefs.length - visibleTimelineCount)} more (
+                      {visibleTimelineRefs.length - visibleTimelineCount} remaining)
+                    </button>
+                  )}
+                </div>
               </div>
             )
           ) : mainTab === 'funnel' ? (
@@ -1909,7 +2906,7 @@ function TeamActivitiesPageInner() {
                     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-3.5">
                       {/* Metric 1: Total Leads */}
                       <div
-                        onClick={() => setMainTab('leads')}
+                        onClick={() => handleMainTabChange('leads')}
                         className="p-4 rounded-xl cursor-pointer transition-all hover:border-[var(--border-input)] group shadow-xs"
                         style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
                         title="View all assigned leads"
@@ -2145,7 +3142,7 @@ function TeamActivitiesPageInner() {
                                 Current Pipeline Distribution
                               </h3>
                               <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                                Where {breakdownTotal} leads stand right now
+                                Where {breakdownTotal} {breakdownTotal === 1 ? 'lead stands' : 'leads stand'} ({periodDescription})
                               </p>
                             </div>
                             <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}>
@@ -2176,8 +3173,8 @@ function TeamActivitiesPageInner() {
                               <div
                                 key={st.stage}
                                 onClick={() => {
-                                  setActivitySearch(st.stage);
-                                  setMainTab('leads');
+                                  handleActivitySearchChange(st.stage);
+                                  handleMainTabChange('leads');
                                 }}
                                 className="p-2.5 rounded-lg flex items-center justify-between gap-1.5 cursor-pointer hover:opacity-85 transition-opacity"
                                 style={getStageBadgeStyle(st.stage)}
@@ -2190,24 +3187,30 @@ function TeamActivitiesPageInner() {
                           </div>
                         </div>
 
-                        {selectedStaffObj && selectedStaffObj.waitingReplyCount > 0 && (
-                          <div
-                            className="mt-4 pt-3 flex items-center justify-between text-[11px]"
-                            style={{ borderTop: '1px solid var(--border-main)', color: 'var(--text-secondary)' }}
-                          >
-                            <span className="inline-flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-semibold">
-                              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-                              {selectedStaffObj.waitingReplyCount} leads awaiting reply
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => setMainTab('leads')}
-                              className="text-[11px] font-semibold text-[var(--text-primary)] hover:underline cursor-pointer"
+                        {(() => {
+                          const waitingCount = isAllAgents
+                            ? teamAggregate.waitingReplyCount
+                            : selectedStaffObj?.waitingReplyCount || 0;
+                          if (waitingCount <= 0) return null;
+                          return (
+                            <div
+                              className="mt-4 pt-3 flex items-center justify-between text-[11px]"
+                              style={{ borderTop: '1px solid var(--border-main)', color: 'var(--text-secondary)' }}
                             >
-                              Review in leads →
-                            </button>
-                          </div>
-                        )}
+                              <span className="inline-flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-semibold">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                                {waitingCount} leads awaiting reply
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleMainTabChange('leads')}
+                                className="text-[11px] font-semibold text-[var(--text-primary)] hover:underline cursor-pointer"
+                              >
+                                Review in leads →
+                              </button>
+                            </div>
+                          );
+                        })()}
                       </div>
 
                       {/* Right: Lead Channels & Operational Activity */}
@@ -2268,11 +3271,11 @@ function TeamActivitiesPageInner() {
                         >
                           <span className="inline-flex items-center gap-1.5">
                             <Activity className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-                            Total actions logged: <strong style={{ color: 'var(--text-primary)' }}>{agentActivities.length}</strong>
+                            Total actions logged: <strong style={{ color: 'var(--text-primary)' }}>{timelineRefs.length}</strong>
                           </span>
                           <button
                             type="button"
-                            onClick={() => setMainTab('timeline')}
+                            onClick={() => handleMainTabChange('timeline')}
                             className="text-[11px] font-semibold text-[var(--text-primary)] hover:underline cursor-pointer"
                           >
                             View timeline stream →
@@ -2280,6 +3283,150 @@ function TeamActivitiesPageInner() {
                         </div>
                       </div>
                     </div>
+
+                    {/* 4. Team-wide Per-Agent Comparison Breakdown (only in All Agents mode) */}
+                    {isAllAgents && staffList.length > 0 && (
+                      <div
+                        className="rounded-xl overflow-hidden shadow-xs"
+                        style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+                      >
+                        <div
+                          className="px-5 py-4 flex flex-wrap items-center justify-between gap-2"
+                          style={{ borderBottom: '1px solid var(--border-main)' }}
+                        >
+                          <div>
+                            <h3 className="text-[13px] font-bold" style={{ color: 'var(--text-primary)' }}>
+                              Agent Performance Breakdown
+                            </h3>
+                            <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                              Comparing {staffList.length} team members ({periodDescription})
+                            </p>
+                          </div>
+                          <span
+                            className="text-[10px] font-semibold px-2.5 py-0.5 rounded-full"
+                            style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}
+                          >
+                            Select a staff member to inspect
+                          </span>
+                        </div>
+                        <div className="overflow-x-auto w-full" style={{ WebkitOverflowScrolling: 'touch' }}>
+                          <table className="w-full text-left border-collapse min-w-[740px]">
+                            <thead
+                              className="text-[10px] uppercase tracking-widest font-bold"
+                              style={{ background: 'var(--bg-table-header)', color: 'var(--text-secondary)' }}
+                            >
+                              <tr>
+                                <th className="py-2.5 px-4">Staff Member</th>
+                                <th className="py-2.5 px-3">Role</th>
+                                <th className="py-2.5 px-3 text-right">Actions</th>
+                                <th className="py-2.5 px-3 text-right">Leads</th>
+                                <th className="py-2.5 px-3 text-right">Booked</th>
+                                <th className="py-2.5 px-3 text-right">Attended / Show %</th>
+                                <th className="py-2.5 px-3 text-right">Enrolled / Win %</th>
+                                <th className="py-2.5 px-4 text-right">Revenue (EGP)</th>
+                              </tr>
+                            </thead>
+                            <tbody
+                              className="text-[12px] divide-y"
+                              style={{ color: 'var(--text-primary)', borderColor: 'var(--border-main)' }}
+                            >
+                              {staffList.map((st, idx) => {
+                                const isAllTimeMode = filterMode === 'all';
+                                const stLeads = isAllTimeMode ? st.totalLeadsAssigned : st.periodLeadsAssigned;
+                                const stBooked = isAllTimeMode ? st.allTimeBooked : st.bookedInPeriod;
+                                const stAttended = isAllTimeMode ? st.allTimeAttended : st.attendedInPeriod;
+                                const stEnrolled = isAllTimeMode ? st.allTimeEnrolled : st.enrolledInPeriod;
+                                const stCash = isAllTimeMode ? st.allTimeCash : st.cashInPeriod;
+                                const stShowPct = stBooked > 0 ? Math.min(100, Math.round((stAttended / stBooked) * 100)) : 0;
+                                const stWinPct = stLeads > 0 ? Math.min(100, Math.round((stEnrolled / stLeads) * 100)) : 0;
+
+                                return (
+                                  <tr
+                                    key={st.name}
+                                    className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                    style={{ background: idx % 2 === 0 ? 'transparent' : 'var(--bg-table-alt)' }}
+                                  >
+                                    <td className="py-2.5 px-4">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSelectAgent(st.name)}
+                                        className="font-semibold text-left hover:underline cursor-pointer"
+                                        style={{ color: 'var(--text-primary)' }}
+                                        title={`Inspect ${st.name}`}
+                                      >
+                                        {st.name}
+                                      </button>
+                                    </td>
+                                    <td className="py-2.5 px-3">
+                                      <span
+                                        className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                                        style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}
+                                      >
+                                        {formatRoleLabel(st.role)}
+                                      </span>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right font-semibold tabular-nums">
+                                      {st.periodActivitiesCount.toLocaleString()}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums" style={{ color: 'var(--text-secondary)' }}>
+                                      {stLeads.toLocaleString()}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums">{stBooked.toLocaleString()}</td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums">
+                                      <span>{stAttended.toLocaleString()}</span>
+                                      <span className="ml-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                        ({stShowPct}%)
+                                      </span>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums">
+                                      <span>{stEnrolled.toLocaleString()}</span>
+                                      <span className="ml-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                        ({stWinPct}%)
+                                      </span>
+                                    </td>
+                                    <td className="py-2.5 px-4 text-right font-semibold tabular-nums">
+                                      {stCash.toLocaleString()}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                            <tfoot
+                              className="text-[11px] font-bold"
+                              style={{
+                                background: 'var(--bg-table-header)',
+                                borderTop: '1px solid var(--border-main)',
+                                color: 'var(--text-primary)',
+                              }}
+                            >
+                              <tr>
+                                <td className="py-2.5 px-4" colSpan={2}>
+                                  Team Total ({staffList.length} staff)
+                                </td>
+                                <td className="py-2.5 px-3 text-right tabular-nums">
+                                  {teamAggregate.totalActivitiesCount.toLocaleString()}
+                                </td>
+                                <td className="py-2.5 px-3 text-right tabular-nums">{leads.toLocaleString()}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums">{booked.toLocaleString()}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums">
+                                  <span>{attended.toLocaleString()}</span>
+                                  <span className="ml-1 text-[10px]" style={{ color: 'var(--text-secondary)' }}>
+                                    ({showRateStr}%)
+                                  </span>
+                                </td>
+                                <td className="py-2.5 px-3 text-right tabular-nums">
+                                  <span>{enrolled.toLocaleString()}</span>
+                                  <span className="ml-1 text-[10px]" style={{ color: 'var(--text-secondary)' }}>
+                                    ({overallWinRate}%)
+                                  </span>
+                                </td>
+                                <td className="py-2.5 px-4 text-right tabular-nums">{cash.toLocaleString()}</td>
+                              </tr>
+                            </tfoot>
+                          </table>
+                        </div>
+                      </div>
+                    )}
                   </>
                 );
               })()}
@@ -2296,8 +3443,20 @@ function TeamActivitiesPageInner() {
                     No assigned leads
                   </p>
                   <p className="text-[11px] mt-1" style={{ color: 'var(--text-secondary)' }}>
-                    {selectedStaffObj?.name || effectiveAgent || 'This staff member'} has no leads matching this filter.
+                    {isAllAgents
+                      ? `No assigned leads match this filter across the team in ${periodDescription}.`
+                      : `${selectedStaffObj?.name || effectiveAgent || 'This staff member'} has no leads matching this filter in ${periodDescription}.`}
                   </p>
+                  {filterMode !== 'all' && (
+                    <button
+                      type="button"
+                      onClick={goAllTime}
+                      className="mt-4 text-[11px] font-semibold px-3 py-1.5 rounded-[6px] cursor-pointer inline-flex items-center gap-1"
+                      style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                    >
+                      View All Time Operations
+                    </button>
+                  )}
                 </div>
               ) : (
                 <div className="overflow-x-auto w-full" style={{ WebkitOverflowScrolling: 'touch' }}>
@@ -2308,6 +3467,7 @@ function TeamActivitiesPageInner() {
                     >
                       <tr>
                         <th className="py-2.5 px-4">Lead</th>
+                        {isAllAgents && <th className="py-2.5 px-3">Agent</th>}
                         <th className="py-2.5 px-3">Channel</th>
                         <th className="py-2.5 px-3">Stage</th>
                         <th className="py-2.5 px-3">Audition / Follow-up</th>
@@ -2316,8 +3476,8 @@ function TeamActivitiesPageInner() {
                       </tr>
                     </thead>
                     <tbody className="text-[12px] divide-y" style={{ color: 'var(--text-primary)', borderColor: 'var(--border-main)' }}>
-                      {agentAssignedLeads.map((conv, idx) => {
-                        const needsAttention = (conv.unreadCount && conv.unreadCount > 0) || conv.pipeline === 'New';
+                      {displayedLeads.map((conv, idx) => {
+                        const leadAgent = isAllAgents ? getParsedConversationData(conv).assignedAgent : '';
                         return (
                           <tr
                             key={conv.id}
@@ -2333,6 +3493,19 @@ function TeamActivitiesPageInner() {
                                 {conv.branch ? ` · ${conv.branch}` : ''}
                               </div>
                             </td>
+                            {isAllAgents && (
+                              <td className="py-2.5 px-3">
+                                <button
+                                  type="button"
+                                  onClick={() => handleSelectAgent(leadAgent)}
+                                  className="text-[11px] font-semibold px-2 py-0.5 rounded-full hover:underline cursor-pointer"
+                                  style={{ background: 'var(--bg-pill)', color: 'var(--text-primary)' }}
+                                  title={`View ${leadAgent}'s activity`}
+                                >
+                                  {leadAgent}
+                                </button>
+                              </td>
+                            )}
                             <td className="py-2.5 px-3">
                               <span
                                 className="text-[10px] font-bold px-2 py-0.5 rounded-full"
@@ -2364,7 +3537,7 @@ function TeamActivitiesPageInner() {
                               )}
                             </td>
                             <td className="py-2.5 px-3 text-right text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                              {formatCompactRelativeTime(conv.lastMessageAt)}
+                              {formatCompactRelativeTime(conv.lastMessageAt, todayStartMs)}
                             </td>
                             <td className="py-2.5 px-4 text-right">
                               <button
@@ -2386,6 +3559,33 @@ function TeamActivitiesPageInner() {
                       })}
                     </tbody>
                   </table>
+                  <div
+                    ref={leadsSentinelRef}
+                    className="px-4 py-3 flex flex-col sm:flex-row items-center justify-between gap-2 text-[11px]"
+                    style={{ borderTop: '1px solid var(--border-main)', color: 'var(--text-secondary)' }}
+                  >
+                    <span>
+                      Showing {displayedLeads.length} of {agentAssignedLeads.length}{' '}
+                      {agentAssignedLeads.length === 1 ? 'lead' : 'leads'}
+                    </span>
+                    {hasMoreLeads && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setVisibleLeadsCount((prev) => Math.min(prev + LEADS_BATCH_SIZE, agentAssignedLeads.length))
+                        }
+                        className="h-8 px-3.5 rounded-lg text-[11px] font-semibold cursor-pointer transition-colors"
+                        style={{
+                          background: 'var(--bg-pill)',
+                          border: '1px solid var(--border-input)',
+                          color: 'var(--text-primary)',
+                        }}
+                      >
+                        Show {Math.min(LEADS_BATCH_SIZE, agentAssignedLeads.length - visibleLeadsCount)} more (
+                        {agentAssignedLeads.length - visibleLeadsCount} remaining)
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -2497,6 +3697,21 @@ function TeamActivitiesPageInner() {
           className="flex-1 min-h-0 overflow-y-auto"
           style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
         >
+          {/* Pinned Team-Wide Summary Row */}
+          <AllAgentsSidebarRow
+            staffCount={staffList.length}
+            activeStaffCount={teamAggregate.activeStaffCount}
+            totalActivitiesCount={teamAggregate.totalActivitiesCount}
+            totalLeadsAssigned={filterMode === 'all' ? teamAggregate.totalLeadsAssigned : teamAggregate.periodLeadsAssigned}
+            bookedCount={teamAggregate.booked}
+            enrolledCount={teamAggregate.enrolled}
+            lastActiveAt={teamAggregate.lastActiveAt}
+            isSelected={isAllAgents}
+            periodDescription={periodDescription}
+            todayStartMs={todayStartMs}
+            onSelect={handleSelectAgent}
+          />
+
           {/* Individual Staff Rows */}
           {filteredStaff.length === 0 ? (
             <div className="p-6 text-center">
@@ -2505,74 +3720,17 @@ function TeamActivitiesPageInner() {
               </p>
             </div>
           ) : (
-            filteredStaff.map((st) => {
-              const isSelected = effectiveAgent.toLowerCase() === st.name.toLowerCase();
-              const lastTimeStr = formatCompactRelativeTime(st.lastActiveAt);
-
-              return (
-                <div
-                  key={st.name}
-                  onClick={() => handleSelectAgent(st.name)}
-                  className="flex items-start justify-between px-3 py-2.5 cursor-pointer transition-colors"
-                  style={{
-                    borderBottom: '1px solid var(--border-main)',
-                    background: isSelected ? 'var(--bg-selected)' : undefined,
-                  }}
-                >
-                  <div className="flex items-start gap-2.5 min-w-0 pr-2 flex-1">
-                    <img
-                      src={st.avatar || '/logo.png'}
-                      alt={st.name}
-                      onError={(e) => {
-                        (e.currentTarget as HTMLImageElement).src = '/logo.png';
-                      }}
-                      className="w-9 h-9 rounded-xl object-cover shrink-0 mt-0.5 shadow-xs"
-                      style={{ border: '1px solid var(--border-input)' }}
-                    />
-                    <div className="min-w-0 flex-1">
-                      <h3
-                        className="text-[12px] font-semibold leading-tight truncate"
-                        style={{ color: 'var(--text-primary)' }}
-                      >
-                        {st.name}
-                      </h3>
-                      <p
-                        className="text-[10px] truncate mt-0.5"
-                        style={{ color: 'var(--text-secondary)' }}
-                      >
-                        {formatRoleLabel(st.role)}
-                      </p>
-                      <div className="flex items-center gap-1.5 text-[9px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                        <span>{st.totalLeadsAssigned} leads</span>
-                        {st.bookedInPeriod > 0 && <span>· {st.bookedInPeriod} booked</span>}
-                        {st.enrolledInPeriod > 0 && <span>· {st.enrolledInPeriod} enrolled</span>}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col items-end justify-between shrink-0 self-stretch gap-1">
-                    <span
-                      className="text-[9px] font-bold tracking-wide px-1.5 py-0.5 rounded"
-                      style={{
-                        background: isSelected ? 'var(--bg-card)' : 'var(--bg-pill)',
-                        color: isSelected ? 'var(--text-primary)' : 'var(--text-secondary)',
-                      }}
-                      title={`${st.periodActivitiesCount} events in ${periodDescription}`}
-                    >
-                      {st.periodActivitiesCount} act
-                    </span>
-                    {st.lastActiveAt > 0 && (
-                      <span
-                        className="text-[9px] font-medium mt-auto"
-                        style={{ color: 'var(--text-muted)' }}
-                      >
-                        {lastTimeStr}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              );
-            })
+            filteredStaff.map((st) => (
+              <StaffSidebarRow
+                key={st.name}
+                st={st}
+                isSelected={!isAllAgents && effectiveAgentLower === st.name.toLowerCase()}
+                isAllTime={filterMode === 'all'}
+                periodDescription={periodDescription}
+                todayStartMs={todayStartMs}
+                onSelect={handleSelectAgent}
+              />
+            ))
           )}
         </div>
       </aside>
