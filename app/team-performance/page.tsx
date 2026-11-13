@@ -724,6 +724,13 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
   return parsed;
 }
 
+type FunnelCounts = { leads: number; booked: number; attended: number; enrolled: number; cash: number };
+
+/** True when a conversation's assigned agent is a real staff member (not a placeholder). */
+function isRealAssignedAgent(agent: string): boolean {
+  return Boolean(agent) && agent !== 'Unassigned' && agent !== 'Staff' && agent !== 'System';
+}
+
 const ALL_AGENTS_ID = '__all__';
 const TIMELINE_BATCH_SIZE = 50;
 const LEADS_BATCH_SIZE = 50;
@@ -1722,61 +1729,66 @@ function TeamActivitiesPageInner() {
     );
   }, [isAllAgents, effectiveAgent, staffByLower, staffList]);
 
+  /* ── Conversion Funnel: Lead-Cohort Based ──
+   * The funnel follows ONE cohort of leads: those assigned to an agent (or to the selected agent)
+   * and created inside the selected period (all assigned leads for "All Time").
+   * Every later stage is counted from that same cohort, and stages are cumulative
+   * (an enrolled lead has necessarily passed attendance and booking), so:
+   *   leads >= booked >= attended >= enrolled, and every rate is a true 0–100% conversion.
+   */
+  const funnelCohort = useMemo(() => {
+    const isAllTime = filterMode === 'all';
+    const emptyCounts = (): FunnelCounts => ({ leads: 0, booked: 0, attended: 0, enrolled: 0, cash: 0 });
+    const team = emptyCounts();
+    const byAgent = new Map<string, FunnelCounts>();
+
+    for (let i = 0; i < conversations.length; i++) {
+      const p = getParsedConversationData(conversations[i]);
+      if (!isRealAssignedAgent(p.assignedAgent)) continue;
+      if (!isAllTime && (!p.createdTs || p.createdTs < periodStartMs || p.createdTs > periodEndMs)) continue;
+
+      const enrolled = p.convertedLead;
+      const attended = enrolled || p.attendedLead;
+      const booked = attended || p.bookedLead;
+      const cash = enrolled ? p.cashInNum : 0;
+
+      let agentCounts = byAgent.get(p.assignedAgentLower);
+      if (!agentCounts) {
+        agentCounts = emptyCounts();
+        byAgent.set(p.assignedAgentLower, agentCounts);
+      }
+      const targets = [team, agentCounts];
+      for (let t = 0; t < targets.length; t++) {
+        const target = targets[t];
+        target.leads += 1;
+        if (booked) target.booked += 1;
+        if (attended) target.attended += 1;
+        if (enrolled) target.enrolled += 1;
+        target.cash += cash;
+      }
+    }
+
+    return { team, byAgent };
+  }, [conversations, filterMode, periodStartMs, periodEndMs]);
+
   const selectedMetrics = useMemo(() => {
-    const leads = isAllAgents
-      ? filterMode === 'all'
-        ? teamAggregate.totalLeadsAssigned
-        : teamAggregate.periodLeadsAssigned
-      : selectedStaffObj
-      ? filterMode === 'all'
-        ? selectedStaffObj.totalLeadsAssigned
-        : selectedStaffObj.periodLeadsAssigned
-      : 0;
-    const booked = isAllAgents
-      ? teamAggregate.booked
-      : selectedStaffObj
-      ? filterMode === 'all'
-        ? selectedStaffObj.allTimeBooked
-        : selectedStaffObj.bookedInPeriod
-      : 0;
-    const attended = isAllAgents
-      ? teamAggregate.attended
-      : selectedStaffObj
-      ? filterMode === 'all'
-        ? selectedStaffObj.allTimeAttended
-        : selectedStaffObj.attendedInPeriod
-      : 0;
-    const enrolled = isAllAgents
-      ? teamAggregate.enrolled
-      : selectedStaffObj
-      ? filterMode === 'all'
-        ? selectedStaffObj.allTimeEnrolled
-        : selectedStaffObj.enrolledInPeriod
-      : 0;
-    const cash = isAllAgents
-      ? teamAggregate.cash
-      : selectedStaffObj
-      ? filterMode === 'all'
-        ? selectedStaffObj.allTimeCash
-        : selectedStaffObj.cashInPeriod
-      : 0;
-
-    const bookingRate = Math.round(clampRatePct(booked, leads));
-    const showRate = Math.round(clampRatePct(attended, booked));
-    const closingRate = Math.round(clampRatePct(enrolled, booked));
-
+    const counts: FunnelCounts = isAllAgents
+      ? funnelCohort.team
+      : funnelCohort.byAgent.get(effectiveAgent.trim().toLowerCase()) || {
+          leads: 0,
+          booked: 0,
+          attended: 0,
+          enrolled: 0,
+          cash: 0,
+        };
     return {
-      totalLeads: leads,
-      totalBooked: booked,
-      totalAttended: attended,
-      totalEnrolled: enrolled,
-      totalCash: cash,
-      activeStaffCount: isAllAgents ? teamAggregate.activeStaffCount : selectedStaffObj ? 1 : 0,
-      bookingRate,
-      showRate,
-      closingRate,
+      totalLeads: counts.leads,
+      totalBooked: counts.booked,
+      totalAttended: counts.attended,
+      totalEnrolled: counts.enrolled,
+      totalCash: counts.cash,
     };
-  }, [isAllAgents, teamAggregate, selectedStaffObj, filterMode]);
+  }, [isAllAgents, effectiveAgent, funnelCohort]);
 
   // Funnel calculations derived from selectedMetrics
   const funnelCalcs = useMemo(() => {
@@ -1794,10 +1806,9 @@ function TeamActivitiesPageInner() {
     const showRateStr = Math.round(showRate).toString();
     const showDrop = booked > 0 ? Math.round(Math.max(0, 100 - showRate)).toString() : '0';
 
-    const closeDenom = attended > 0 ? attended : booked;
-    const closeRate = clampRatePct(enrolled, closeDenom);
+    const closeRate = clampRatePct(enrolled, attended);
     const closeRateStr = Math.round(closeRate).toString();
-    const closeDrop = closeDenom > 0 ? Math.round(Math.max(0, 100 - closeRate)).toString() : '0';
+    const closeDrop = attended > 0 ? Math.round(Math.max(0, 100 - closeRate)).toString() : '0';
 
     const overallWinRatePct = clampRatePct(enrolled, leads);
     const overallWinRate = leads > 0 ? overallWinRatePct.toFixed(1) : '0';
@@ -1979,7 +1990,7 @@ function TeamActivitiesPageInner() {
       const c = conversations[i];
       const p = getParsedConversationData(c);
       if (isAllAgents) {
-        if (!p.assignedAgent || p.assignedAgent === 'Unassigned') continue;
+        if (!isRealAssignedAgent(p.assignedAgent)) continue;
       } else if (p.assignedAgentLower !== effectiveAgentLower) {
         continue;
       }
@@ -2027,7 +2038,7 @@ function TeamActivitiesPageInner() {
       const c = conversations[i];
       const p = getParsedConversationData(c);
       if (isAllAgents) {
-        if (!p.assignedAgent || p.assignedAgent === 'Unassigned') continue;
+        if (!isRealAssignedAgent(p.assignedAgent)) continue;
       } else if (p.assignedAgentLower !== effectiveAgentLower) {
         continue;
       }
@@ -2826,7 +2837,7 @@ function TeamActivitiesPageInner() {
                           {leads}
                         </div>
                         <p className="text-[11px] mt-1 truncate" style={{ color: 'var(--text-secondary)' }}>
-                          Active in pipeline
+                          {filterMode === 'all' ? 'All assigned leads' : `Created ${periodDescription}`}
                         </p>
                       </div>
 
@@ -3238,14 +3249,16 @@ function TeamActivitiesPageInner() {
                               style={{ color: 'var(--text-primary)', borderColor: 'var(--border-main)' }}
                             >
                               {staffList.map((st, idx) => {
-                                const isAllTimeMode = filterMode === 'all';
-                                const stLeads = isAllTimeMode ? st.totalLeadsAssigned : st.periodLeadsAssigned;
-                                const stBooked = isAllTimeMode ? st.allTimeBooked : st.bookedInPeriod;
-                                const stAttended = isAllTimeMode ? st.allTimeAttended : st.attendedInPeriod;
-                                const stEnrolled = isAllTimeMode ? st.allTimeEnrolled : st.enrolledInPeriod;
-                                const stCash = isAllTimeMode ? st.allTimeCash : st.cashInPeriod;
-                                const stShowPct = stBooked > 0 ? Math.min(100, Math.round((stAttended / stBooked) * 100)) : 0;
-                                const stWinPct = stLeads > 0 ? Math.min(100, Math.round((stEnrolled / stLeads) * 100)) : 0;
+                                // Same lead cohort as the funnel above (leads assigned to this staff member in the period),
+                                // so the rows add up exactly to the Team Total row.
+                                const stCounts = funnelCohort.byAgent.get(st.name.toLowerCase());
+                                const stLeads = stCounts?.leads || 0;
+                                const stBooked = stCounts?.booked || 0;
+                                const stAttended = stCounts?.attended || 0;
+                                const stEnrolled = stCounts?.enrolled || 0;
+                                const stCash = stCounts?.cash || 0;
+                                const stShowPct = Math.round(clampRatePct(stAttended, stBooked));
+                                const stWinPct = Math.round(clampRatePct(stEnrolled, stLeads));
 
                                 return (
                                   <tr
