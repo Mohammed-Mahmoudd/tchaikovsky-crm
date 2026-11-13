@@ -484,23 +484,45 @@ export default function InboxPage() {
   } | null>(null);
   const dragDepthRef = useRef(0);
 
-  // Smooth-scroll viewport to referenced original message and flash highlight the message bubble (WhatsApp / Telegram style)
-  const scrollToMessage = useCallback((targetId: string) => {
-    if (!targetId) return;
-    const el = document.getElementById(`msg-${targetId}`);
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-      const bubble = (el.querySelector("[data-msg-bubble]") || el) as HTMLElement;
-      if (bubble) {
-        bubble.classList.remove("msg-jump-highlight");
-        void bubble.offsetWidth; // Force reflow to cleanly restart the animation if clicked repeatedly
-        bubble.classList.add("msg-jump-highlight");
-        setTimeout(() => {
-          bubble.classList.remove("msg-jump-highlight");
-        }, 1500);
+  // Scroll only the inner chat container so outer <main>/layout containers can never be scrolled
+  const scrollChildIntoChatContainer = useCallback(
+    (el: HTMLElement, block: "center" | "nearest", behavior: ScrollBehavior = "smooth") => {
+      const container = chatScrollContainerRef.current;
+      if (!container) return;
+      const cRect = container.getBoundingClientRect();
+      const eRect = el.getBoundingClientRect();
+      if (block === "nearest") {
+        if (eRect.top >= cRect.top && eRect.bottom <= cRect.bottom) return;
+        const delta = eRect.top < cRect.top ? eRect.top - cRect.top : eRect.bottom - cRect.bottom;
+        container.scrollBy({ top: delta, behavior });
+        return;
       }
-    }
-  }, []);
+      const delta = eRect.top - cRect.top - (cRect.height - eRect.height) / 2;
+      container.scrollBy({ top: delta, behavior });
+    },
+    []
+  );
+
+  // Smooth-scroll viewport to referenced original message and flash highlight the message bubble (WhatsApp / Telegram style)
+  const scrollToMessage = useCallback(
+    (targetId: string) => {
+      if (!targetId) return;
+      const el = document.getElementById(`msg-${targetId}`);
+      if (el) {
+        scrollChildIntoChatContainer(el, "center", "smooth");
+        const bubble = (el.querySelector("[data-msg-bubble]") || el) as HTMLElement;
+        if (bubble) {
+          bubble.classList.remove("msg-jump-highlight");
+          void bubble.offsetWidth; // Force reflow to cleanly restart the animation if clicked repeatedly
+          bubble.classList.add("msg-jump-highlight");
+          setTimeout(() => {
+            bubble.classList.remove("msg-jump-highlight");
+          }, 1500);
+        }
+      }
+    },
+    [scrollChildIntoChatContainer]
+  );
 
   // Compute clamped fixed coordinates so reaction bars & emoji pickers NEVER clip under the header or edges
   const computeReactionBarStyle = useCallback((anchorRect: DOMRect, isIncoming: boolean): React.CSSProperties => {
@@ -602,9 +624,11 @@ export default function InboxPage() {
     }
   };
 
-  const scrollToBottom = (behavior: ScrollBehavior = "auto") => {
-    messagesEndRef.current?.scrollIntoView({ behavior });
-  };
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    const container = chatScrollContainerRef.current;
+    if (!container) return;
+    container.scrollTo({ top: container.scrollHeight, behavior });
+  }, []);
 
   // Track previous message count to avoid unnecessary scroll-to-bottom on re-renders
   const prevMsgCountRef = useRef(0);
@@ -616,7 +640,7 @@ export default function InboxPage() {
         scrollToBottom("auto");
       }
     }
-  }, [activeChatId, activeConv?.messages?.length]);
+  }, [activeChatId, activeConv?.messages?.length, scrollToBottom]);
 
   // Context-aware scroll anchor: preserves reading position for top messages, and keeps bottom in view
   const isNearBottomRef = useRef(true);
@@ -637,21 +661,21 @@ export default function InboxPage() {
       if (replyingTo?.id) {
         if (isNearBottomRef.current) {
           // If the user was already watching the latest messages at the bottom, keep bottom in view
-          messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+          scrollToBottom("smooth");
         } else {
           // If the user replied to an older message at the top/middle, anchor to THAT message so it never jumps
           const targetEl = document.getElementById(`msg-${replyingTo.id}`);
           if (targetEl) {
-            targetEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            scrollChildIntoChatContainer(targetEl, "nearest", "smooth");
           }
         }
       } else if (isNearBottomRef.current) {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+        scrollToBottom("smooth");
       }
     }, 60);
 
     return () => clearTimeout(timer);
-  }, [replyingTo]);
+  }, [replyingTo, scrollToBottom, scrollChildIntoChatContainer]);
 
   const handleSendReply = useCallback(
     async (
@@ -936,7 +960,7 @@ export default function InboxPage() {
       {/* ── LEFT: Conversations List ── */}
       <div
         className={`
-          flex flex-col h-full 
+          flex flex-col h-full min-h-0 overflow-hidden
           w-full md:w-[300px] lg:w-[320px] shrink-0
           ${mobileView === "list" ? "flex" : "hidden md:flex"}
         `}
@@ -1157,7 +1181,7 @@ export default function InboxPage() {
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 min-h-0 overflow-y-auto relative">
           {filteredConversations.length === 0 ? (
             <div className="p-6 text-center">
               <div className="w-10 h-10 mx-auto mb-2 rounded-full flex items-center justify-center" style={{ background: "var(--bg-pill)" }}>
@@ -1241,20 +1265,23 @@ export default function InboxPage() {
                     <div className="flex items-center gap-1.5 mt-auto">
                       {timeStr && (
                         <span
-                          className="inline-flex items-center gap-1 text-[10px] font-medium whitespace-nowrap"
+                          className={`inline-flex items-center gap-1 text-[10px] whitespace-nowrap ${
+                            showLeadTimer ? "font-bold" : "font-medium"
+                          }`}
                           style={{
                             color: isActive ? "#0066FF" : "var(--text-muted)",
-                            opacity: isActive ? 0.9 : 0.85,
+                            opacity: showLeadTimer ? 1 : isActive ? 0.9 : 0.85,
                           }}
                           title={showLeadTimer ? "Waiting for reply — last message from lead" : undefined}
                         >
                           {showLeadTimer && (
-                            <Clock className="w-3 h-3 shrink-0" aria-hidden="true" />
+                            <Clock
+                              className="w-3 h-3 shrink-0 stroke-[2.5]"
+                              role="img"
+                              aria-label="Waiting for reply — last message from lead"
+                            />
                           )}
                           <span>{timeStr}</span>
-                          {showLeadTimer && (
-                            <span className="sr-only"> (last message from lead)</span>
-                          )}
                         </span>
                       )}
                       {Boolean(conv.unreadCount && conv.unreadCount > 0) && (
@@ -1309,8 +1336,7 @@ export default function InboxPage() {
           }
         }}
         className={`
-          relative flex-1 flex flex-col min-w-0
-          ${mobileView === "chat" || mobileView === "list" ? "" : ""}
+          relative flex-1 flex flex-col min-w-0 h-full min-h-0 overflow-hidden
           ${mobileView === "list" ? "hidden md:flex" : "flex"}
         `}
         style={{ background: "var(--bg-page)" }}
@@ -1333,7 +1359,7 @@ export default function InboxPage() {
           <>
             {/* Chat Header */}
             <div
-              className="flex items-center justify-between px-4 md:px-6 py-3 gap-2"
+              className="flex items-center justify-between px-4 md:px-6 py-3 gap-2 shrink-0"
               style={{ background: "var(--bg-card)", borderBottom: "1px solid var(--border-main)" }}
             >
               {/* Mobile back button */}
@@ -1464,7 +1490,7 @@ export default function InboxPage() {
             <div
               ref={chatScrollContainerRef}
               onScroll={handleChatScroll}
-              className="flex-1 overflow-y-auto p-4 md:p-6 flex flex-col gap-4"
+              className="flex-1 min-h-0 overflow-y-auto relative p-4 md:p-6 flex flex-col gap-4"
             >
               {activeConv.messages.length === 0 ? (
                 <div className="flex-1 flex flex-col items-center justify-center text-center px-4 py-12">
