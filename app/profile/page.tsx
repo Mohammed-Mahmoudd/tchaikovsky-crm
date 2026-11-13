@@ -4,6 +4,20 @@ import React, { useState, useMemo, useCallback, useRef, useEffect } from "react"
 import { useRouter } from "next/navigation";
 import { useAuth, getRoleDisplayName, normalizeRole } from "../components/AuthProvider";
 import { useCRM, Conversation } from "../context/CRMContext";
+import { isAutomatedTemplateMsg } from "../utils/conversationMessages";
+import {
+  clampRatePct,
+  collectLoggedMessageKeys,
+  getAttendedTime,
+  getBookedTime,
+  getConvertedTime,
+  getCreatedTime,
+  getUpdatedTime,
+  isAttendedLead,
+  isBookedLead,
+  isConvertedLead,
+  isMessageAlreadyInActivityLog,
+} from "../utils/teamMetrics";
 import {
   Camera,
   CheckCircle2,
@@ -81,76 +95,6 @@ function getPeriodBounds(mode: "all" | "today" | "week" | "month") {
   return { start, end: nextMonth };
 }
 
-function getCreatedTime(c: Conversation): number {
-  if (c.createdAt) {
-    const t = new Date(c.createdAt).getTime();
-    if (!isNaN(t) && t > 0) return t;
-  }
-  return c.lastMessageAt || (c.updatedAt ? new Date(c.updatedAt).getTime() : 0);
-}
-
-function getUpdatedTime(c: Conversation): number {
-  if (c.updatedAt) {
-    const t = new Date(c.updatedAt).getTime();
-    if (!isNaN(t) && t > 0) return t;
-  }
-  return getCreatedTime(c);
-}
-
-function getBookedTime(c: Conversation): number {
-  const explicit =
-    c.auditionBookedAt ||
-    (typeof c.source === "object" && c.source?.auditionBookedAt ? c.source.auditionBookedAt : undefined);
-  if (explicit) {
-    const t = new Date(explicit).getTime();
-    if (!isNaN(t) && t > 0) return t;
-  }
-  if (c.auditionDate && /^\d{4}-\d{2}-\d{2}$/.test(c.auditionDate)) {
-    const [y, m, d] = c.auditionDate.split("-").map(Number);
-    if (y >= 2020) return new Date(y, m - 1, d, 12, 0, 0, 0).getTime();
-  }
-  if (c.updatedAt) {
-    const t = new Date(c.updatedAt).getTime();
-    if (!isNaN(t) && t > 0) return t;
-  }
-  return getCreatedTime(c);
-}
-
-function getAttendedTime(c: Conversation): number {
-  const explicit =
-    c.attendedAt ||
-    (typeof c.source === "object" && c.source?.attendedAt ? c.source.attendedAt : undefined);
-  if (explicit) {
-    const t = new Date(explicit).getTime();
-    if (!isNaN(t) && t > 0) return t;
-  }
-  if (c.auditionDate && /^\d{4}-\d{2}-\d{2}$/.test(c.auditionDate)) {
-    const [y, m, d] = c.auditionDate.split("-").map(Number);
-    if (y >= 2020) return new Date(y, m - 1, d, 14, 0, 0, 0).getTime();
-  }
-  if (c.updatedAt) {
-    const t = new Date(c.updatedAt).getTime();
-    if (!isNaN(t) && t > 0) return t;
-  }
-  return getCreatedTime(c);
-}
-
-function getConvertedTime(c: Conversation): number {
-  const explicit =
-    c.enrolledAt ||
-    c.paidAt ||
-    (typeof c.source === "object" ? c.source?.enrolledAt || c.source?.paidAt : undefined);
-  if (explicit) {
-    const t = new Date(explicit).getTime();
-    if (!isNaN(t) && t > 0) return t;
-  }
-  if (c.updatedAt) {
-    const t = new Date(c.updatedAt).getTime();
-    if (!isNaN(t) && t > 0) return t;
-  }
-  return getCreatedTime(c);
-}
-
 function formatOutcomeLabel(outcome?: string): string {
   switch (outcome) {
     case "registered":
@@ -172,35 +116,6 @@ function formatOutcomeLabel(outcome?: string): string {
 
 function getDisplayName(c: Conversation): string {
   return c.leadName || c.profileName || c.name || c.phone || c.id;
-}
-
-function isBookedLead(c: Conversation): boolean {
-  if (Boolean(c.auditionDate)) return true;
-  const p = (c.pipeline || "").toLowerCase();
-  return (
-    p.includes("audition booked") ||
-    p.includes("audition confirmed") ||
-    p.includes("audition attended") ||
-    p.includes("registered") ||
-    p.includes("payment pending")
-  );
-}
-
-function isAttendedLead(c: Conversation): boolean {
-  if (c.auditionOutcome && c.auditionOutcome !== "booked") return true;
-  const p = (c.pipeline || "").toLowerCase();
-  return (
-    p.includes("audition attended") ||
-    p.includes("audition passed") ||
-    p.includes("registered") ||
-    p.includes("payment pending")
-  );
-}
-
-function isConvertedLead(c: Conversation): boolean {
-  if ((Number(c.cashIn) || 0) > 0) return true;
-  const p = (c.pipeline || "").toLowerCase();
-  return p.includes("registered") || c.auditionOutcome === "registered";
 }
 
 /* ── Role Styling & Badges ── */
@@ -441,7 +356,10 @@ export default function ProfilePage() {
       const isAttender = matchesStaff(attendedBy);
       const isEnroller = matchesStaff(enrolledBy);
 
-      if (!isAssigned && !isBooker && !isAttender && !isEnroller) continue;
+      const hasActivityOrMessages =
+        (Array.isArray(c.activityLog) && c.activityLog.length > 0) ||
+        (Array.isArray(c.messages) && c.messages.length > 0);
+      if (!isAssigned && !isBooker && !isAttender && !isEnroller && !hasActivityOrMessages) continue;
 
       const createdTime = getCreatedTime(c);
       const leadTitle = getDisplayName(c);
@@ -475,7 +393,7 @@ export default function ProfilePage() {
       // 3. Auditions Booked
       if (isBooker && isBookedLead(c)) {
         const bookTime = getBookedTime(c);
-        if (inTimeRange(bookTime)) {
+        if (bookTime !== null && inTimeRange(bookTime)) {
           bookedCount += 1;
           totalActivities += 1;
           recentMilestones.push({
@@ -493,7 +411,7 @@ export default function ProfilePage() {
       // 4. Auditions Attended & Outcome
       if (isAttender && isAttendedLead(c)) {
         const attTime = getAttendedTime(c);
-        if (inTimeRange(attTime)) {
+        if (attTime !== null && inTimeRange(attTime)) {
           attendedCount += 1;
           totalActivities += 1;
           recentMilestones.push({
@@ -511,7 +429,7 @@ export default function ProfilePage() {
       // 5. Enrolled Students & Cash Collected
       if (isEnroller && isConvertedLead(c)) {
         const convTime = getConvertedTime(c);
-        if (inTimeRange(convTime)) {
+        if (convTime !== null && inTimeRange(convTime)) {
           enrolledCount += 1;
           totalActivities += 1;
           const cashVal = Number(c.cashIn) || 0;
@@ -524,7 +442,7 @@ export default function ProfilePage() {
             leadId: c.id,
             timestamp: convTime,
             type: "enrollment",
-            detail: cashVal > 0 ? `${cashVal.toLocaleString()} SAR Collected` : "Registered Student",
+            detail: cashVal > 0 ? `${cashVal.toLocaleString()} EGP Collected` : "Registered Student",
           });
         }
       }
@@ -547,18 +465,35 @@ export default function ProfilePage() {
         }
       }
 
-      // 7. Messages Sent Tracking
-      if (Array.isArray(c.messages) && c.messages.length > 0) {
-        c.messages.forEach((m) => {
-          if (!m.isIncoming && m.timestamp) {
-            const isMsgSender = m.senderName ? matchesStaff(m.senderName) : isAssigned;
-            if (isMsgSender && inTimeRange(m.timestamp)) {
+      // 7 & 8. Messages Sent & Explicit Activity Log (deduplicated against activityLog)
+      const loggedMsgs = collectLoggedMessageKeys(c.activityLog);
+      const hasActivityMsgLogs = loggedMsgs.ids.size > 0 || loggedMsgs.fallbackTimestamps.size > 0;
+
+      if (Array.isArray(c.activityLog) && c.activityLog.length > 0) {
+        for (const act of c.activityLog) {
+          const rawActor = (act.actor || "").trim();
+          const actActor = (!rawActor || rawActor.toLowerCase() === "staff") && isAssigned ? assigned : rawActor;
+          if (matchesStaff(actActor) && inTimeRange(act.timestamp)) {
+            totalActivities += 1;
+            if (act.type === "message_sent") {
               messagesCount += 1;
-              totalActivities += 1;
             }
           }
-        });
-      } else if (isAssigned) {
+        }
+      }
+
+      if (Array.isArray(c.messages) && c.messages.length > 0) {
+        for (const m of c.messages) {
+          if (m.isIncoming || !m.timestamp) continue;
+          if (isAutomatedTemplateMsg(m)) continue;
+          if (isMessageAlreadyInActivityLog(m, loggedMsgs)) continue;
+          const isMsgSender = m.senderName ? matchesStaff(m.senderName) : isAssigned;
+          if (isMsgSender && inTimeRange(m.timestamp)) {
+            messagesCount += 1;
+            totalActivities += 1;
+          }
+        }
+      } else if (isAssigned && !hasActivityMsgLogs) {
         if (c.lastOutgoingAt) {
           if (inTimeRange(c.lastOutgoingAt)) {
             messagesCount += 1;
@@ -571,29 +506,16 @@ export default function ProfilePage() {
           }
         }
       }
-
-      // 8. Explicit Activity Log Entries (if any were persisted)
-      if (Array.isArray(c.activityLog) && c.activityLog.length > 0) {
-        for (const act of c.activityLog) {
-          const actActor = (act.actor || "").trim();
-          if (matchesStaff(actActor) && inTimeRange(act.timestamp)) {
-            totalActivities += 1;
-            if (act.type === "message_sent") {
-              messagesCount += 1;
-            }
-          }
-        }
-      }
     }
 
     // Sort recent milestones newest first
     recentMilestones.sort((a, b) => b.timestamp - a.timestamp);
 
     // Derived conversion rates
-    const bookingRate = assignedLeads > 0 ? Math.min(100, Math.round((bookedCount / assignedLeads) * 100)) : 0;
-    const showRate = bookedCount > 0 ? Math.min(100, Math.round((attendedCount / bookedCount) * 100)) : 0;
-    const closingRate = attendedCount > 0 ? Math.min(100, Math.round((enrolledCount / attendedCount) * 100)) : 0;
-    const overallWinRate = assignedLeads > 0 ? ((enrolledCount / assignedLeads) * 100).toFixed(1) : "0";
+    const bookingRate = Math.round(clampRatePct(bookedCount, assignedLeads));
+    const showRate = Math.round(clampRatePct(attendedCount, bookedCount));
+    const closingRate = Math.round(clampRatePct(enrolledCount, attendedCount));
+    const overallWinRate = assignedLeads > 0 ? clampRatePct(enrolledCount, assignedLeads).toFixed(1) : "0";
     const avgTicket = enrolledCount > 0 ? Math.round(totalCash / enrolledCount) : 0;
 
     return {
@@ -924,10 +846,10 @@ export default function ProfilePage() {
             />
             <KpiCard
               label="Tuition Recorded"
-              value={`${staffMetrics.totalCash.toLocaleString()} SAR`}
+              value={`${staffMetrics.totalCash.toLocaleString()} EGP`}
               subtext={
                 staffMetrics.enrolledCount > 0
-                  ? `Avg ~${staffMetrics.avgTicket.toLocaleString()} SAR`
+                  ? `Avg ~${staffMetrics.avgTicket.toLocaleString()} EGP`
                   : "Tuition in"
               }
               icon={Banknote}

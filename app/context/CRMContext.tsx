@@ -1449,6 +1449,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                             normRemote.activityLog && normRemote.activityLog.length > 0
                               ? normRemote.activityLog
                               : existing.activityLog,
+                          bookedBy: normRemote.bookedBy || existing.bookedBy,
+                          attendedBy: normRemote.attendedBy || existing.attendedBy,
+                          enrolledBy: normRemote.enrolledBy || existing.enrolledBy,
                           source: normRemote.source || existing.source,
                         }
                       : {}),
@@ -2223,7 +2226,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
           if (generatedActivities.length > 0) {
             const existingLog = Array.isArray(current?.activityLog) ? current.activityLog : [];
-            const nextLog = [...generatedActivities, ...existingLog].slice(0, 120);
+            const nextLog = [...generatedActivities, ...existingLog].slice(0, 250);
             baseSource.activityLog = nextLog;
             enrichedUpdates.activityLog = nextLog;
           }
@@ -3075,7 +3078,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   timestamp: msgTs,
                 },
                 ...nextLog,
-              ].slice(0, 120);
+              ].slice(0, 250);
             }
           }
           const confirmedTs = newestConfirmed ? (newestConfirmed.timestamp || Date.now()) : 0;

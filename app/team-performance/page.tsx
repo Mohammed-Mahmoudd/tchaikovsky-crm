@@ -3,6 +3,21 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef, useDeferredValue, memo, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { useCRM, Conversation, ActivityLogEntry } from '../context/CRMContext';
+import { isAutomatedTemplateMsg } from '../utils/conversationMessages';
+import {
+  clampRatePct,
+  collectLoggedMessageKeys,
+  getAttendedTime,
+  getBookedTime,
+  getConvertedTime,
+  getCreatedTime,
+  getUpdatedTime,
+  isAttendedLead,
+  isBookedLead,
+  isConvertedLead,
+  isMessageAlreadyInActivityLog,
+  parseValidTs,
+} from '../utils/teamMetrics';
 import {
   Calendar,
   MessageSquare,
@@ -141,102 +156,7 @@ function getWeekEnd(start: Date): Date {
   return d;
 }
 
-/* ── Conversation Timestamp & Attribution Helpers ── */
-
-function parseValidTs(val?: string | number | null): number {
-  if (val === undefined || val === null || val === '') return 0;
-  if (typeof val === 'number') return isNaN(val) ? 0 : val;
-  const t = Date.parse(val);
-  return isNaN(t) ? 0 : t;
-}
-
-function getCreatedTime(c: Conversation): number {
-  if (c.createdAt) {
-    const t = Date.parse(c.createdAt);
-    if (!isNaN(t)) return t;
-  }
-  return c.lastMessageAt || (c.updatedAt ? parseValidTs(c.updatedAt) : 0);
-}
-
-function getUpdatedTime(c: Conversation): number {
-  if (c.updatedAt) {
-    const t = Date.parse(c.updatedAt);
-    if (!isNaN(t)) return t;
-  }
-  return getCreatedTime(c);
-}
-
-function isBookedLead(c: Conversation): boolean {
-  return ['Audition Booked', 'Attended', 'Enrolled'].includes(c.pipeline);
-}
-
-function isAttendedLead(c: Conversation): boolean {
-  return ['Attended', 'Enrolled'].includes(c.pipeline);
-}
-
-function isConvertedLead(c: Conversation): boolean {
-  return (
-    c.pipeline === 'Enrolled' ||
-    c.auditionOutcome === 'registered' ||
-    (Number(c.cashIn) || 0) > 0
-  );
-}
-
-function getBookedTime(c: Conversation): number | null {
-  if (!isBookedLead(c) && !c.auditionDate) return null;
-  const explicit =
-    c.auditionBookedAt ||
-    (typeof c.source === 'object' && c.source?.auditionBookedAt ? c.source.auditionBookedAt : undefined);
-  if (explicit) {
-    const t = Date.parse(explicit);
-    if (!isNaN(t)) return t;
-  }
-  if (c.pipeline === 'Audition Booked') {
-    const upd = getUpdatedTime(c);
-    if (c.auditionDate && /^\d{4}-\d{2}-\d{2}$/.test(c.auditionDate)) {
-      const [y, m, d] = c.auditionDate.split('-').map(Number);
-      if (y >= 2020) {
-        const auditionDayEnd = new Date(y, m - 1, d, 23, 59, 59, 999).getTime();
-        if (upd > auditionDayEnd) {
-          return Math.min(getCreatedTime(c), auditionDayEnd);
-        }
-      }
-    }
-    return upd;
-  }
-  return getCreatedTime(c);
-}
-
-function getAttendedTime(c: Conversation): number | null {
-  if (!isAttendedLead(c) && (!c.auditionOutcome || c.auditionOutcome === 'booked')) return null;
-  const explicit =
-    c.attendedAt ||
-    (typeof c.source === 'object' && c.source?.attendedAt ? c.source.attendedAt : undefined);
-  if (explicit) {
-    const t = Date.parse(explicit);
-    if (!isNaN(t)) return t;
-  }
-  if (c.auditionDate && /^\d{4}-\d{2}-\d{2}$/.test(c.auditionDate)) {
-    const [y, m, d] = c.auditionDate.split('-').map(Number);
-    if (y >= 2020) {
-      return new Date(y, m - 1, d, 14, 0, 0, 0).getTime();
-    }
-  }
-  return getUpdatedTime(c);
-}
-
-function getConvertedTime(c: Conversation): number | null {
-  if (!isConvertedLead(c)) return null;
-  const explicit =
-    c.enrolledAt ||
-    c.paidAt ||
-    (typeof c.source === 'object' ? c.source?.enrolledAt || c.source?.paidAt : undefined);
-  if (explicit) {
-    const t = Date.parse(explicit);
-    if (!isNaN(t)) return t;
-  }
-  return getUpdatedTime(c);
-}
+/* ── Conversation Display & Attribution Helpers ── */
 
 function getDisplayName(c: Conversation): string {
   return c.leadName || c.profileName || c.name || c.phone || c.id;
@@ -459,7 +379,6 @@ type RawConvEvent = {
   fromValue?: string;
   toValue?: string;
   timestamp: number;
-  cashVal: number;
 };
 
 type ConvActorStats = {
@@ -469,10 +388,6 @@ type ConvActorStats = {
   maxTimestamp: number;
   count: number;
   messages: number;
-  booked: number;
-  attended: number;
-  enrolled: number;
-  cash: number;
 };
 
 type ParsedConversationData = {
@@ -490,10 +405,13 @@ type ParsedConversationData = {
   createdTs: number;
   waitingReply: boolean;
   bookedLead: boolean;
+  bookedTs: number | null;
   bookActor: string;
   attendedLead: boolean;
+  attTs: number | null;
   attActor: string;
   convertedLead: boolean;
+  convTs: number | null;
   convActor: string;
   cashInNum: number;
   events: RawConvEvent[];
@@ -538,10 +456,6 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
       maxTimestamp: 0,
       count: 0,
       messages: 0,
-      booked: 0,
-      attended: 0,
-      enrolled: 0,
-      cash: 0,
     };
     actorStats.push(created);
     return created;
@@ -565,24 +479,10 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
     const actorLower = cleanActor.toLowerCase();
     involvedActors.add(actorLower);
 
-    let cashVal = 0;
-    if (type === 'cash_recorded') {
-      const parsedCash = toValue ? Number(String(toValue).replace(/[^\d.]/g, '')) : 0;
-      cashVal = parsedCash > 0 ? parsedCash : cashInNum;
-    }
-
     const stat = findOrCreateStat(actorLower, cleanActor, rawRole);
     if (timestamp > stat.maxTimestamp) stat.maxTimestamp = timestamp;
     stat.count += 1;
     if (type === 'message_sent') stat.messages += 1;
-    if (type === 'audition_booked') stat.booked += 1;
-    if (type === 'audition_outcome' && toValue !== 'no-show') stat.attended += 1;
-    if (type === 'cash_recorded' || (type === 'audition_outcome' && toValue === 'registered')) {
-      stat.enrolled += 1;
-    }
-    if (type === 'cash_recorded') {
-      stat.cash += cashVal;
-    }
 
     events.push({
       id,
@@ -596,7 +496,6 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
       fromValue,
       toValue,
       timestamp,
-      cashVal,
     });
   };
 
@@ -604,10 +503,11 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
     for (let i = 0; i < c.activityLog.length; i++) {
       const entry = c.activityLog[i];
       seenTypes.add(entry.type);
+      const entryActor = entry.actor && entry.actor !== 'Staff' ? entry.actor : assignedAgent;
       pushRawEvent(
         `${c.id}_${entry.id}`,
         entry.type,
-        entry.actor || assignedAgent,
+        entryActor,
         entry.actorRole,
         entry.summary,
         entry.detail || '',
@@ -618,25 +518,27 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
     }
   }
 
-  if (!seenTypes.has('message_sent')) {
-    const channelLabel = c.channel === 'WA' ? 'WhatsApp' : c.channel === 'IG' ? 'Instagram' : 'Messenger';
-    if (Array.isArray(c.messages) && c.messages.length > 0) {
-      for (let i = 0; i < c.messages.length; i++) {
-        const m = c.messages[i];
-        if (!m.isIncoming && m.timestamp) {
-          const sender = m.senderName && m.senderName !== 'Staff' ? m.senderName : assignedAgent;
-          pushRawEvent(
-            `${c.id}_msg_${m.id}`,
-            'message_sent',
-            sender,
-            undefined,
-            `Sent ${channelLabel} reply`,
-            (m.text || '').slice(0, 160),
-            m.timestamp
-          );
-        }
-      }
-    } else if (c.lastOutgoingAt && assignedAgent !== 'Unassigned') {
+  const channelLabel = c.channel === 'WA' ? 'WhatsApp' : c.channel === 'IG' ? 'Instagram' : 'Messenger';
+  if (Array.isArray(c.messages) && c.messages.length > 0) {
+    const loggedMsgs = collectLoggedMessageKeys(c.activityLog);
+    for (let i = 0; i < c.messages.length; i++) {
+      const m = c.messages[i];
+      if (m.isIncoming || !m.timestamp) continue;
+      if (isAutomatedTemplateMsg(m)) continue;
+      if (isMessageAlreadyInActivityLog(m, loggedMsgs)) continue;
+      const sender = m.senderName && m.senderName !== 'Staff' ? m.senderName : assignedAgent;
+      pushRawEvent(
+        `${c.id}_msg_${m.id}`,
+        'message_sent',
+        sender,
+        undefined,
+        `Sent ${channelLabel} reply`,
+        (m.text || '').slice(0, 160),
+        m.timestamp
+      );
+    }
+  } else if (!seenTypes.has('message_sent')) {
+    if (c.lastOutgoingAt && assignedAgent !== 'Unassigned') {
       pushRawEvent(
         `${c.id}_lastout_${c.lastOutgoingAt}`,
         'message_sent',
@@ -691,45 +593,41 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
     );
   }
 
-  const bookedLead = isBookedLead(c) || Boolean(c.auditionDate);
+  const bookedLead = isBookedLead(c);
+  const bookedTs = bookedLead ? getBookedTime(c) : null;
   const bookActor = (c.bookedBy || assignedAgent).trim();
-  if (!seenTypes.has('audition_booked') && bookedLead) {
-    const bookedTs = getBookedTime(c);
-    if (bookedTs) {
-      pushRawEvent(
-        `${c.id}_booked`,
-        'audition_booked',
-        bookActor,
-        undefined,
-        c.auditionDate ? `Booked audition for ${c.auditionDate}` : 'Booked Audition',
-        c.branch ? `Branch: ${c.branch}` : 'Audition Booked',
-        bookedTs,
-        'Contacted',
-        'Audition Booked'
-      );
-    }
+  if (!seenTypes.has('audition_booked') && bookedLead && bookedTs) {
+    pushRawEvent(
+      `${c.id}_booked`,
+      'audition_booked',
+      bookActor,
+      undefined,
+      c.auditionDate ? `Booked audition for ${c.auditionDate}` : 'Booked Audition',
+      c.branch ? `Branch: ${c.branch}` : 'Audition Booked',
+      bookedTs,
+      'Contacted',
+      'Audition Booked'
+    );
   }
 
-  const attendedLead = isAttendedLead(c) || Boolean(c.auditionOutcome && c.auditionOutcome !== 'booked');
+  const attendedLead = isAttendedLead(c);
+  const attTs = attendedLead ? getAttendedTime(c) : null;
   const attActor = (c.attendedBy || assignedAgent).trim();
-  if (!seenTypes.has('audition_outcome') && attendedLead) {
-    const attTs = getAttendedTime(c);
-    if (attTs) {
-      const outLabel = c.auditionOutcome
-        ? `Marked outcome: ${formatOutcomeLabel(c.auditionOutcome)}`
-        : 'Marked audition attended';
-      pushRawEvent(
-        `${c.id}_attended`,
-        'audition_outcome',
-        attActor,
-        undefined,
-        outLabel,
-        c.branch ? `Branch: ${c.branch}` : '',
-        attTs,
-        'Audition Booked',
-        c.auditionOutcome ? formatOutcomeLabel(c.auditionOutcome) : 'Attended'
-      );
-    }
+  if (!seenTypes.has('audition_outcome') && attendedLead && attTs) {
+    const outLabel = c.auditionOutcome
+      ? `Marked outcome: ${formatOutcomeLabel(c.auditionOutcome)}`
+      : 'Marked audition attended';
+    pushRawEvent(
+      `${c.id}_attended`,
+      'audition_outcome',
+      attActor,
+      undefined,
+      outLabel,
+      c.branch ? `Branch: ${c.branch}` : '',
+      attTs,
+      'Audition Booked',
+      c.auditionOutcome ? formatOutcomeLabel(c.auditionOutcome) : 'Attended'
+    );
   }
 
   if (c.followUpCompleted && !seenTypes.has('followup_completed')) {
@@ -765,22 +663,20 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
   }
 
   const convertedLead = isConvertedLead(c);
+  const convTs = convertedLead ? getConvertedTime(c) : null;
   const convActor = (c.enrolledBy || assignedAgent).trim();
-  if (!seenTypes.has('cash_recorded') && convertedLead) {
-    const convTs = getConvertedTime(c);
-    if (convTs) {
-      pushRawEvent(
-        `${c.id}_enrolled`,
-        'cash_recorded',
-        convActor,
-        undefined,
-        cashInNum > 0 ? `Recorded payment: ${cashInNum.toLocaleString()} EGP` : 'Enrolled student',
-        c.branch ? `Branch: ${c.branch}` : 'Enrolled',
-        convTs,
-        'Attended',
-        cashInNum > 0 ? `${cashInNum.toLocaleString()} EGP` : 'Enrolled'
-      );
-    }
+  if (!seenTypes.has('cash_recorded') && convertedLead && convTs) {
+    pushRawEvent(
+      `${c.id}_enrolled`,
+      'cash_recorded',
+      convActor,
+      undefined,
+      cashInNum > 0 ? `Recorded payment: ${cashInNum.toLocaleString()} EGP` : 'Enrolled student',
+      c.branch ? `Branch: ${c.branch}` : 'Enrolled',
+      convTs,
+      'Attended',
+      cashInNum > 0 ? `${cashInNum.toLocaleString()} EGP` : 'Enrolled'
+    );
   }
 
   if (!seenTypes.has('note_updated') && c.notes && c.notes.trim() && assignedAgent !== 'Unassigned') {
@@ -810,10 +706,13 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
     createdTs,
     waitingReply: Boolean((c.unreadCount && c.unreadCount > 0) || c.pipeline === 'New'),
     bookedLead,
+    bookedTs,
     bookActor,
     attendedLead,
+    attTs,
     attActor,
     convertedLead,
+    convTs,
     convActor,
     cashInNum,
     events,
@@ -1272,8 +1171,12 @@ const StaffSidebarRow = memo(function StaffSidebarRow({
           </span>
           <div className="flex items-center gap-1.5 text-[9px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
             <span>{isAllTime ? st.totalLeadsAssigned : st.periodLeadsAssigned} leads</span>
-            {st.bookedInPeriod > 0 && <span>· {st.bookedInPeriod} booked</span>}
-            {st.enrolledInPeriod > 0 && <span>· {st.enrolledInPeriod} enrolled</span>}
+            {(isAllTime ? st.allTimeBooked : st.bookedInPeriod) > 0 && (
+              <span>· {isAllTime ? st.allTimeBooked : st.bookedInPeriod} booked</span>
+            )}
+            {(isAllTime ? st.allTimeEnrolled : st.enrolledInPeriod) > 0 && (
+              <span>· {isAllTime ? st.allTimeEnrolled : st.enrolledInPeriod} enrolled</span>
+            )}
           </div>
         </div>
       </div>
@@ -1672,17 +1575,31 @@ function TeamActivitiesPageInner() {
 
       if (p.bookedLead) {
         const bSt = ensureStaff(p.bookActor);
-        if (bSt) bSt.allTimeBooked += 1;
+        if (bSt) {
+          bSt.allTimeBooked += 1;
+          if (isAllTime || inPeriod(p.bookedTs)) {
+            bSt.bookedInPeriod += 1;
+          }
+        }
       }
       if (p.attendedLead) {
         const aSt = ensureStaff(p.attActor);
-        if (aSt) aSt.allTimeAttended += 1;
+        if (aSt) {
+          aSt.allTimeAttended += 1;
+          if (isAllTime || inPeriod(p.attTs)) {
+            aSt.attendedInPeriod += 1;
+          }
+        }
       }
       if (p.convertedLead) {
         const cSt = ensureStaff(p.convActor);
         if (cSt) {
           cSt.allTimeEnrolled += 1;
           cSt.allTimeCash += p.cashInNum;
+          if (isAllTime || inPeriod(p.convTs)) {
+            cSt.enrolledInPeriod += 1;
+            cSt.cashInPeriod += p.cashInNum;
+          }
         }
       }
 
@@ -1696,10 +1613,6 @@ function TeamActivitiesPageInner() {
           }
           st.periodActivitiesCount += stat.count;
           st.messagesInPeriod += stat.messages;
-          st.bookedInPeriod += stat.booked;
-          st.attendedInPeriod += stat.attended;
-          st.enrolledInPeriod += stat.enrolled;
-          st.cashInPeriod += stat.cash;
         }
       } else {
         for (let j = 0; j < p.events.length; j++) {
@@ -1712,14 +1625,6 @@ function TeamActivitiesPageInner() {
           if (ev.timestamp >= periodStartMs && ev.timestamp <= periodEndMs) {
             st.periodActivitiesCount += 1;
             if (ev.type === 'message_sent') st.messagesInPeriod += 1;
-            if (ev.type === 'audition_booked') st.bookedInPeriod += 1;
-            if (ev.type === 'audition_outcome' && ev.toValue !== 'no-show') st.attendedInPeriod += 1;
-            if (ev.type === 'cash_recorded' || (ev.type === 'audition_outcome' && ev.toValue === 'registered')) {
-              st.enrolledInPeriod += 1;
-            }
-            if (ev.type === 'cash_recorded') {
-              st.cashInPeriod += ev.cashVal;
-            }
           }
         }
       }
@@ -1856,9 +1761,9 @@ function TeamActivitiesPageInner() {
         : selectedStaffObj.cashInPeriod
       : 0;
 
-    const bookingRate = leads > 0 ? Math.min(100, Math.round((booked / leads) * 100)) : booked > 0 ? 100 : 0;
-    const showRate = booked > 0 ? Math.min(100, Math.round((attended / booked) * 100)) : attended > 0 ? 100 : 0;
-    const closingRate = booked > 0 ? Math.min(100, Math.round((enrolled / booked) * 100)) : enrolled > 0 ? 100 : 0;
+    const bookingRate = Math.round(clampRatePct(booked, leads));
+    const showRate = Math.round(clampRatePct(attended, booked));
+    const closingRate = Math.round(clampRatePct(enrolled, booked));
 
     return {
       totalLeads: leads,
@@ -1881,19 +1786,21 @@ function TeamActivitiesPageInner() {
     const enrolled = selectedMetrics.totalEnrolled;
     const cash = selectedMetrics.totalCash;
 
-    const bookingRate = leads > 0 ? (booked / leads) * 100 : 0;
+    const bookingRate = clampRatePct(booked, leads);
     const bookingRateStr = bookingRate > 0 && bookingRate < 10 ? bookingRate.toFixed(1) : Math.round(bookingRate).toString();
-    const bookingDrop = leads > 0 ? (100 - bookingRate).toFixed(1) : '0';
+    const bookingDrop = leads > 0 ? Math.max(0, 100 - bookingRate).toFixed(1) : '0';
 
-    const showRate = booked > 0 ? (attended / booked) * 100 : 0;
+    const showRate = clampRatePct(attended, booked);
     const showRateStr = Math.round(showRate).toString();
-    const showDrop = booked > 0 ? Math.round(100 - showRate).toString() : '0';
+    const showDrop = booked > 0 ? Math.round(Math.max(0, 100 - showRate)).toString() : '0';
 
-    const closeRate = attended > 0 ? (enrolled / attended) * 100 : (booked > 0 ? (enrolled / booked) * 100 : 0);
+    const closeDenom = attended > 0 ? attended : booked;
+    const closeRate = clampRatePct(enrolled, closeDenom);
     const closeRateStr = Math.round(closeRate).toString();
-    const closeDrop = attended > 0 ? Math.round(100 - closeRate).toString() : '0';
+    const closeDrop = closeDenom > 0 ? Math.round(Math.max(0, 100 - closeRate)).toString() : '0';
 
-    const overallWinRate = leads > 0 ? ((enrolled / leads) * 100).toFixed(1) : '0';
+    const overallWinRatePct = clampRatePct(enrolled, leads);
+    const overallWinRate = leads > 0 ? overallWinRatePct.toFixed(1) : '0';
 
     const avgPerStudent = enrolled > 0 ? Math.round(cash / enrolled) : 0;
     const avgPerLead = leads > 0 ? Math.round(cash / leads) : 0;
