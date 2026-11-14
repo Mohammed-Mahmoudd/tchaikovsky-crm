@@ -22,6 +22,7 @@ import {
 
 import { useCRM } from '../context/CRMContext';
 import { matchLeadSearch } from '../utils/search';
+import { markTeamSidebarNavigation } from '../utils/teamAuditNav';
 
 interface SidebarProps {
   isMobileOpen?: boolean;
@@ -73,6 +74,7 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
 
   const handleSelectLead = useCallback(
     (id: string) => {
+      markTeamSidebarNavigation();
       openChat(id);
       setIsDropdownOpen(false);
       onCloseMobile?.();
@@ -85,6 +87,7 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
       if (sidebarMatches.length > 0) {
         handleSelectLead(sidebarMatches[0].id);
       } else if (pathname !== '/') {
+        markTeamSidebarNavigation();
         router.push('/');
         setIsDropdownOpen(false);
         onCloseMobile?.();
@@ -364,7 +367,10 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
 
           <Link
             href="/profile"
-            onClick={onCloseMobile}
+            onClick={() => {
+              markTeamSidebarNavigation();
+              onCloseMobile?.();
+            }}
             className={`mb-3 p-1.5 flex items-center gap-2.5 rounded-lg transition-colors cursor-pointer ${
               pathname === '/profile' ? 'bg-[var(--bg-selected)]' : 'hover:bg-[var(--bg-hover)]'
             }`}
@@ -438,7 +444,10 @@ function NavItem({
   return (
     <Link
       href={href}
-      onClick={onClick}
+      onClick={() => {
+        markTeamSidebarNavigation();
+        onClick?.();
+      }}
       className={`flex items-center justify-between px-2.5 py-[7px] text-[13px] rounded-lg transition-colors ${active ? 'font-medium' : ''}`}
       style={active ? { background: 'var(--bg-selected)', color: 'var(--text-primary)' } : { color: 'var(--text-secondary)' }}
     >

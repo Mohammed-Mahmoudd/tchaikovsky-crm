@@ -1,12 +1,13 @@
 "use client";
 
-import React, { useState, useMemo, useCallback, useRef, useEffect, Suspense } from 'react';
-import { useSearchParams } from 'next/navigation';
+import React, { useState, useMemo, useCallback, useRef, useEffect, useSyncExternalStore, Suspense } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { useCRM } from '../context/CRMContext';
 import { useAuth } from '../components/AuthProvider';
-import { MessageSquare, Calendar, ChevronLeft, ChevronRight, X, MapPin, ChevronDown, Search, Lock, Unlock, User, Clock, Check } from 'lucide-react';
+import { MessageSquare, Calendar, ChevronLeft, ChevronRight, X, MapPin, ChevronDown, Search, Lock, Unlock, User, Clock, Check, ArrowLeft } from 'lucide-react';
 import { useBranches, LegacyBranchGroup } from '../lib/branches';
 import { BranchSelect } from '../components/BranchSelect';
+import { getTeamReturnBannerInfo, navigateBackToTeamActivities } from '../utils/teamAuditNav';
 
 type AuditionOutcome = 'registered' | 'schedule-followup' | 'paid-trial' | 'joining-later' | 'no-show';
 type SlotStatus = AuditionOutcome | 'booked' | 'closed';
@@ -953,19 +954,28 @@ function AgentFilterPopover({
   );
 }
 
+const subscribeNoop = () => () => {};
+
 function AuditionsPageInner() {
   const { conversations, patchConversation, openChat, assignableAgents } = useCRM();
   const { isReadOnly, user } = useAuth();
   const { branchGroups, legacyBranchGroups } = useBranches();
+  const router = useRouter();
   const searchParams = useSearchParams();
   const urlDate = searchParams.get('date');
   const urlHighlightId = searchParams.get('id');
+  const fromSource = searchParams.get('from');
+  const returnLabel = useSyncExternalStore(
+    subscribeNoop,
+    () => (fromSource === 'team-performance' ? getTeamReturnBannerInfo().label : 'Back to Funnel Audit'),
+    () => 'Back to Funnel Audit'
+  );
   const [highlightConvId, setHighlightConvId] = useState<string | null>(urlHighlightId);
 
-  // Auto-clear the glow after 3 seconds
+  // Auto-clear the glow after 4.5 seconds
   useEffect(() => {
     if (!highlightConvId) return;
-    const t = setTimeout(() => setHighlightConvId(null), 3000);
+    const t = setTimeout(() => setHighlightConvId(null), 4500);
     return () => clearTimeout(t);
   }, [highlightConvId]);
 
@@ -1272,6 +1282,51 @@ function AuditionsPageInner() {
     if (viewMode === 'month') return monthDays;
     return weekDays;
   }, [viewMode, monthDays, weekDays]);
+
+  const handledDeepLinkIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!urlHighlightId) {
+      handledDeepLinkIdRef.current = null;
+      return;
+    }
+    if (handledDeepLinkIdRef.current === urlHighlightId) return;
+
+    let foundDateKey: string | null = null;
+    let foundSlot: Slot | null = null;
+    for (const [dateKey, dayList] of Object.entries(slots)) {
+      const match = dayList.find(s => s.conversationId === urlHighlightId || String(s.id) === urlHighlightId);
+      if (match) {
+        foundDateKey = dateKey;
+        foundSlot = match;
+        break;
+      }
+    }
+    if (!foundSlot || !foundDateKey) return;
+
+    let cancelled = false;
+    const matchedDateKey = foundDateKey;
+    const matchedSlot = foundSlot;
+    queueMicrotask(() => {
+      if (cancelled || handledDeepLinkIdRef.current === urlHighlightId) return;
+      handledDeepLinkIdRef.current = urlHighlightId;
+
+      const inCurrentPeriod = activePeriodDays.some(d => isoDate(d) === matchedDateKey);
+      if (!inCurrentPeriod && /^\d{4}-\d{2}-\d{2}$/.test(matchedDateKey)) {
+        setCurrentDate(new Date(`${matchedDateKey}T12:00:00`));
+      }
+      if (!matchesBranch(matchedSlot.branch, selectedBranch)) {
+        setSelectedBranch('ALL');
+      }
+      if (selectedAgent && selectedAgent !== 'ALL' && !matchesAgent(matchedSlot.agent, selectedAgent, user?.name)) {
+        setSelectedAgent('ALL');
+      }
+      setHighlightConvId(urlHighlightId);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [urlHighlightId, slots, activePeriodDays, selectedBranch, selectedAgent, user?.name]);
 
   const handlePrev = useCallback(() => {
     setCurrentDate(d => {
@@ -1714,6 +1769,22 @@ function AuditionsPageInner() {
       {/* Header */}
       <div className="px-4 md:px-6 py-4 flex flex-wrap items-center justify-between gap-2 shrink-0 relative z-30" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
         <div className="flex items-center gap-3">
+          {fromSource === 'team-performance' && (
+            <button
+              type="button"
+              onClick={() => navigateBackToTeamActivities(router)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold transition-all hover:opacity-90 active:scale-[0.98] cursor-pointer shrink-0"
+              style={{
+                background: 'rgba(0, 102, 255, 0.1)',
+                color: '#0066FF',
+                border: '1px solid rgba(0, 102, 255, 0.25)',
+              }}
+              title="Return cleanly without losing your previous view"
+            >
+              <ArrowLeft size={14} />
+              <span>{returnLabel}</span>
+            </button>
+          )}
           <div>
             <h1 className="text-[15px] font-bold leading-none mb-0.5" style={{ color: 'var(--text-primary)' }}>Auditions Calendar</h1>
             <p className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
@@ -2520,9 +2591,11 @@ function SlotCard({
   const highlightRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (isHighlighted && highlightRef.current) {
-      highlightRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
+    if (!isHighlighted) return;
+    const frameId = window.requestAnimationFrame(() => {
+      highlightRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+    });
+    return () => window.cancelAnimationFrame(frameId);
   }, [isHighlighted]);
 
   // ── Closed slot card ──

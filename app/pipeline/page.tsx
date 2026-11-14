@@ -1,8 +1,9 @@
 "use client";
 
-import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
+import React, { useState, useMemo, useEffect, useRef, useCallback, useSyncExternalStore, Suspense } from "react";
 import Link from "next/link";
-import { MessageSquare, Trash2, AlertTriangle, Calendar, CheckCircle2, Clock, X, ChevronLeft, ChevronRight } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { MessageSquare, Trash2, AlertTriangle, Calendar, CheckCircle2, Clock, X, ChevronLeft, ChevronRight, ArrowLeft } from "lucide-react";
 import { useCRM } from "../context/CRMContext";
 import { useAuth, isDirectorOrChairmanRole, isAdmissionRole } from "../components/AuthProvider";
 import { formatLastMessageTime } from "../utils/time";
@@ -11,6 +12,7 @@ import { BranchSelect } from "../components/BranchSelect";
 import { ConversationChatView } from "../components/ConversationChatView";
 import { ConversationDetailsSidebar } from "../components/ConversationDetailsSidebar";
 import { Conversation } from "../context/CRMContext";
+import { getTeamReturnBannerInfo, navigateBackToTeamActivities } from "../utils/teamAuditNav";
 
 import {
   DndContext,
@@ -206,12 +208,14 @@ const ColumnDropZone = React.memo(function ColumnDropZone() {
 const LeadCard = React.memo(function LeadCard({
   lead,
   isDragging,
+  isHighlighted,
   onClick,
   onMove,
   isReadOnly,
 }: {
   lead: Lead;
   isDragging?: boolean;
+  isHighlighted?: boolean;
   onClick?: () => void;
   onMove?: (stage: Stage) => void;
   isReadOnly?: boolean;
@@ -242,6 +246,7 @@ const LeadCard = React.memo(function LeadCard({
 
   return (
     <div
+      data-lead-id={!isDragging ? lead.id : undefined}
       onClick={onClick}
       className={`group rounded-xl px-3 py-2.5 transition-shadow select-none relative ${
         isDragging
@@ -249,9 +254,11 @@ const LeadCard = React.memo(function LeadCard({
           : "hover:shadow-md cursor-pointer"
       }`}
       style={{
-        background: "var(--bg-card)",
-        border: isDragging ? "1.5px solid #0066FF" : "1px solid var(--border-main)",
-        boxShadow: "var(--shadow-card)",
+        background: isHighlighted ? "var(--bg-selected)" : "var(--bg-card)",
+        border: isDragging || isHighlighted ? "1.5px solid #0066FF" : "1px solid var(--border-main)",
+        boxShadow: isHighlighted
+          ? "0 0 0 2px rgba(0, 102, 255, 0.25), 0 6px 18px rgba(0, 102, 255, 0.16)"
+          : "var(--shadow-card)",
       }}
     >
       <div className="flex items-start justify-between gap-1.5">
@@ -319,11 +326,13 @@ const LeadCard = React.memo(function LeadCard({
 
 const DraggableLeadCard = React.memo(function DraggableLeadCard({
   lead,
+  isHighlighted,
   onClick,
   onMove,
   isReadOnly,
 }: {
   lead: Lead;
+  isHighlighted?: boolean;
   onClick: () => void;
   onMove: (stage: Stage) => void;
   isReadOnly?: boolean;
@@ -362,6 +371,7 @@ const DraggableLeadCard = React.memo(function DraggableLeadCard({
     <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
       <LeadCard
         lead={lead}
+        isHighlighted={isHighlighted}
         onClick={onClick}
         onMove={onMove}
         isReadOnly={isReadOnly}
@@ -377,6 +387,7 @@ const Column = React.memo(function Column({
   leads,
   totalCount,
   isTargetColumn,
+  highlightedLeadId,
   onSelectLead,
   onMoveLead,
   onShowMore,
@@ -387,6 +398,7 @@ const Column = React.memo(function Column({
   leads: Lead[];
   totalCount: number;
   isTargetColumn: boolean;
+  highlightedLeadId?: string | null;
   onSelectLead: (id: string) => void;
   onMoveLead: (id: string, stage: Stage) => void;
   onShowMore: () => void;
@@ -437,6 +449,7 @@ const Column = React.memo(function Column({
             <DraggableLeadCard
               key={lead.id}
               lead={lead}
+              isHighlighted={highlightedLeadId === lead.id}
               onClick={() => onSelectLead(lead.id)}
               onMove={(targetStage) => onMoveLead(lead.id, targetStage)}
               isReadOnly={isReadOnly}
@@ -466,9 +479,15 @@ const Column = React.memo(function Column({
 
 // ─── Main Page ───────────────────────────────────────────────────────────────
 
-export default function PipelinePage() {
+const subscribeNoop = () => () => {};
+
+function PipelinePageInner() {
   const { conversations, patchConversation, openChat, setPollPaused, assignableAgents } = useCRM();
   const { isReadOnly, user } = useAuth();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const urlLeadId = searchParams.get("id");
+  const fromSource = searchParams.get("from");
   const isChairman = isDirectorOrChairmanRole(user?.role);
   const isAdmission = isAdmissionRole(user?.role);
   const userClean = (user?.name || "").trim().toLowerCase();
@@ -476,7 +495,14 @@ export default function PipelinePage() {
   const [view, setView] = useState<"pipeline" | "table">("pipeline");
   const [activeId, setActiveId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
-  const [panelLeadId, setPanelLeadId] = useState<string | null>(null);
+  const [panelLeadId, setPanelLeadId] = useState<string | null>(() => urlLeadId || null);
+  const [highlightedLeadId, setHighlightedLeadId] = useState<string | null>(() => urlLeadId || null);
+  const returnLabel = useSyncExternalStore(
+    subscribeNoop,
+    () => (fromSource === "team-performance" ? getTeamReturnBannerInfo().label : "Back to Funnel Audit"),
+    () => "Back to Funnel Audit"
+  );
+  const handledDeepLinkRef = useRef<string | null>(null);
   const [panelTab, setPanelTab] = useState<"details" | "chat">("details");
   const [showChatDetails, setShowChatDetails] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
@@ -748,7 +774,99 @@ export default function PipelinePage() {
   );
 
   const activeLead = useMemo(() => activeId ? leads.find(l => l.id === activeId) ?? null : null, [activeId, leads]);
-  const panelLead = useMemo(() => panelLeadId ? leads.find(l => l.id === panelLeadId) ?? null : null, [panelLeadId, leads]);
+  const panelLead = useMemo(() => {
+    if (!panelLeadId) return null;
+    const found = leads.find((l) => l.id === panelLeadId);
+    if (found) return found;
+    const conv = conversations.find((c) => c.id === panelLeadId);
+    if (!conv) return null;
+    return {
+      id: conv.id,
+      name: conv.leadName || conv.profileName || conv.name,
+      campaign:
+        typeof conv.source === "object"
+          ? conv.source?.campaign || "Direct"
+          : conv.source && conv.source !== "direct"
+            ? conv.source
+            : "Direct",
+      date: conv.createdAt
+        ? new Date(conv.createdAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+        : "—",
+      rawCreatedAt: conv.createdAt ? new Date(conv.createdAt).getTime() : 0,
+      stage: ((conv.pipeline && conv.pipeline !== "direct" ? conv.pipeline : "New") as Stage),
+      phone: conv.phone,
+      agent: conv.agent || "Unassigned",
+      channel: conv.channel || "Direct",
+    };
+  }, [panelLeadId, leads, conversations]);
+
+  useEffect(() => {
+    if (!urlLeadId) {
+      handledDeepLinkRef.current = null;
+      return;
+    }
+    if (conversations.length === 0 || handledDeepLinkRef.current === urlLeadId) return;
+
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled || handledDeepLinkRef.current === urlLeadId) return;
+      handledDeepLinkRef.current = urlLeadId;
+
+      setPanelLeadId(urlLeadId);
+      setPanelTab("details");
+      setShowChatDetails(false);
+      setIsClosing(false);
+      setHighlightedLeadId(urlLeadId);
+
+      const targetLead = leads.find((l) => l.id === urlLeadId);
+      if (targetLead) {
+        if (hiddenStages.has(targetLead.stage)) {
+          setHiddenStages((prev) => {
+            const next = new Set(prev);
+            next.delete(targetLead.stage);
+            return next;
+          });
+        }
+        const inFiltered = filteredLeads.some((l) => l.id === urlLeadId);
+        if (!inFiltered && hasActiveFilters) {
+          setFilterCampaign("All campaigns");
+          setFilterAgent("Everyone");
+          setFilterSource("All sources");
+          setFilterReceived("Any time");
+        }
+        const stageList = (inFiltered ? groupedLeads[targetLead.stage] : leads.filter((l) => l.stage === targetLead.stage));
+        const idxInStage = stageList.findIndex((l) => l.id === urlLeadId);
+        if (idxInStage >= 0) {
+          setVisibleCounts((prev) => {
+            const curr = prev[targetLead.stage] || INITIAL_VISIBLE_COUNT;
+            if (idxInStage < curr) return prev;
+            return { ...prev, [targetLead.stage]: idxInStage + 5 };
+          });
+        }
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [urlLeadId, conversations.length, leads, hiddenStages, filteredLeads, hasActiveFilters, groupedLeads]);
+
+  useEffect(() => {
+    if (!highlightedLeadId) return;
+    const cssEscape = typeof window !== "undefined" ? window.CSS?.escape : undefined;
+    const esc = typeof cssEscape === "function"
+      ? cssEscape(highlightedLeadId)
+      : highlightedLeadId.replace(/["\\]/g, "\\$&");
+    const raf = requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-lead-id="${esc}"]`) as HTMLElement | null;
+      el?.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+    });
+    const t = setTimeout(() => setHighlightedLeadId(null), 4500);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(t);
+    };
+  }, [highlightedLeadId, visibleCounts, view]);
   const panelConv = useMemo(() => panelLeadId ? conversations.find(c => c.id === panelLeadId) ?? null : null, [panelLeadId, conversations]);
   const effectiveConv = useMemo(() => {
     if (panelConv) return panelConv;
@@ -1002,6 +1120,17 @@ export default function PipelinePage() {
 
       {/* Top bar: view switcher + lead count */}
       <div className="px-4 md:px-6 py-2.5 flex items-center gap-2 flex-wrap shrink-0" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
+        {fromSource === "team-performance" && (
+          <button
+            type="button"
+            onClick={() => navigateBackToTeamActivities(router)}
+            className="text-[12px] font-semibold px-2.5 py-1.5 rounded-[8px] inline-flex items-center gap-1.5 transition-colors cursor-pointer bg-[var(--bg-pill)] border border-[var(--border-input)] text-[var(--text-primary)] hover:bg-[var(--bg-hover)] mr-1"
+            title={returnLabel}
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span className="truncate max-w-[220px]">{returnLabel}</span>
+          </button>
+        )}
         <button
           onClick={() => setView("pipeline")}
           className={`text-[12px] font-semibold px-3 py-1.5 rounded-[8px] transition-colors cursor-pointer touch-manipulation`}
@@ -1062,11 +1191,20 @@ export default function PipelinePage() {
               {filteredLeads.map((lead, idx) => (
                 <tr
                   key={lead.id}
+                  data-lead-id={lead.id}
                   onClick={() => {
                     handleOpenPanel(lead.id, "details");
                   }}
                   className={`cursor-pointer transition-colors`}
-                  style={{ borderBottom: '1px solid var(--border-main)', background: idx % 2 === 0 ? 'var(--bg-table-alt)' : 'var(--bg-card)' }}
+                  style={{
+                    borderBottom: '1px solid var(--border-main)',
+                    background:
+                      highlightedLeadId === lead.id
+                        ? 'var(--bg-selected)'
+                        : idx % 2 === 0
+                          ? 'var(--bg-table-alt)'
+                          : 'var(--bg-card)',
+                  }}
                 >
                   <td className="px-6 py-3">{lead.name}</td>
                   <td className="px-6 py-3 font-medium">{lead.phone || "—"}</td>
@@ -1199,6 +1337,7 @@ export default function PipelinePage() {
                         leads={visibleLeads}
                         totalCount={allStageLeads.length}
                         isTargetColumn={isTarget}
+                        highlightedLeadId={highlightedLeadId}
                         onSelectLead={(id) => {
                           handleOpenPanel(id, "details");
                         }}
@@ -1937,6 +2076,14 @@ function FilterPill({ label, value, options, onChange }: {
         })}
       </select>
     </div>
+  );
+}
+
+export default function PipelinePage() {
+  return (
+    <Suspense fallback={null}>
+      <PipelinePageInner />
+    </Suspense>
   );
 }
 

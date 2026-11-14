@@ -1,13 +1,14 @@
 "use client";
 
-import React, { useState, useMemo, useCallback, useEffect, useRef, useDeferredValue, memo, Suspense } from 'react';
-import { useSearchParams } from 'next/navigation';
+import React, { useState, useMemo, useCallback, useEffect, useLayoutEffect, useRef, useDeferredValue, memo, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useCRM, Conversation, ActivityLogEntry } from '../context/CRMContext';
 import { isAutomatedTemplateMsg } from '../utils/conversationMessages';
 import { formatRoleLabel, isAdmissionRole } from '../utils/roles';
 import {
   clampRatePct,
   collectLoggedMessageKeys,
+  FunnelAuditTarget,
   getAttendedTime,
   getBookedTime,
   getConvertedTime,
@@ -17,8 +18,23 @@ import {
   isBookedLead,
   isConvertedLead,
   isMessageAlreadyInActivityLog,
+  isRealAssignedAgent,
   parseValidTs,
 } from '../utils/teamMetrics';
+import { FunnelAuditModal } from '../components/FunnelAuditModal';
+import { SlideOverChatDrawer, useSlideOverChatDrawer } from '../components/SlideOverChatDrawer';
+import {
+  activateTeamAuditRestoreFromDraft,
+  formatAuditReturnLabel,
+  FunnelAuditModalSnapshot,
+  getMemoryTeamSnapshot,
+  getStorageTeamSnapshot,
+  resolveLeadSourceRoute,
+  saveTeamActivitiesSnapshot,
+  TeamActivitiesSnapshot,
+  updateTeamActivitiesDraft,
+  wasTeamSidebarNavigation,
+} from '../utils/teamAuditNav';
 import {
   Calendar,
   MessageSquare,
@@ -716,11 +732,6 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
 
 type FunnelCounts = { leads: number; booked: number; attended: number; enrolled: number; cash: number };
 
-/** True when a conversation's assigned agent is a real staff member (not a placeholder). */
-function isRealAssignedAgent(agent: string): boolean {
-  return Boolean(agent) && agent !== 'Unassigned' && agent !== 'Staff' && agent !== 'System';
-}
-
 const ALL_AGENTS_ID = '__all__';
 const TIMELINE_BATCH_SIZE = 50;
 const LEADS_BATCH_SIZE = 50;
@@ -763,11 +774,13 @@ const TimelineEventCard = memo(function TimelineEventCard({
   act,
   showActor = false,
   onOpenChat,
+  onOpenSource,
   onSelectAgent,
 }: {
   act: EnrichedActivity;
   showActor?: boolean;
   onOpenChat: (conversationId: string) => void;
+  onOpenSource?: (act: EnrichedActivity) => void;
   onSelectAgent?: (name: string) => void;
 }) {
   const actionPhrase = getNaturalActionPhrase(act);
@@ -844,10 +857,14 @@ const TimelineEventCard = memo(function TimelineEventCard({
             </span>
             <button
               type="button"
-              onClick={() => onOpenChat(act.conversationId)}
-              className="font-bold text-[12px] hover:underline cursor-pointer truncate max-w-[220px]"
+              onClick={() => (onOpenSource ? onOpenSource(act) : onOpenChat(act.conversationId))}
+              className="font-bold text-[12px] hover:text-[#0066FF] hover:underline cursor-pointer truncate max-w-[220px]"
               style={{ color: 'var(--text-primary)' }}
-              title="Open conversation"
+              title={
+                act.type === 'audition_booked' || act.type === 'audition_outcome'
+                  ? 'Open audition slot in Auditions'
+                  : 'Open lead in Pipeline'
+              }
             >
               {act.leadName}
             </button>
@@ -1000,11 +1017,13 @@ const CompactEventRow = memo(function CompactEventRow({
   act,
   showActor = false,
   onOpenChat,
+  onOpenSource,
   onSelectAgent,
 }: {
   act: EnrichedActivity;
   showActor?: boolean;
   onOpenChat: (conversationId: string) => void;
+  onOpenSource?: (act: EnrichedActivity) => void;
   onSelectAgent?: (name: string) => void;
 }) {
   const actionPhrase = getNaturalActionPhrase(act);
@@ -1047,9 +1066,14 @@ const CompactEventRow = memo(function CompactEventRow({
           </span>
           <button
             type="button"
-            onClick={() => onOpenChat(act.conversationId)}
-            className="font-bold hover:underline cursor-pointer truncate max-w-[180px]"
+            onClick={() => (onOpenSource ? onOpenSource(act) : onOpenChat(act.conversationId))}
+            className="font-bold hover:text-[#0066FF] hover:underline cursor-pointer truncate max-w-[180px]"
             style={{ color: 'var(--text-primary)' }}
+            title={
+              act.type === 'audition_booked' || act.type === 'audition_outcome'
+                ? 'Open audition slot in Auditions'
+                : 'Open lead in Pipeline'
+            }
           >
             {act.leadName}
           </button>
@@ -1318,49 +1342,111 @@ type TeamAggregateSummary = {
 
 function TeamActivitiesPageInner() {
   const { conversations, assignableAgents, teamMembers, loading, openChat } = useCRM();
+  const router = useRouter();
   const searchParams = useSearchParams();
   const urlAgent = searchParams.get('agent') || searchParams.get('officer');
+  const urlRestore = searchParams.get('restore') === '1';
+
+  const cleanUrlAgent = (urlAgent || '').trim();
+  const initialMemorySnap = getMemoryTeamSnapshot(cleanUrlAgent, urlRestore);
 
   // Date filter state
-  const [filterMode, setFilterMode] = useState<'all' | 'day' | 'week' | 'range'>('all');
-  const [currentDate, setCurrentDate] = useState<Date>(() => getDayStart(new Date()));
-  const [customStartDate, setCustomStartDate] = useState<string>(() => isoDate(getWeekStart(new Date())));
-  const [customEndDate, setCustomEndDate] = useState<string>(() => isoDate(getDayStart(new Date())));
+  const [filterMode, setFilterMode] = useState<'all' | 'day' | 'week' | 'range'>(
+    () => initialMemorySnap?.filterMode ?? 'all'
+  );
+  const [currentDate, setCurrentDate] = useState<Date>(() =>
+    initialMemorySnap?.currentDateIso
+      ? parseIsoInputDate(initialMemorySnap.currentDateIso, getDayStart(new Date()))
+      : getDayStart(new Date())
+  );
+  const [customStartDate, setCustomStartDate] = useState<string>(
+    () => initialMemorySnap?.customStartDate ?? isoDate(getWeekStart(new Date()))
+  );
+  const [customEndDate, setCustomEndDate] = useState<string>(
+    () => initialMemorySnap?.customEndDate ?? isoDate(getDayStart(new Date()))
+  );
 
   // Selected agent in the right sidebar (derived from URL param unless user explicitly clicked another staff member)
-  const cleanUrlAgent = (urlAgent || '').trim();
-  const [userPickedAgent, setUserPickedAgent] = useState<{ agent: string; urlAtPick: string } | null>(null);
+  const [userPickedAgent, setUserPickedAgent] = useState<{ agent: string; urlAtPick: string } | null>(
+    () => initialMemorySnap?.userPickedAgent ?? null
+  );
   const selectedAgent =
     userPickedAgent && userPickedAgent.urlAtPick === cleanUrlAgent
       ? userPickedAgent.agent
       : cleanUrlAgent;
 
   // Main view mode: 'timeline' | 'funnel' | 'leads'
-  const [mainTab, setMainTab] = useState<'timeline' | 'funnel' | 'leads'>('timeline');
+  const [mainTab, setMainTab] = useState<'timeline' | 'funnel' | 'leads'>(
+    () => initialMemorySnap?.mainTab ?? 'timeline'
+  );
+  const [auditTarget, setAuditTarget] = useState<FunnelAuditTarget | null>(
+    () => initialMemorySnap?.auditTarget ?? null
+  );
+  const [restoredAuditModal, setRestoredAuditModal] = useState<FunnelAuditModalSnapshot | null>(
+    () => initialMemorySnap?.auditModal ?? null
+  );
+  const [pendingScrollTop, setPendingScrollTop] = useState<number>(
+    () => initialMemorySnap?.scrollTop ?? 0
+  );
 
   // Activity presentation mode: 'timeline' (rich storytelling cards) vs 'compact' (borderless dense scanner)
-  const [feedViewStyle, setFeedViewStyle] = useState<'timeline' | 'compact'>('timeline');
+  const [feedViewStyle, setFeedViewStyle] = useState<'timeline' | 'compact'>(
+    () => initialMemorySnap?.feedViewStyle ?? 'timeline'
+  );
 
   // Activity category filter
   const [categoryFilter] = useState<ActivityCategory>('all');
 
   // Search queries
-  const [activitySearch, setActivitySearch] = useState<string>('');
-  const [agentSearch, setAgentSearch] = useState<string>('');
-  const [agentRoleFilter, setAgentRoleFilter] = useState<string>('all');
+  const [activitySearch, setActivitySearch] = useState<string>(
+    () => initialMemorySnap?.activitySearch ?? ''
+  );
+  const [agentSearch, setAgentSearch] = useState<string>(
+    () => initialMemorySnap?.agentSearch ?? ''
+  );
+  const [agentRoleFilter, setAgentRoleFilter] = useState<string>(
+    () => initialMemorySnap?.agentRoleFilter ?? 'all'
+  );
 
   const deferredActivitySearch = useDeferredValue(activitySearch);
   const deferredAgentSearch = useDeferredValue(agentSearch);
 
   // Incremental windowing counts + scroll refs
-  const [visibleTimelineCount, setVisibleTimelineCount] = useState<number>(TIMELINE_BATCH_SIZE);
-  const [visibleLeadsCount, setVisibleLeadsCount] = useState<number>(LEADS_BATCH_SIZE);
+  const [visibleTimelineCount, setVisibleTimelineCount] = useState<number>(
+    () => initialMemorySnap?.visibleTimelineCount ?? TIMELINE_BATCH_SIZE
+  );
+  const [visibleLeadsCount, setVisibleLeadsCount] = useState<number>(
+    () => initialMemorySnap?.visibleLeadsCount ?? LEADS_BATCH_SIZE
+  );
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const timelineSentinelRef = useRef<HTMLDivElement>(null);
   const leadsSentinelRef = useRef<HTMLDivElement>(null);
+  const funnelModalDraftRef = useRef<FunnelAuditModalSnapshot | null>(
+    initialMemorySnap?.auditModal ?? null
+  );
+  const didRestorePageScrollRef = useRef<boolean>(false);
+  const mountedRef = useRef<boolean>(false);
+  const hadMemoryInitRef = useRef<boolean>(Boolean(initialMemorySnap));
 
   // Mobile drawer state for right sidebar
   const [mobileAgentsOpen, setMobileAgentsOpen] = useState<boolean>(false);
+
+  // In-screen slide-over chat drawer for Assigned Leads (matches Pipeline design)
+  const {
+    chatId: leadsDrawerChatId,
+    showDetails: leadsShowChatDetails,
+    setShowDetails: setLeadsShowChatDetails,
+    isClosing: isLeadsDrawerClosing,
+    panelRef: leadsDrawerPanelRef,
+    open: openLeadsDrawer,
+    close: closeLeadsDrawer,
+    resetImmediate: resetLeadsDrawer,
+    restore: restoreLeadsDrawer,
+    handleAnimationEnd: handleLeadsDrawerAnimationEnd,
+  } = useSlideOverChatDrawer({
+    initialChatId: initialMemorySnap?.leadsDrawerChatId ?? null,
+    initialShowDetails: initialMemorySnap?.leadsShowChatDetails ?? false,
+  });
 
   // Date boundaries
   const todayStart = useMemo(() => getDayStart(new Date()), []);
@@ -2111,16 +2197,231 @@ function TeamActivitiesPageInner() {
   const handleSelectAgent = useCallback((name: string) => {
     setUserPickedAgent({ agent: name, urlAtPick: cleanUrlAgent });
     setMobileAgentsOpen(false);
+    setAuditTarget(null);
+    setRestoredAuditModal(null);
+    funnelModalDraftRef.current = null;
+    resetLeadsDrawer();
     setVisibleTimelineCount(TIMELINE_BATCH_SIZE);
     setVisibleLeadsCount(LEADS_BATCH_SIZE);
     scrollContainerRef.current?.scrollTo({ top: 0 });
-  }, [cleanUrlAgent]);
+  }, [cleanUrlAgent, resetLeadsDrawer]);
 
   const handleMainTabChange = useCallback((tab: 'timeline' | 'funnel' | 'leads') => {
     setMainTab(tab);
+    if (tab !== 'funnel') {
+      setAuditTarget(null);
+      setRestoredAuditModal(null);
+      funnelModalDraftRef.current = null;
+    }
+    if (tab !== 'leads') {
+      resetLeadsDrawer();
+    }
     if (tab === 'timeline') setVisibleTimelineCount(TIMELINE_BATCH_SIZE);
     if (tab === 'leads') setVisibleLeadsCount(LEADS_BATCH_SIZE);
+  }, [resetLeadsDrawer]);
+
+  const conversationsById = useMemo(() => {
+    const map = new Map<string, Conversation>();
+    for (const c of conversations) map.set(c.id, c);
+    return map;
+  }, [conversations]);
+
+  const buildCurrentDraftSnapshot = useCallback(
+    (overrideModalSnap?: FunnelAuditModalSnapshot | null): Omit<TeamActivitiesSnapshot, 'restoreActive' | 'cameInSameSpaSession'> => ({
+      returnLabel: formatAuditReturnLabel(auditTarget),
+      urlAgentAtSave: cleanUrlAgent,
+      filterMode,
+      currentDateIso: isoDate(currentDate),
+      customStartDate,
+      customEndDate,
+      userPickedAgent,
+      mainTab,
+      feedViewStyle,
+      activitySearch,
+      agentSearch,
+      agentRoleFilter,
+      visibleTimelineCount,
+      visibleLeadsCount,
+      scrollTop: scrollContainerRef.current?.scrollTop ?? 0,
+      auditTarget,
+      auditModal: overrideModalSnap !== undefined ? overrideModalSnap : funnelModalDraftRef.current,
+      leadsDrawerChatId,
+      leadsShowChatDetails,
+    }),
+    [
+      auditTarget,
+      cleanUrlAgent,
+      filterMode,
+      currentDate,
+      customStartDate,
+      customEndDate,
+      userPickedAgent,
+      mainTab,
+      feedViewStyle,
+      activitySearch,
+      agentSearch,
+      agentRoleFilter,
+      visibleTimelineCount,
+      visibleLeadsCount,
+      leadsDrawerChatId,
+      leadsShowChatDetails,
+    ]
+  );
+
+  // Sync live draft snapshot so drawer links (Inbox / Calendar) also preserve state on Back
+  useEffect(() => {
+    updateTeamActivitiesDraft(buildCurrentDraftSnapshot());
+  }, [buildCurrentDraftSnapshot]);
+
+  // Prefetch /pipeline and /auditions routes so lead clicks navigate with zero chunk delay
+  useEffect(() => {
+    router.prefetch('/pipeline');
+    router.prefetch('/auditions');
+  }, [router]);
+
+  // Restore sessionStorage snapshot after a full browser reload if in-memory snapshot was cleared
+  useEffect(() => {
+    if (hadMemoryInitRef.current) return;
+    const stored = getStorageTeamSnapshot(cleanUrlAgent, urlRestore);
+    if (!stored) return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setFilterMode(stored.filterMode);
+      setCurrentDate(parseIsoInputDate(stored.currentDateIso, getDayStart(new Date())));
+      setCustomStartDate(stored.customStartDate);
+      setCustomEndDate(stored.customEndDate);
+      setUserPickedAgent(stored.userPickedAgent);
+      setMainTab(stored.mainTab);
+      setFeedViewStyle(stored.feedViewStyle);
+      setActivitySearch(stored.activitySearch);
+      setAgentSearch(stored.agentSearch);
+      setAgentRoleFilter(stored.agentRoleFilter);
+      setVisibleTimelineCount(stored.visibleTimelineCount);
+      setVisibleLeadsCount(stored.visibleLeadsCount);
+      setAuditTarget(stored.auditTarget);
+      setRestoredAuditModal(stored.auditModal);
+      funnelModalDraftRef.current = stored.auditModal;
+      restoreLeadsDrawer(stored.leadsDrawerChatId ?? null, stored.leadsShowChatDetails ?? false);
+      setPendingScrollTop(stored.scrollTop || 0);
+      didRestorePageScrollRef.current = false;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [cleanUrlAgent, urlRestore, restoreLeadsDrawer]);
+
+  // Restore scroll position cleanly before paint
+  useLayoutEffect(() => {
+    if (pendingScrollTop > 0 && !didRestorePageScrollRef.current && scrollContainerRef.current) {
+      didRestorePageScrollRef.current = true;
+      scrollContainerRef.current.scrollTop = pendingScrollTop;
+    }
+  }, [pendingScrollTop]);
+
+  // Preserve state automatically if user jumps out via Chat Drawer Inbox/Calendar links
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      queueMicrotask(() => {
+        if (
+          !mountedRef.current &&
+          typeof window !== 'undefined' &&
+          window.location.pathname !== '/team-performance' &&
+          !wasTeamSidebarNavigation()
+        ) {
+          activateTeamAuditRestoreFromDraft();
+        }
+      });
+    };
   }, []);
+
+  const handleSyncModalDraft = useCallback(
+    (snap: FunnelAuditModalSnapshot) => {
+      funnelModalDraftRef.current = snap;
+      updateTeamActivitiesDraft(buildCurrentDraftSnapshot(snap));
+    },
+    [buildCurrentDraftSnapshot]
+  );
+
+  const handleNavigateFromAuditSource = useCallback(
+    (href: string, latestModalSnapshot: FunnelAuditModalSnapshot) => {
+      funnelModalDraftRef.current = latestModalSnapshot;
+      saveTeamActivitiesSnapshot({
+        ...buildCurrentDraftSnapshot(latestModalSnapshot),
+        restoreActive: true,
+        cameInSameSpaSession: true,
+      });
+      router.push(href);
+    },
+    [buildCurrentDraftSnapshot, router]
+  );
+
+  const handleOpenChatWithPreserve = useCallback(
+    (conversationId: string) => {
+      saveTeamActivitiesSnapshot({
+        ...buildCurrentDraftSnapshot(),
+        restoreActive: true,
+        cameInSameSpaSession: true,
+      });
+      openChat(conversationId);
+    },
+    [buildCurrentDraftSnapshot, openChat]
+  );
+
+  const handleOpenLeadsChatDrawer = useCallback(
+    (conversationId: string) => {
+      setMobileAgentsOpen(false);
+      openLeadsDrawer(conversationId);
+    },
+    [openLeadsDrawer]
+  );
+
+  const handleOpenTimelineSource = useCallback(
+    (act: EnrichedActivity) => {
+      const conv = conversationsById.get(act.conversationId);
+      const isAuditionEvent =
+        act.type === 'audition_booked' || act.type === 'audition_outcome';
+      const route = resolveLeadSourceRoute({
+        id: act.conversationId,
+        pipeline: conv?.pipeline || act.pipeline,
+        auditionDate: conv?.auditionDate,
+        followUpDate: conv?.followUpDate,
+        auditionOutcome: conv?.auditionOutcome,
+        preferredTarget: isAuditionEvent ? 'auditions' : 'pipeline',
+        from: 'team-performance',
+      });
+      saveTeamActivitiesSnapshot({
+        ...buildCurrentDraftSnapshot(),
+        restoreActive: true,
+        cameInSameSpaSession: true,
+      });
+      router.push(route.href);
+    },
+    [conversationsById, buildCurrentDraftSnapshot, router]
+  );
+
+  const handleOpenLeadRowSource = useCallback(
+    (conv: Conversation, preferredTarget: 'auto' | 'pipeline' | 'auditions' = 'pipeline') => {
+      const route = resolveLeadSourceRoute({
+        id: conv.id,
+        pipeline: conv.pipeline,
+        auditionDate: conv.auditionDate,
+        followUpDate: conv.followUpDate,
+        auditionOutcome: conv.auditionOutcome,
+        preferredTarget,
+        from: 'team-performance',
+      });
+      saveTeamActivitiesSnapshot({
+        ...buildCurrentDraftSnapshot(),
+        restoreActive: true,
+        cameInSameSpaSession: true,
+      });
+      router.push(route.href);
+    },
+    [buildCurrentDraftSnapshot, router]
+  );
 
   const handleFeedViewStyleChange = useCallback((style: 'timeline' | 'compact') => {
     setFeedViewStyle(style);
@@ -2135,7 +2436,7 @@ function TeamActivitiesPageInner() {
 
   return (
     <div
-      className="flex h-full min-h-0 overflow-hidden"
+      className="flex h-full min-h-0 overflow-hidden relative"
       style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}
     >
       {/* ── MAIN PAGE (LEFT / CENTER): Selected Agent's Activities & Leads ── */}
@@ -2681,7 +2982,8 @@ function TeamActivitiesPageInner() {
                           key={act.id}
                           act={act}
                           showActor={isAllAgents}
-                          onOpenChat={openChat}
+                          onOpenChat={handleOpenChatWithPreserve}
+                          onOpenSource={handleOpenTimelineSource}
                           onSelectAgent={handleSelectAgent}
                         />
                       ))}
@@ -2749,7 +3051,8 @@ function TeamActivitiesPageInner() {
                             key={act.id}
                             act={act}
                             showActor={isAllAgents}
-                            onOpenChat={openChat}
+                            onOpenChat={handleOpenChatWithPreserve}
+                            onOpenSource={handleOpenTimelineSource}
                             onSelectAgent={handleSelectAgent}
                           />
                         ))}
@@ -2810,95 +3113,148 @@ function TeamActivitiesPageInner() {
 
                 return (
                   <>
-                    {/* 1. Core Performance Metrics Grid (5 Clean Minimal Cards) */}
+                    {/* 1. Core Performance Metrics Grid (5 Clean Minimal Cards — Click Any Card to Audit) */}
                     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-3.5">
                       {/* Metric 1: Total Leads */}
-                      <div
-                        onClick={() => handleMainTabChange('leads')}
-                        className="p-4 rounded-xl cursor-pointer transition-all hover:border-[var(--border-input)] group shadow-xs"
+                      <button
+                        type="button"
+                        onClick={() => setAuditTarget({ metric: 'leads' })}
+                        className="p-4 rounded-xl text-left w-full cursor-pointer transition-all hover:border-[var(--border-input)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 group shadow-xs flex flex-col justify-between"
                         style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
-                        title="View all assigned leads"
+                        title="Audit how Assigned Leads are counted"
                       >
-                        <div className="flex items-center justify-between text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
-                          <span className="uppercase tracking-wider">Assigned Leads</span>
-                          <Users className="w-3.5 h-3.5" />
+                        <div>
+                          <div className="flex items-center justify-between text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
+                            <span className="uppercase tracking-wider">Assigned Leads</span>
+                            <Users className="w-3.5 h-3.5" />
+                          </div>
+                          <div className="text-[26px] font-bold mt-1.5 tracking-tight" style={{ color: 'var(--text-primary)' }}>
+                            {leads}
+                          </div>
                         </div>
-                        <div className="text-[26px] font-bold mt-1.5 tracking-tight" style={{ color: 'var(--text-primary)' }}>
-                          {leads}
+                        <div className="flex items-center justify-between gap-2 mt-1.5">
+                          <p className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                            {filterMode === 'all' ? 'All assigned leads' : `Created ${periodDescription}`}
+                          </p>
+                          <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold shrink-0" style={{ color: 'var(--text-muted)' }}>
+                            Audit
+                            <ChevronRight className="w-3 h-3" />
+                          </span>
                         </div>
-                        <p className="text-[11px] mt-1 truncate" style={{ color: 'var(--text-secondary)' }}>
-                          {filterMode === 'all' ? 'All assigned leads' : `Created ${periodDescription}`}
-                        </p>
-                      </div>
+                      </button>
 
                       {/* Metric 2: Auditions Booked */}
-                      <div
-                        className="p-4 rounded-xl shadow-xs"
+                      <button
+                        type="button"
+                        onClick={() => setAuditTarget({ metric: 'booked' })}
+                        className="p-4 rounded-xl text-left w-full cursor-pointer transition-all hover:border-[var(--border-input)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 group shadow-xs flex flex-col justify-between"
                         style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+                        title="Audit why Booked equals this count"
                       >
-                        <div className="flex items-center justify-between text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
-                          <span className="uppercase tracking-wider">Booked</span>
-                          <Calendar className="w-3.5 h-3.5" />
+                        <div>
+                          <div className="flex items-center justify-between text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
+                            <span className="uppercase tracking-wider">Booked</span>
+                            <Calendar className="w-3.5 h-3.5" />
+                          </div>
+                          <div className="text-[26px] font-bold mt-1.5 tracking-tight" style={{ color: 'var(--text-primary)' }}>
+                            {booked}
+                          </div>
                         </div>
-                        <div className="text-[26px] font-bold mt-1.5 tracking-tight" style={{ color: 'var(--text-primary)' }}>
-                          {booked}
+                        <div className="flex items-center justify-between gap-2 mt-1.5">
+                          <p className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                            <strong style={{ color: 'var(--text-primary)' }}>{bookingRateStr}%</strong> booking rate
+                          </p>
+                          <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-blue-500 shrink-0">
+                            Audit
+                            <ChevronRight className="w-3 h-3" />
+                          </span>
                         </div>
-                        <p className="text-[11px] mt-1 truncate" style={{ color: 'var(--text-secondary)' }}>
-                          <strong style={{ color: 'var(--text-primary)' }}>{bookingRateStr}%</strong> booking rate
-                        </p>
-                      </div>
+                      </button>
 
                       {/* Metric 3: Auditions Attended */}
-                      <div
-                        className="p-4 rounded-xl shadow-xs"
+                      <button
+                        type="button"
+                        onClick={() => setAuditTarget({ metric: 'attended' })}
+                        className="p-4 rounded-xl text-left w-full cursor-pointer transition-all hover:border-[var(--border-input)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 group shadow-xs flex flex-col justify-between"
                         style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+                        title="Audit why Attended equals this count"
                       >
-                        <div className="flex items-center justify-between text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
-                          <span className="uppercase tracking-wider">Attended</span>
-                          <UserCheck className="w-3.5 h-3.5" />
+                        <div>
+                          <div className="flex items-center justify-between text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
+                            <span className="uppercase tracking-wider">Attended</span>
+                            <UserCheck className="w-3.5 h-3.5" />
+                          </div>
+                          <div className="text-[26px] font-bold mt-1.5 tracking-tight" style={{ color: 'var(--text-primary)' }}>
+                            {attended}
+                          </div>
                         </div>
-                        <div className="text-[26px] font-bold mt-1.5 tracking-tight" style={{ color: 'var(--text-primary)' }}>
-                          {attended}
+                        <div className="flex items-center justify-between gap-2 mt-1.5">
+                          <p className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                            <strong style={{ color: 'var(--text-primary)' }}>{showRateStr}%</strong> show-up rate
+                          </p>
+                          <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-teal-500 shrink-0">
+                            Audit
+                            <ChevronRight className="w-3 h-3" />
+                          </span>
                         </div>
-                        <p className="text-[11px] mt-1 truncate" style={{ color: 'var(--text-secondary)' }}>
-                          <strong style={{ color: 'var(--text-primary)' }}>{showRateStr}%</strong> show-up rate
-                        </p>
-                      </div>
+                      </button>
 
                       {/* Metric 4: Enrolled Students */}
-                      <div
-                        className="p-4 rounded-xl shadow-xs"
+                      <button
+                        type="button"
+                        onClick={() => setAuditTarget({ metric: 'enrolled' })}
+                        className="p-4 rounded-xl text-left w-full cursor-pointer transition-all hover:border-[var(--border-input)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 group shadow-xs flex flex-col justify-between"
                         style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+                        title="Audit why Enrolled equals this count"
                       >
-                        <div className="flex items-center justify-between text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
-                          <span className="uppercase tracking-wider">Enrolled</span>
-                          <Award className="w-3.5 h-3.5" />
+                        <div>
+                          <div className="flex items-center justify-between text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
+                            <span className="uppercase tracking-wider">Enrolled</span>
+                            <Award className="w-3.5 h-3.5" />
+                          </div>
+                          <div className="text-[26px] font-bold mt-1.5 tracking-tight" style={{ color: 'var(--text-primary)' }}>
+                            {enrolled}
+                          </div>
                         </div>
-                        <div className="text-[26px] font-bold mt-1.5 tracking-tight" style={{ color: 'var(--text-primary)' }}>
-                          {enrolled}
+                        <div className="flex items-center justify-between gap-2 mt-1.5">
+                          <p className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                            <strong style={{ color: 'var(--text-primary)' }}>{closeRateStr}%</strong> close ({overallWinRate}% win)
+                          </p>
+                          <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-emerald-500 shrink-0">
+                            Audit
+                            <ChevronRight className="w-3 h-3" />
+                          </span>
                         </div>
-                        <p className="text-[11px] mt-1 truncate" style={{ color: 'var(--text-secondary)' }}>
-                          <strong style={{ color: 'var(--text-primary)' }}>{closeRateStr}%</strong> close ({overallWinRate}% win)
-                        </p>
-                      </div>
+                      </button>
 
                       {/* Metric 5: Cash Collected */}
-                      <div
-                        className="p-4 rounded-xl shadow-xs col-span-2 sm:col-span-1"
+                      <button
+                        type="button"
+                        onClick={() => setAuditTarget({ metric: 'cash' })}
+                        className="p-4 rounded-xl text-left w-full cursor-pointer transition-all hover:border-[var(--border-input)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 group shadow-xs col-span-2 sm:col-span-1 flex flex-col justify-between"
                         style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+                        title="Audit Revenue collections lead by lead"
                       >
-                        <div className="flex items-center justify-between text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
-                          <span className="uppercase tracking-wider">Revenue</span>
-                          <Banknote className="w-3.5 h-3.5" />
+                        <div>
+                          <div className="flex items-center justify-between text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
+                            <span className="uppercase tracking-wider">Revenue</span>
+                            <Banknote className="w-3.5 h-3.5" />
+                          </div>
+                          <div className="text-[26px] font-bold mt-1.5 tracking-tight flex items-baseline gap-1" style={{ color: 'var(--text-primary)' }}>
+                            <span>{cash.toLocaleString()}</span>
+                            <span className="text-[12px] font-semibold" style={{ color: 'var(--text-secondary)' }}>EGP</span>
+                          </div>
                         </div>
-                        <div className="text-[26px] font-bold mt-1.5 tracking-tight flex items-baseline gap-1" style={{ color: 'var(--text-primary)' }}>
-                          <span>{cash.toLocaleString()}</span>
-                          <span className="text-[12px] font-semibold" style={{ color: 'var(--text-secondary)' }}>EGP</span>
+                        <div className="flex items-center justify-between gap-2 mt-1.5">
+                          <p className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                            {enrolled > 0 ? `${avgPerStudent.toLocaleString()} EGP / student` : 'Direct collections'}
+                          </p>
+                          <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-amber-500 shrink-0">
+                            Audit
+                            <ChevronRight className="w-3 h-3" />
+                          </span>
                         </div>
-                        <p className="text-[11px] mt-1 truncate" style={{ color: 'var(--text-secondary)' }}>
-                          {enrolled > 0 ? `${avgPerStudent.toLocaleString()} EGP / student` : 'Direct collections'}
-                        </p>
-                      </div>
+                      </button>
                     </div>
 
                     {/* 2. Clean Conversion Funnel Journey (Stepped Progress) */}
@@ -2930,9 +3286,12 @@ function TeamActivitiesPageInner() {
                       {/* 4 Stepped Funnel Boxes */}
                       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                         {/* Step 1: Leads Pool */}
-                        <div
-                          className="p-4 rounded-xl flex flex-col justify-between"
+                        <button
+                          type="button"
+                          onClick={() => setAuditTarget({ metric: 'leads' })}
+                          className="p-4 rounded-xl flex flex-col justify-between text-left w-full cursor-pointer transition-all hover:border-[var(--text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                           style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}
+                          title="Audit Leads Pool"
                         >
                           <div>
                             <div className="flex items-center justify-between text-[11px]" style={{ color: 'var(--text-secondary)' }}>
@@ -2947,16 +3306,23 @@ function TeamActivitiesPageInner() {
                             <div className="h-1.5 w-full rounded-full bg-black/10 dark:bg-white/10 overflow-hidden">
                               <div className="h-full rounded-full bg-[var(--text-primary)]" style={{ width: '100%' }} />
                             </div>
-                            <span className="text-[10px] mt-1.5 block" style={{ color: 'var(--text-muted)' }}>
-                              Total assigned pool
-                            </span>
+                            <div className="flex items-center justify-between gap-2 text-[10px] mt-1.5" style={{ color: 'var(--text-muted)' }}>
+                              <span className="truncate">Total assigned pool</span>
+                              <span className="inline-flex items-center gap-0.5 font-semibold shrink-0" style={{ color: 'var(--text-secondary)' }}>
+                                Audit
+                                <ChevronRight className="w-3 h-3" />
+                              </span>
+                            </div>
                           </div>
-                        </div>
+                        </button>
 
                         {/* Step 2: Booked Auditions */}
-                        <div
-                          className="p-4 rounded-xl flex flex-col justify-between"
+                        <button
+                          type="button"
+                          onClick={() => setAuditTarget({ metric: 'booked' })}
+                          className="p-4 rounded-xl flex flex-col justify-between text-left w-full cursor-pointer transition-all hover:border-[var(--text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                           style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}
+                          title="Audit Booked Auditions"
                         >
                           <div>
                             <div className="flex items-center justify-between text-[11px]" style={{ color: 'var(--text-secondary)' }}>
@@ -2974,16 +3340,23 @@ function TeamActivitiesPageInner() {
                                 style={{ width: `${Math.min(100, Math.max(booked > 0 ? 6 : 0, (booked / (leads || 1)) * 100))}%` }}
                               />
                             </div>
-                            <span className="text-[10px] mt-1.5 block" style={{ color: 'var(--text-muted)' }}>
-                              {leads > 0 ? `${bookingRateStr}% of assigned leads` : '0 booked'}
-                            </span>
+                            <div className="flex items-center justify-between gap-2 text-[10px] mt-1.5" style={{ color: 'var(--text-muted)' }}>
+                              <span className="truncate">{leads > 0 ? `${bookingRateStr}% of assigned leads` : '0 booked'}</span>
+                              <span className="inline-flex items-center gap-0.5 font-semibold text-blue-500 shrink-0">
+                                Audit
+                                <ChevronRight className="w-3 h-3" />
+                              </span>
+                            </div>
                           </div>
-                        </div>
+                        </button>
 
                         {/* Step 3: Attended Auditions */}
-                        <div
-                          className="p-4 rounded-xl flex flex-col justify-between"
+                        <button
+                          type="button"
+                          onClick={() => setAuditTarget({ metric: 'attended' })}
+                          className="p-4 rounded-xl flex flex-col justify-between text-left w-full cursor-pointer transition-all hover:border-[var(--text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                           style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}
+                          title="Audit Attended Auditions"
                         >
                           <div>
                             <div className="flex items-center justify-between text-[11px]" style={{ color: 'var(--text-secondary)' }}>
@@ -3001,16 +3374,23 @@ function TeamActivitiesPageInner() {
                                 style={{ width: `${Math.min(100, Math.max(attended > 0 ? 6 : 0, (attended / (booked || 1)) * 100))}%` }}
                               />
                             </div>
-                            <span className="text-[10px] mt-1.5 block" style={{ color: 'var(--text-muted)' }}>
-                              {booked > 0 ? `${showRateStr}% show-up rate` : '0 attended'}
-                            </span>
+                            <div className="flex items-center justify-between gap-2 text-[10px] mt-1.5" style={{ color: 'var(--text-muted)' }}>
+                              <span className="truncate">{booked > 0 ? `${showRateStr}% show-up rate` : '0 attended'}</span>
+                              <span className="inline-flex items-center gap-0.5 font-semibold text-teal-500 shrink-0">
+                                Audit
+                                <ChevronRight className="w-3 h-3" />
+                              </span>
+                            </div>
                           </div>
-                        </div>
+                        </button>
 
                         {/* Step 4: Enrolled Students */}
-                        <div
-                          className="p-4 rounded-xl flex flex-col justify-between"
+                        <button
+                          type="button"
+                          onClick={() => setAuditTarget({ metric: 'enrolled' })}
+                          className="p-4 rounded-xl flex flex-col justify-between text-left w-full cursor-pointer transition-all hover:border-[var(--text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                           style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}
+                          title="Audit Enrolled Students"
                         >
                           <div>
                             <div className="flex items-center justify-between text-[11px]" style={{ color: 'var(--text-secondary)' }}>
@@ -3028,11 +3408,15 @@ function TeamActivitiesPageInner() {
                                 style={{ width: `${Math.min(100, Math.max(enrolled > 0 ? 6 : 0, (enrolled / (attended || booked || 1)) * 100))}%` }}
                               />
                             </div>
-                            <span className="text-[10px] mt-1.5 block" style={{ color: 'var(--text-muted)' }}>
-                              {attended > 0 ? `${closeRateStr}% closing conversion` : '0 enrolled'}
-                            </span>
+                            <div className="flex items-center justify-between gap-2 text-[10px] mt-1.5" style={{ color: 'var(--text-muted)' }}>
+                              <span className="truncate">{attended > 0 ? `${closeRateStr}% closing conversion` : '0 enrolled'}</span>
+                              <span className="inline-flex items-center gap-0.5 font-semibold text-emerald-500 shrink-0">
+                                Audit
+                                <ChevronRight className="w-3 h-3" />
+                              </span>
+                            </div>
                           </div>
-                        </div>
+                        </button>
                       </div>
                     </div>
 
@@ -3078,19 +3462,20 @@ function TeamActivitiesPageInner() {
                           {/* Stage List Grid */}
                           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-2">
                             {stages.map((st) => (
-                              <div
+                              <button
                                 key={st.stage}
-                                onClick={() => {
-                                  handleActivitySearchChange(st.stage);
-                                  handleMainTabChange('leads');
-                                }}
-                                className="p-2.5 rounded-lg flex items-center justify-between gap-1.5 cursor-pointer hover:opacity-85 transition-opacity"
+                                type="button"
+                                onClick={() => setAuditTarget({ metric: 'stage', stage: st.stage })}
+                                className="w-full min-h-[44px] p-2.5 rounded-lg flex items-center justify-between gap-1.5 cursor-pointer hover:opacity-85 transition-opacity text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                                 style={getStageBadgeStyle(st.stage)}
-                                title={`Filter ${st.stage} leads`}
+                                title={`Audit ${st.stage} stage leads`}
                               >
                                 <span className="text-[11px] font-semibold truncate">{st.stage}</span>
-                                <span className="text-[11px] font-bold shrink-0">{st.count}</span>
-                              </div>
+                                <span className="inline-flex items-center gap-0.5 text-[11px] font-bold shrink-0">
+                                  {st.count}
+                                  <ChevronRight className="w-3 h-3 opacity-75" />
+                                </span>
+                              </button>
                             ))}
                           </div>
                         </div>
@@ -3102,17 +3487,23 @@ function TeamActivitiesPageInner() {
                           if (waitingCount <= 0) return null;
                           return (
                             <div
-                              className="mt-4 pt-3 flex items-center justify-between text-[11px]"
+                              className="mt-4 pt-3 flex items-center justify-between gap-2 text-[11px]"
                               style={{ borderTop: '1px solid var(--border-main)', color: 'var(--text-secondary)' }}
                             >
-                              <span className="inline-flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-semibold">
+                              <button
+                                type="button"
+                                onClick={() => setAuditTarget({ metric: 'awaiting_reply' })}
+                                className="inline-flex items-center gap-1.5 text-amber-500 font-semibold hover:underline cursor-pointer py-1.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                                title="Audit leads currently awaiting reply"
+                              >
                                 <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-                                {waitingCount} leads awaiting reply
-                              </span>
+                                <span>{waitingCount} leads awaiting reply</span>
+                                <ChevronRight className="w-3 h-3" />
+                              </button>
                               <button
                                 type="button"
                                 onClick={() => handleMainTabChange('leads')}
-                                className="text-[11px] font-semibold text-[var(--text-primary)] hover:underline cursor-pointer"
+                                className="text-[11px] font-semibold text-[var(--text-primary)] hover:underline cursor-pointer py-1.5"
                               >
                                 Review in leads →
                               </button>
@@ -3149,11 +3540,20 @@ function TeamActivitiesPageInner() {
                               channels.map((ch) => {
                                 const channelColor = getChannelColor(ch.channel);
                                 return (
-                                  <div key={ch.channel} className="space-y-1.5">
+                                  <button
+                                    key={ch.channel}
+                                    type="button"
+                                    onClick={() => setAuditTarget({ metric: 'channel', channel: ch.channel })}
+                                    className="w-full text-left space-y-1.5 px-2.5 py-2 rounded-lg transition-colors hover:bg-[var(--bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 cursor-pointer"
+                                    title={`Audit ${ch.channel} channel leads`}
+                                  >
                                     <div className="flex items-center justify-between text-[12px] font-medium">
                                       <span style={{ color: 'var(--text-primary)' }}>{ch.channel}</span>
-                                      <span style={{ color: 'var(--text-secondary)' }}>
-                                        {ch.count} leads ({ch.percentage}%)
+                                      <span className="inline-flex items-center gap-1" style={{ color: 'var(--text-secondary)' }}>
+                                        <span>
+                                          {ch.count} leads ({ch.percentage}%)
+                                        </span>
+                                        <ChevronRight className="w-3.5 h-3.5 opacity-70" />
                                       </span>
                                     </div>
                                     <div className="w-full h-2 rounded-full overflow-hidden" style={{ background: 'var(--bg-pill)' }}>
@@ -3165,7 +3565,7 @@ function TeamActivitiesPageInner() {
                                         }}
                                       />
                                     </div>
-                                  </div>
+                                  </button>
                                 );
                               })
                             )}
@@ -3214,7 +3614,7 @@ function TeamActivitiesPageInner() {
                             className="text-[10px] font-semibold px-2.5 py-0.5 rounded-full"
                             style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}
                           >
-                            Select a staff member to inspect
+                            Select a name to inspect · click a number to audit
                           </span>
                         </div>
                         <div className="overflow-x-auto w-full" style={{ WebkitOverflowScrolling: 'touch' }}>
@@ -3279,23 +3679,60 @@ function TeamActivitiesPageInner() {
                                       {st.periodActivitiesCount.toLocaleString()}
                                     </td>
                                     <td className="py-2.5 px-3 text-right tabular-nums" style={{ color: 'var(--text-secondary)' }}>
-                                      {stLeads.toLocaleString()}
+                                      <button
+                                        type="button"
+                                        onClick={() => setAuditTarget({ metric: 'leads', agentName: st.name })}
+                                        className="inline-flex items-center justify-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] underline decoration-dotted underline-offset-2 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                                        title={`Audit ${st.name}'s assigned leads`}
+                                      >
+                                        {stLeads.toLocaleString()}
+                                      </button>
                                     </td>
-                                    <td className="py-2.5 px-3 text-right tabular-nums">{stBooked.toLocaleString()}</td>
                                     <td className="py-2.5 px-3 text-right tabular-nums">
-                                      <span>{stAttended.toLocaleString()}</span>
-                                      <span className="ml-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                                        ({stShowPct}%)
-                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => setAuditTarget({ metric: 'booked', agentName: st.name })}
+                                        className="inline-flex items-center justify-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] underline decoration-dotted underline-offset-2 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                                        title={`Audit ${st.name}'s booked leads`}
+                                      >
+                                        {stBooked.toLocaleString()}
+                                      </button>
                                     </td>
                                     <td className="py-2.5 px-3 text-right tabular-nums">
-                                      <span>{stEnrolled.toLocaleString()}</span>
-                                      <span className="ml-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                                        ({stWinPct}%)
-                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => setAuditTarget({ metric: 'attended', agentName: st.name })}
+                                        className="inline-flex items-center justify-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] underline decoration-dotted underline-offset-2 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                                        title={`Audit ${st.name}'s attended leads`}
+                                      >
+                                        <span>{stAttended.toLocaleString()}</span>
+                                        <span className="ml-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                          ({stShowPct}%)
+                                        </span>
+                                      </button>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums">
+                                      <button
+                                        type="button"
+                                        onClick={() => setAuditTarget({ metric: 'enrolled', agentName: st.name })}
+                                        className="inline-flex items-center justify-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] underline decoration-dotted underline-offset-2 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                                        title={`Audit ${st.name}'s enrolled leads`}
+                                      >
+                                        <span>{stEnrolled.toLocaleString()}</span>
+                                        <span className="ml-1 text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                          ({stWinPct}%)
+                                        </span>
+                                      </button>
                                     </td>
                                     <td className="py-2.5 px-4 text-right font-semibold tabular-nums">
-                                      {stCash.toLocaleString()}
+                                      <button
+                                        type="button"
+                                        onClick={() => setAuditTarget({ metric: 'cash', agentName: st.name })}
+                                        className="inline-flex items-center justify-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] underline decoration-dotted underline-offset-2 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                                        title={`Audit ${st.name}'s revenue collections`}
+                                      >
+                                        {stCash.toLocaleString()}
+                                      </button>
                                     </td>
                                   </tr>
                                 );
@@ -3316,21 +3753,62 @@ function TeamActivitiesPageInner() {
                                 <td className="py-2.5 px-3 text-right tabular-nums">
                                   {teamAggregate.totalActivitiesCount.toLocaleString()}
                                 </td>
-                                <td className="py-2.5 px-3 text-right tabular-nums">{leads.toLocaleString()}</td>
-                                <td className="py-2.5 px-3 text-right tabular-nums">{booked.toLocaleString()}</td>
                                 <td className="py-2.5 px-3 text-right tabular-nums">
-                                  <span>{attended.toLocaleString()}</span>
-                                  <span className="ml-1 text-[10px]" style={{ color: 'var(--text-secondary)' }}>
-                                    ({showRateStr}%)
-                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setAuditTarget({ metric: 'leads' })}
+                                    className="inline-flex items-center justify-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] underline decoration-dotted underline-offset-2 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                                    title="Audit Team Total assigned leads"
+                                  >
+                                    {leads.toLocaleString()}
+                                  </button>
                                 </td>
                                 <td className="py-2.5 px-3 text-right tabular-nums">
-                                  <span>{enrolled.toLocaleString()}</span>
-                                  <span className="ml-1 text-[10px]" style={{ color: 'var(--text-secondary)' }}>
-                                    ({overallWinRate}%)
-                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setAuditTarget({ metric: 'booked' })}
+                                    className="inline-flex items-center justify-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] underline decoration-dotted underline-offset-2 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                                    title="Audit Team Total booked leads"
+                                  >
+                                    {booked.toLocaleString()}
+                                  </button>
                                 </td>
-                                <td className="py-2.5 px-4 text-right tabular-nums">{cash.toLocaleString()}</td>
+                                <td className="py-2.5 px-3 text-right tabular-nums">
+                                  <button
+                                    type="button"
+                                    onClick={() => setAuditTarget({ metric: 'attended' })}
+                                    className="inline-flex items-center justify-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] underline decoration-dotted underline-offset-2 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                                    title="Audit Team Total attended leads"
+                                  >
+                                    <span>{attended.toLocaleString()}</span>
+                                    <span className="ml-1 text-[10px]" style={{ color: 'var(--text-secondary)' }}>
+                                      ({showRateStr}%)
+                                    </span>
+                                  </button>
+                                </td>
+                                <td className="py-2.5 px-3 text-right tabular-nums">
+                                  <button
+                                    type="button"
+                                    onClick={() => setAuditTarget({ metric: 'enrolled' })}
+                                    className="inline-flex items-center justify-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] underline decoration-dotted underline-offset-2 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                                    title="Audit Team Total enrolled leads"
+                                  >
+                                    <span>{enrolled.toLocaleString()}</span>
+                                    <span className="ml-1 text-[10px]" style={{ color: 'var(--text-secondary)' }}>
+                                      ({overallWinRate}%)
+                                    </span>
+                                  </button>
+                                </td>
+                                <td className="py-2.5 px-4 text-right tabular-nums">
+                                  <button
+                                    type="button"
+                                    onClick={() => setAuditTarget({ metric: 'cash' })}
+                                    className="inline-flex items-center justify-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] underline decoration-dotted underline-offset-2 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                                    title="Audit Team Total revenue collections"
+                                  >
+                                    {cash.toLocaleString()}
+                                  </button>
+                                </td>
                               </tr>
                             </tfoot>
                           </table>
@@ -3388,16 +3866,29 @@ function TeamActivitiesPageInner() {
                     <tbody className="text-[12px] divide-y" style={{ color: 'var(--text-primary)', borderColor: 'var(--border-main)' }}>
                       {displayedLeads.map((conv, idx) => {
                         const leadAgent = isAllAgents ? getParsedConversationData(conv).assignedAgent : '';
+                        const isChatOpen = leadsDrawerChatId === conv.id;
                         return (
                           <tr
                             key={conv.id}
                             className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                            style={{ background: idx % 2 === 0 ? 'transparent' : 'var(--bg-table-alt)' }}
+                            style={{
+                              background: isChatOpen
+                                ? 'var(--bg-selected)'
+                                : idx % 2 === 0
+                                  ? 'transparent'
+                                  : 'var(--bg-table-alt)',
+                            }}
                           >
                             <td className="py-2.5 px-4">
-                              <div className="font-semibold" style={{ color: 'var(--text-primary)' }}>
+                              <button
+                                type="button"
+                                onClick={() => handleOpenLeadRowSource(conv, 'pipeline')}
+                                className="font-semibold text-left hover:text-[#0066FF] hover:underline cursor-pointer"
+                                style={{ color: 'var(--text-primary)' }}
+                                title="Open lead in Pipeline"
+                              >
                                 {getDisplayName(conv)}
-                              </div>
+                              </button>
                               <div className="text-[10px]" style={{ color: 'var(--text-secondary)' }}>
                                 {conv.phone || conv.id}
                                 {conv.branch ? ` · ${conv.branch}` : ''}
@@ -3439,7 +3930,14 @@ function TeamActivitiesPageInner() {
                             </td>
                             <td className="py-2.5 px-3 text-[11px]" style={{ color: 'var(--text-secondary)' }}>
                               {conv.auditionDate ? (
-                                <span>Audition: {conv.auditionDate}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenLeadRowSource(conv, 'auditions')}
+                                  className="hover:text-[#0066FF] hover:underline cursor-pointer"
+                                  title={`Open audition slot (${conv.auditionDate})`}
+                                >
+                                  Audition: {conv.auditionDate}
+                                </button>
                               ) : conv.followUpDate ? (
                                 <span>Follow-up: {conv.followUpDate}</span>
                               ) : (
@@ -3452,8 +3950,10 @@ function TeamActivitiesPageInner() {
                             <td className="py-2.5 px-4 text-right">
                               <button
                                 type="button"
-                                onClick={() => openChat(conv.id)}
-                                className="h-[26px] px-2.5 rounded-[6px] text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                onClick={() => handleOpenLeadsChatDrawer(conv.id)}
+                                aria-label={`Open chat with ${getDisplayName(conv)}`}
+                                title="Open chat"
+                                className="h-[26px] px-2.5 rounded-[6px] text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer hover:bg-[var(--bg-hover)] transition-colors"
                                 style={{
                                   background: 'var(--bg-pill)',
                                   border: '1px solid var(--border-input)',
@@ -3514,7 +4014,7 @@ function TeamActivitiesPageInner() {
       <aside
         className={`
           flex flex-col h-full shrink-0 overflow-hidden
-          fixed md:relative right-0 top-0 z-50
+          fixed md:relative right-0 top-0 z-50 md:z-auto
           w-[270px] lg:w-[285px]
           transform transition-transform duration-200 ease-in-out
           ${mobileAgentsOpen ? 'translate-x-0' : 'translate-x-full md:translate-x-0'}
@@ -3644,6 +4144,46 @@ function TeamActivitiesPageInner() {
           )}
         </div>
       </aside>
+
+      <SlideOverChatDrawer
+        chatId={leadsDrawerChatId}
+        showDetails={leadsShowChatDetails}
+        isClosing={isLeadsDrawerClosing}
+        panelRef={leadsDrawerPanelRef}
+        onToggleDetails={() => setLeadsShowChatDetails((prev) => !prev)}
+        onCloseDetails={() => setLeadsShowChatDetails(false)}
+        onClose={closeLeadsDrawer}
+        onAnimationEnd={handleLeadsDrawerAnimationEnd}
+        enableEscapeClose={!auditTarget && !mobileAgentsOpen}
+      />
+
+      {auditTarget && (
+        <FunnelAuditModal
+          target={auditTarget}
+          conversations={conversations}
+          selectedAgent={effectiveAgent}
+          filterMode={filterMode}
+          periodStartMs={periodStartMs}
+          periodEndMs={periodEndMs}
+          periodDescription={periodDescription}
+          getStageColor={getStageColor}
+          getStageBadgeStyle={getStageBadgeStyle}
+          onChangeTarget={(next) => {
+            setRestoredAuditModal(null);
+            funnelModalDraftRef.current = null;
+            setAuditTarget(next);
+          }}
+          onClose={() => {
+            setAuditTarget(null);
+            setRestoredAuditModal(null);
+            funnelModalDraftRef.current = null;
+          }}
+          onOpenAssignedLeadsTab={() => handleMainTabChange('leads')}
+          initialSnapshot={restoredAuditModal}
+          onSyncDraft={handleSyncModalDraft}
+          onNavigateToSource={handleNavigateFromAuditSource}
+        />
+      )}
     </div>
   );
 }
