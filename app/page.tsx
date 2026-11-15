@@ -257,7 +257,7 @@ export default function InboxPage() {
   const datePopoverRef = useRef<HTMLDivElement | null>(null);
   const [mobileView, setMobileView] = useState<MobileView>("list");
   const [showDetailsPanel, setShowDetailsPanel] = useState(false);
-  const { isReadOnly, user, token } = useAuth();
+  const { isReadOnly, user, token, authFetch } = useAuth();
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const chatScrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -789,14 +789,13 @@ export default function InboxPage() {
 
       try {
         const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (token) headers["Authorization"] = `Bearer ${token}`;
 
         // Strip local blob previewUrl before sending JSON to server
         const serverAttachments = hasAttachments
           ? attachments!.map(({ previewUrl: _p, ...rest }) => rest)
           : undefined;
 
-        const res = await fetch(`/api/messages/${chatId}/reply`, {
+        const res = await authFetch(`/api/messages/${chatId}/reply`, {
           method: "POST",
           headers,
           body: JSON.stringify({
@@ -849,7 +848,7 @@ export default function InboxPage() {
       isAssigned,
       user?.name,
       patchConversation,
-      token,
+      authFetch,
       refresh,
       addOptimisticMessages,
       finalizeOptimisticMessages,

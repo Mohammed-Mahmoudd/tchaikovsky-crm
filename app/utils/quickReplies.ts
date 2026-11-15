@@ -1,3 +1,5 @@
+import { mapAuthCodeToLogoutReason } from "./authSessionNotice";
+
 export interface QuickReply {
   id: string;
   shortcut: string;
@@ -159,10 +161,26 @@ export function saveStoredQuickReplies(replies: QuickReply[]): void {
   } catch {}
 }
 
+export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
+
+async function dispatchRevokedIfUnauthorized(res: Response): Promise<void> {
+  if (res.status !== 401 || typeof window === "undefined") return;
+  let code: string | undefined;
+  try {
+    const payload = await res.clone().json();
+    code = payload?.code;
+  } catch {}
+  const reason = mapAuthCodeToLogoutReason(code, "session_expired");
+  window.dispatchEvent(new CustomEvent("crm:session-revoked", { detail: { reason } }));
+}
+
 /**
  * Fetches quick replies from backend API and synchronizes local cache.
  */
-export async function fetchRemoteQuickReplies(token?: string | null): Promise<QuickReply[]> {
+export async function fetchRemoteQuickReplies(
+  token?: string | null,
+  fetchFn: FetchLike = fetch
+): Promise<QuickReply[]> {
   try {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -170,7 +188,8 @@ export async function fetchRemoteQuickReplies(token?: string | null): Promise<Qu
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
     }
-    const res = await fetch("/crm-api/quick-replies", { headers, cache: "no-store" });
+    const res = await fetchFn("/crm-api/quick-replies", { headers, cache: "no-store" });
+    await dispatchRevokedIfUnauthorized(res);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();
     if (json.success && Array.isArray(json.data) && json.data.length > 0) {
@@ -188,7 +207,8 @@ export async function fetchRemoteQuickReplies(token?: string | null): Promise<Qu
  */
 export async function createRemoteQuickReply(
   payload: { shortcut: string; title?: string; text: string; category?: string },
-  token?: string | null
+  token?: string | null,
+  fetchFn: FetchLike = fetch
 ): Promise<QuickReply | null> {
   try {
     const headers: Record<string, string> = {
@@ -197,11 +217,12 @@ export async function createRemoteQuickReply(
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
     }
-    const res = await fetch("/crm-api/quick-replies", {
+    const res = await fetchFn("/crm-api/quick-replies", {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
     });
+    await dispatchRevokedIfUnauthorized(res);
     const json = await res.json();
     if (json.success && json.data) {
       return json.data;
@@ -216,7 +237,8 @@ export async function createRemoteQuickReply(
 export async function updateRemoteQuickReply(
   id: string,
   payload: Partial<QuickReply>,
-  token?: string | null
+  token?: string | null,
+  fetchFn: FetchLike = fetch
 ): Promise<QuickReply | null> {
   try {
     const headers: Record<string, string> = {
@@ -225,11 +247,12 @@ export async function updateRemoteQuickReply(
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
     }
-    const res = await fetch(`/crm-api/quick-replies/${encodeURIComponent(id)}`, {
+    const res = await fetchFn(`/crm-api/quick-replies/${encodeURIComponent(id)}`, {
       method: "PUT",
       headers,
       body: JSON.stringify(payload),
     });
+    await dispatchRevokedIfUnauthorized(res);
     const json = await res.json();
     if (json.success && json.data) {
       return json.data;
@@ -243,17 +266,19 @@ export async function updateRemoteQuickReply(
  */
 export async function deleteRemoteQuickReply(
   id: string,
-  token?: string | null
+  token?: string | null,
+  fetchFn: FetchLike = fetch
 ): Promise<boolean> {
   try {
     const headers: Record<string, string> = {};
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
     }
-    const res = await fetch(`/crm-api/quick-replies/${encodeURIComponent(id)}`, {
+    const res = await fetchFn(`/crm-api/quick-replies/${encodeURIComponent(id)}`, {
       method: "DELETE",
       headers,
     });
+    await dispatchRevokedIfUnauthorized(res);
     const json = await res.json();
     return Boolean(json.success);
   } catch {

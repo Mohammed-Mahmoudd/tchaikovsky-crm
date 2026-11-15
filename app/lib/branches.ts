@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { useAuth } from "../components/AuthProvider";
 
 export interface BranchItem {
   id: string;
@@ -85,14 +86,17 @@ function setCache(data: BranchGroup[]) {
  * replacement of the old hardcoded BRANCH_GROUPS.
  */
 export function useBranches() {
+  const { authFetch, token } = useAuth();
   const [branchGroups, setBranchGroups] = useState<BranchGroup[]>(() => {
     return getCached() || DEFAULT_BRANCH_GROUPS;
   });
-  const [loading, setLoading] = useState(true);
+  const [isFetching, setIsFetching] = useState(false);
 
   const fetchBranches = useCallback(async () => {
+    if (!token) return;
+    setIsFetching(true);
     try {
-      const res = await fetch(API_URL, { cache: "no-store" });
+      const res = await authFetch(API_URL, { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json().catch(() => null);
       if (data?.success && Array.isArray(data.data)) {
@@ -102,21 +106,34 @@ export function useBranches() {
     } catch (e) {
       console.warn("Failed to fetch branches:", e);
     } finally {
-      setLoading(false);
+      setIsFetching(false);
     }
-  }, []);
+  }, [authFetch, token]);
 
   useEffect(() => {
-    fetchBranches();
-    if (typeof window === "undefined") return;
+    if (!token) return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) {
+        void fetchBranches();
+      }
+    });
+    if (typeof window === "undefined") {
+      return () => {
+        cancelled = true;
+      };
+    }
     const handleBranchesUpdated = () => {
-      fetchBranches();
+      void fetchBranches();
     };
     window.addEventListener("crm:branches-updated", handleBranchesUpdated);
     return () => {
+      cancelled = true;
       window.removeEventListener("crm:branches-updated", handleBranchesUpdated);
     };
-  }, [fetchBranches]);
+  }, [fetchBranches, token]);
+
+  const loading = Boolean(token) && isFetching;
 
   // Legacy-compatible format: { region, branches: string[] } — drop-in for BRANCH_GROUPS
   const legacyBranchGroups: LegacyBranchGroup[] = branchGroups.map((g) => ({

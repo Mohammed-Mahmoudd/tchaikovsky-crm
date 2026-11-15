@@ -2,7 +2,7 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { useAuth, isAssignableRole } from "../components/AuthProvider";
+import { useAuth, isAssignableRole, type LogoutReason } from "../components/AuthProvider";
 import { formatMetaErrorMessage } from "../utils/errorParser";
 import {
   computeUnreadFromMessages,
@@ -533,7 +533,7 @@ function isReviewerAllowedConversation(c: any): boolean {
 }
 
 export function CRMProvider({ children }: { children: React.ReactNode }) {
-  const { isReadOnly, token, user } = useAuth();
+  const { isReadOnly, canManageTeam, token, user, authFetch, closeSession, verifySession } = useAuth();
   const isMetaReviewer = Boolean(
     user?.email && user.email.toLowerCase().trim() === "test@meta.com"
   );
@@ -655,11 +655,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         });
       };
 
-      // 1. Fetch public/all agents endpoint
-      let res = await fetch(`${API}/messages/agents?all=1`, { cache: "no-store" }).catch(() => null);
-      if (!res || !res.ok) {
-        res = await fetch(`${DIRECT_API}/messages/agents?all=1`, { cache: "no-store" }).catch(() => null);
+      // 1. Fetch active staff list
+      let res = await authFetch(`${API}/messages/agents?all=1`, { cache: "no-store" }).catch(() => null);
+      if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+        res = await authFetch(`${DIRECT_API}/messages/agents?all=1`, { cache: "no-store" }).catch(() => null);
       }
+      if (res && res.status === 401) return;
       if (res && res.ok) {
         const data = await res.json().catch(() => null);
         if (data?.success && Array.isArray(data.data)) {
@@ -667,11 +668,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
-      // 2. If authenticated (e.g. Chairman), also fetch full users list so all roles (Enrollment Director, Finance, Marketing, etc.) are included
-      if (token) {
+      // 2. If authenticated with team management rights (Chairman/Director), fetch full users list so all roles are included
+      if (token && canManageTeam) {
         try {
-          const usersRes = await fetch(`${API}/auth/users`, {
-            headers: { Authorization: `Bearer ${token}` },
+          const usersRes = await authFetch(`${API}/auth/users`, {
             cache: "no-store",
           });
           if (usersRes.ok) {
@@ -695,7 +695,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     } catch (e) {
       console.warn("Failed to load assignable agents:", e);
     }
-  }, [token]);
+  }, [token, canManageTeam, authFetch]);
 
   useEffect(() => {
     fetchAgents();
@@ -884,21 +884,17 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     // Fix B: skip this poll cycle if a drag is in progress or we're in the post-drop quiet window
     if (pollPausedRef.current) return;
     try {
-      const headers: Record<string, string> = {};
-      if (token) headers["Authorization"] = `Bearer ${token}`;
       const canUseDeltaRev =
         lastServerRevRef.current > 0 &&
         conversationsRef.current.length > 250 &&
         pendingPatchesRef.current.size === 0 &&
         recentlyCreatedRef.current.size === 0;
       const revQuery = canUseDeltaRev ? `&rev=${lastServerRevRef.current}` : "";
-      let res = await fetch(`${API}/messages?slim=1${revQuery}`, {
-        headers,
+      let res = await authFetch(`${API}/messages?slim=1${revQuery}`, {
         cache: "no-store",
       }).catch(() => null);
-      if (!res || !res.ok) {
-        res = await fetch(`https://api.tchaikovskyschool.com/crm-api/messages?slim=1${revQuery}`, {
-          headers,
+      if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+        res = await authFetch(`https://api.tchaikovskyschool.com/crm-api/messages?slim=1${revQuery}`, {
           cache: "no-store",
         }).catch(() => null);
       }
@@ -1124,7 +1120,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         setLoading(false);
       }
     }
-  }, [normalizeConversationMeta, isMetaReviewer, token]);
+  }, [normalizeConversationMeta, isMetaReviewer, authFetch]);
   // NOTE: activeChatId intentionally excluded — we use the ref instead
   // so this callback is stable and the polling interval never restarts on chat selection.
 
@@ -1134,15 +1130,11 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       return;
     }
     try {
-      const headers: Record<string, string> = {};
-      if (token) headers["Authorization"] = `Bearer ${token}`;
-      let res = await fetch(`${API}/messages/${chatId}`, {
-        headers,
+      let res = await authFetch(`${API}/messages/${chatId}`, {
         cache: "no-store",
       }).catch(() => null);
-      if (!res || !res.ok) {
-        res = await fetch(`${DIRECT_API}/messages/${chatId}`, {
-          headers,
+      if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+        res = await authFetch(`${DIRECT_API}/messages/${chatId}`, {
           cache: "no-store",
         }).catch(() => null);
       }
@@ -1231,11 +1223,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         );
 
         if (!isReadOnly && (json.data?.unreadCount || 0) !== computedUnread) {
-          const patchHeaders: Record<string, string> = { "Content-Type": "application/json" };
-          if (token) patchHeaders["Authorization"] = `Bearer ${token}`;
-          fetch(`${API}/messages/${chatId}`, {
+          authFetch(`${API}/messages/${chatId}`, {
             method: "PATCH",
-            headers: patchHeaders,
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ unreadCount: computedUnread }),
           }).catch(() => {});
         }
@@ -1243,7 +1233,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     } catch (err) {
       console.warn("CRMContext: failed to fetch active chat", err);
     }
-  }, [normalizeMessages, isMetaReviewer, token, isReadOnly]);
+  }, [normalizeMessages, isMetaReviewer, authFetch, isReadOnly]);
 
   // ── Reset state when auth token changes (e.g. after sign-out → sign-in) ──
   // Without this, remounting after login can leave stale empty data if the
@@ -1294,16 +1284,47 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   // ── Real-Time Server-Sent Events (SSE) Stream ──
   // Instant (< 30ms) reflection when messages arrive or someone replies in Meta Inbox
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || !token) return;
 
     let eventSource: EventSource | null = null;
-    let reconnectTimer: NodeJS.Timeout;
+    let reconnectTimer: NodeJS.Timeout | undefined;
     let isCancelled = false;
+    let hasTicketAuth = false;
 
-    function connectSSE() {
+    async function connectSSE() {
       if (isCancelled) return;
       try {
-        eventSource = new EventSource(`${API}/messages/stream`);
+        let streamUrl = "";
+        const ticketRes = await authFetch(`${API}/auth/sse-ticket`, {
+          method: "POST",
+          cache: "no-store",
+        }).catch(() => null);
+
+        if (isCancelled) return;
+        if (ticketRes?.status === 401) {
+          return;
+        }
+
+        if (ticketRes?.ok) {
+          const ticketData = await ticketRes.json().catch(() => null);
+          if (ticketData?.ticket) {
+            hasTicketAuth = true;
+            streamUrl = `${API}/messages/stream?ticket=${encodeURIComponent(String(ticketData.ticket))}`;
+          }
+        } else if (ticketRes?.status === 404) {
+          // Graceful compatibility fallback when pointed at an un-deployed backend without /auth/sse-ticket
+          hasTicketAuth = false;
+          streamUrl = `${API}/messages/stream`;
+        }
+
+        if (!streamUrl) {
+          if (!isCancelled) {
+            reconnectTimer = setTimeout(connectSSE, 4000);
+          }
+          return;
+        }
+
+        eventSource = new EventSource(streamUrl);
 
         eventSource.onmessage = (event) => {
           try {
@@ -1317,6 +1338,24 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               if (!isReviewerAllowedConversation({ id: cId, name: cName })) {
                 return;
               }
+            }
+
+            if (payload.type === "session_revoked") {
+              isCancelled = true;
+              if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+              }
+              if (reconnectTimer) clearTimeout(reconnectTimer);
+              const rawReason = payload?.data?.reason;
+              const logoutReason: LogoutReason =
+                rawReason === "deleted"
+                  ? "deleted"
+                  : rawReason === "session_revoked"
+                    ? "session_revoked"
+                    : "deactivated";
+              closeSession(logoutReason);
+              return;
             }
 
             if (payload.type === "message" && payload.data) {
@@ -1776,12 +1815,15 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   return { ...c, messages: updatedMessages || [] };
                 })
               );
-            } else if (payload.type === "names_updated") {
-              // WhatsApp backfill completed on backend — refresh conversations so real names appear
+            } else if (payload.type === "names_updated" || payload.type === "conversations_refresh") {
+              // WhatsApp backfill or bulk agent unassignment completed — refresh conversations live
               fetchConversations();
             } else if (payload.type === "team_updated") {
-              // Staff user created, updated, or deleted — refresh agents & team members live
+              // Staff user created, updated, or deleted — refresh agents & verify active session in fallback mode
               fetchAgents();
+              if (!hasTicketAuth) {
+                verifySession({ force: true, fallbackReason: "deactivated" });
+              }
             } else if (payload.type === "branches_updated") {
               // Branch list modified — notify all useBranches() hooks to refresh immediately
               if (typeof window !== "undefined") {
@@ -1803,9 +1845,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             eventSource.close();
             eventSource = null;
           }
-          if (!isCancelled) {
-            reconnectTimer = setTimeout(connectSSE, 4000);
-          }
+          if (isCancelled) return;
+          verifySession({ force: true }).then((stillValid) => {
+            if (!isCancelled && stillValid) {
+              reconnectTimer = setTimeout(connectSSE, 4000);
+            }
+          });
         };
       } catch (err) {
         console.warn("CRMContext: SSE setup error", err);
@@ -1822,9 +1867,18 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       if (eventSource) {
         eventSource.close();
       }
-      clearTimeout(reconnectTimer);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
     };
-  }, [normalizeConversationMeta, fetchConversations, fetchAgents, isMetaReviewer]);
+  }, [
+    token,
+    authFetch,
+    closeSession,
+    verifySession,
+    normalizeConversationMeta,
+    fetchConversations,
+    fetchAgents,
+    isMetaReviewer,
+  ]);
 
   // ── Non-overlapping background polling (3s delay after completion) ──
   useEffect(() => {
@@ -2424,11 +2478,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
       // 3. Persist to API
       try {
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (token) headers["Authorization"] = `Bearer ${token}`;
-        const res = await fetch(`${API}/messages/${id}`, {
+        const res = await authFetch(`${API}/messages/${id}`, {
           method: "PATCH",
-          headers,
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify(patchPayload),
         });
         const json = await res.json().catch(() => null);
@@ -2473,9 +2525,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         }
 
         let restoredMeta: Omit<Conversation, "messages"> | undefined;
-        if (res.status === 401 || res.status === 403 || res.status === 409) {
+        if (res.status === 403 || res.status === 409) {
           try {
-            const rollbackRes = await fetch(`${API}/messages/${id}`, { headers });
+            const rollbackRes = await authFetch(`${API}/messages/${id}`);
             if (rollbackRes.ok) {
               const rollbackJson = await rollbackRes.json().catch(() => null);
               if (rollbackJson && rollbackJson.data) {
@@ -2507,7 +2559,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         return { ok: false, error: networkError };
       }
     },
-    [isReadOnly, token, normalizeConversationMeta]
+    [isReadOnly, authFetch, normalizeConversationMeta]
   );
 
   // Unread count is only cleared when a staff member replies (never on chat selection)
@@ -2712,12 +2764,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
       // 2. Persist to backend in background
       try {
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (token) headers["Authorization"] = `Bearer ${token}`;
-
-        const res = await fetch(`${API}/messages/manual`, {
+        const res = await authFetch(`${API}/messages/manual`, {
           method: "POST",
-          headers,
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             phone: e164Phone,
             name: cleanName || undefined,
@@ -2803,7 +2852,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
       return { ok: true, conversationId: senderId, existed: false };
     },
-    [isReadOnly, user, conversations, patchConversation, token, normalizeConversationMeta]
+    [isReadOnly, user, conversations, patchConversation, authFetch, normalizeConversationMeta]
   );
 
   const deleteConversation = useCallback(
@@ -2826,15 +2875,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         if (activeChatIdRef.current === senderId) {
           setActiveChatId(null);
         }
-        await fetch(`${API}/messages/${senderId}`, {
+        await authFetch(`${API}/messages/${senderId}`, {
           method: "DELETE",
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
       } catch (err) {
         console.error("Failed to delete conversation:", err);
       }
     },
-    [token]
+    [authFetch]
   );
 
   const clearWhatsAppConversations = useCallback(async () => {
@@ -2846,14 +2894,13 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       if (active?.channel === "WA") {
         setActiveChatId(null);
       }
-      await fetch(`${API}/whatsapp/clear-conversations`, {
+      await authFetch(`${API}/whatsapp/clear-conversations`, {
         method: "POST",
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
     } catch (err) {
       console.error("Failed to clear WhatsApp conversations:", err);
     }
-  }, [conversations, token]);
+  }, [conversations, authFetch]);
 
   // 0ms optimistic message edit + server sync
   const editMessage = useCallback(
@@ -2887,11 +2934,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
       // 2. Persist to backend & WhatsApp
       try {
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (token) headers["Authorization"] = `Bearer ${token}`;
-        const res = await fetch(`${API}/messages/${chatId}/messages/${messageId}`, {
+        const res = await authFetch(`${API}/messages/${chatId}/messages/${messageId}`, {
           method: "PATCH",
-          headers,
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: trimmed }),
         });
         const json = await res.json().catch(() => null);
@@ -2916,7 +2961,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         return { ok: false, error: err?.message || "Network error while editing message" };
       }
     },
-    [isReadOnly, token]
+    [isReadOnly, authFetch]
   );
 
   // 0ms optimistic message unsend (delete for everyone on WhatsApp) + server sync
@@ -2966,11 +3011,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
       // 2. Persist to backend & WhatsApp
       try {
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (token) headers["Authorization"] = `Bearer ${token}`;
-        const res = await fetch(`${API}/messages/${chatId}/messages/${messageId}`, {
+        const res = await authFetch(`${API}/messages/${chatId}/messages/${messageId}`, {
           method: "DELETE",
-          headers,
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ deletedBy: actorName || user?.name }),
         });
         const json = await res.json().catch(() => null);
@@ -2994,7 +3037,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         return { ok: false, error: err?.message || "Network error while unsending message" };
       }
     },
-    [isReadOnly, token, user?.name]
+    [isReadOnly, authFetch, user?.name]
   );
 
   // 0ms optimistic emoji reaction toggle/update + server sync
@@ -3037,11 +3080,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
       // 2. Persist to backend & WhatsApp
       try {
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (token) headers["Authorization"] = `Bearer ${token}`;
-        const res = await fetch(`${API}/messages/${chatId}/messages/${messageId}/react`, {
+        const res = await authFetch(`${API}/messages/${chatId}/messages/${messageId}/react`, {
           method: "POST",
-          headers,
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ emoji: effectiveEmoji }),
         });
         if (!res.ok) {
@@ -3065,7 +3106,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         return false;
       }
     },
-    [isReadOnly, token]
+    [isReadOnly, authFetch]
   );
 
   // 0ms optimistic message insertion for instant text & attachment rendering

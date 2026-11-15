@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "../components/AuthProvider";
+import { getLogoutReasonMessage } from "../utils/authSessionNotice";
 
 export default function LoginPage() {
   const { login, user, loading } = useAuth();
@@ -11,8 +12,18 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+
+  // Read optional forced-logout reason from URL without Suspense requirements
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const reason = new URLSearchParams(window.location.search).get("reason");
+    queueMicrotask(() => {
+      setSessionNotice(getLogoutReasonMessage(reason));
+    });
+  }, []);
 
   // Already logged in → go to inbox
   useEffect(() => {
@@ -70,6 +81,20 @@ export default function LoginPage() {
             Sign in to your account
           </p>
         </div>
+
+        {sessionNotice && (
+          <div
+            role="status"
+            className="mb-5 rounded-[10px] px-3.5 py-2.5 text-[12px] font-medium leading-relaxed"
+            style={{
+              background: "rgba(255,59,48,0.08)",
+              border: "1px solid rgba(255,59,48,0.22)",
+              color: "#FF3B30",
+            }}
+          >
+            {sessionNotice}
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} noValidate className="space-y-4">
           {/* Email */}

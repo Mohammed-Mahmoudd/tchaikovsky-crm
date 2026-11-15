@@ -176,7 +176,7 @@ export const ConversationChatView = React.memo(function ConversationChatView({
     openChat,
   } = useCRM();
 
-  const { user, token, isReadOnly } = useAuth();
+  const { user, token, authFetch, isReadOnly } = useAuth();
 
   const activeConv = useMemo(
     () => conversations.find((c) => c.id === conversationId) ?? null,
@@ -496,7 +496,6 @@ export const ConversationChatView = React.memo(function ConversationChatView({
 
       try {
         const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (token) headers["Authorization"] = `Bearer ${token}`;
 
         const serverAttachments = hasAttachments
           ? attachments!.map((att) => {
@@ -506,7 +505,7 @@ export const ConversationChatView = React.memo(function ConversationChatView({
             })
           : undefined;
 
-        const res = await fetch(`/api/messages/${chatId}/reply`, {
+        const res = await authFetch(`/api/messages/${chatId}/reply`, {
           method: "POST",
           headers,
           body: JSON.stringify({
@@ -560,7 +559,7 @@ export const ConversationChatView = React.memo(function ConversationChatView({
       isAssigned,
       user?.name,
       patchConversation,
-      token,
+      authFetch,
       refresh,
       addOptimisticMessages,
       finalizeOptimisticMessages,

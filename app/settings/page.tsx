@@ -46,7 +46,7 @@ function resizeImageToAvatar(file: File, maxWidth = 256, maxHeight = 256): Promi
 }
 
 export default function SettingsPage() {
-  const { user, updateCurrentUser, authFetch, canManageTeam: authCanManageTeam, roleDisplayName } = useAuth();
+  const { user, updateCurrentUser, updateSessionToken, authFetch, canManageTeam: authCanManageTeam, roleDisplayName } = useAuth();
 
   // Profile state
   const [nameSaving, setNameSaving] = useState(false);
@@ -88,6 +88,11 @@ export default function SettingsPage() {
   const [editError, setEditError] = useState<string | null>(null);
   const editFileInputRef = useRef<HTMLInputElement>(null);
 
+  // Deactivate confirmation state
+  const [deactivatingMember, setDeactivatingMember] = useState<TeamMember | null>(null);
+  const [deactivateSaving, setDeactivateSaving] = useState(false);
+  const [deactivateError, setDeactivateError] = useState<string | null>(null);
+
   // Delete confirmation state
   const [deletingMember, setDeletingMember] = useState<TeamMember | null>(null);
   const [deleteSaving, setDeleteSaving] = useState(false);
@@ -107,7 +112,16 @@ export default function SettingsPage() {
   const [newBranchRegion, setNewBranchRegion] = useState("");
   const [addingBranch, setAddingBranch] = useState(false);
   const [branchStatus, setBranchStatus] = useState<{ ok: boolean; msg: string } | null>(null);
-  const { conversations } = useCRM();
+  const { conversations, refresh: refreshConversations } = useCRM();
+
+  const getAssignedLeadCount = (memberName: string): number => {
+    const clean = memberName.trim().toLowerCase();
+    if (!clean) return 0;
+    return conversations.reduce(
+      (count, conv) => (conv.agent && conv.agent.trim().toLowerCase() === clean ? count + 1 : count),
+      0
+    );
+  };
   const [branchSearch, setBranchSearch] = useState("");
   const [selectedRegionFilter, setSelectedRegionFilter] = useState("ALL");
 
@@ -239,6 +253,7 @@ export default function SettingsPage() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (editingMember && !editSaving) setEditingMember(null);
+        if (deactivatingMember && !deactivateSaving) setDeactivatingMember(null);
         if (deletingMember && !deleteSaving) setDeletingMember(null);
         if (branchToDelete && !isDeletingBranch) setBranchToDelete(null);
         setOpenMenuId(null);
@@ -255,7 +270,16 @@ export default function SettingsPage() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("pointerdown", onPointerDown);
     };
-  }, [editingMember, editSaving, deletingMember, deleteSaving]);
+  }, [
+    editingMember,
+    editSaving,
+    deactivatingMember,
+    deactivateSaving,
+    deletingMember,
+    deleteSaving,
+    branchToDelete,
+    isDeletingBranch,
+  ]);
 
   // Fetch team
   useEffect(() => {
@@ -409,6 +433,9 @@ export default function SettingsPage() {
       });
       const data = await res.json();
       if (data.success) {
+        if (typeof data.token === "string" && data.token) {
+          updateSessionToken(data.token);
+        }
         setPwStatus({ ok: true, msg: "Password changed successfully!" });
         setNewPassword("");
         setConfirmPassword("");
@@ -428,13 +455,13 @@ export default function SettingsPage() {
 
   // Update team member role or active state
   const handleUpdateMember = async (id: string, updates: Partial<TeamMember>) => {
+    const previousMember = team.find((m) => m.id === id);
     // If activating a member, check if seats are already full
     if (updates.active === true) {
-      const target = team.find((m) => m.id === id);
-      if (target && !target.active && isSeatLimitReached) {
+      if (previousMember && !previousMember.active && isSeatLimitReached) {
         setAddStatus({
           ok: false,
-          msg: `Cannot activate ${target.name}. All ${maxSeats} seats are currently in use. Deactivate another member first.`,
+          msg: `Cannot activate ${previousMember.name}. All ${maxSeats} seats are currently in use. Deactivate another member first.`,
         });
         return;
       }
@@ -451,14 +478,16 @@ export default function SettingsPage() {
       });
       const data = await res.json();
       if (!data.success) {
-        // Rollback
-        setTeam((prev) => prev.map((m) => (m.id === id ? { ...m, active: !updates.active } : m)));
+        if (previousMember) {
+          setTeam((prev) => prev.map((m) => (m.id === id ? previousMember : m)));
+        }
         setAddStatus({ ok: false, msg: data.error || "Failed to update member." });
       }
     } catch (err) {
       console.error("Failed to update user:", err);
-      // Rollback
-      setTeam((prev) => prev.map((m) => (m.id === id ? { ...m, active: !updates.active } : m)));
+      if (previousMember) {
+        setTeam((prev) => prev.map((m) => (m.id === id ? previousMember : m)));
+      }
       setAddStatus({ ok: false, msg: "Network error. Unable to reach server." });
     }
   };
@@ -569,6 +598,50 @@ export default function SettingsPage() {
     }
   };
 
+  // Open deactivate confirmation modal
+  const handleOpenDeactivate = (member: TeamMember) => {
+    setDeactivatingMember(member);
+    setDeactivateError(null);
+  };
+
+  // Confirm deactivate member
+  const handleConfirmDeactivate = async () => {
+    if (!deactivatingMember) return;
+    setDeactivateSaving(true);
+    setDeactivateError(null);
+
+    try {
+      const res = await authFetch(`/crm-api/auth/users/${deactivatingMember.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active: false }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        const deactivatedName = deactivatingMember.name;
+        const keptLeadsCount = getAssignedLeadCount(deactivatedName);
+        setTeam((prev) =>
+          prev.map((m) => (m.id === deactivatingMember.id ? { ...m, active: false } : m))
+        );
+        setAddStatus({
+          ok: true,
+          msg:
+            keptLeadsCount > 0
+              ? `${deactivatedName} deactivated. Active sessions were closed; ${keptLeadsCount} assigned ${keptLeadsCount === 1 ? "lead remains" : "leads remain"} assigned.`
+              : `${deactivatedName} deactivated. All active sessions have been closed.`,
+        });
+        setTimeout(() => setAddStatus(null), 4500);
+        setDeactivatingMember(null);
+      } else {
+        setDeactivateError(data.error || "Failed to deactivate member.");
+      }
+    } catch {
+      setDeactivateError("Network error. Unable to reach server.");
+    } finally {
+      setDeactivateSaving(false);
+    }
+  };
+
   // Open delete modal
   const handleOpenDelete = (member: TeamMember) => {
     setDeletingMember(member);
@@ -588,9 +661,19 @@ export default function SettingsPage() {
       const data = await res.json();
       if (data.success) {
         const deletedName = deletingMember.name;
+        const unassignedCount = Number(data.unassignedCount || 0);
         setTeam((prev) => prev.filter((m) => m.id !== deletingMember.id));
-        setAddStatus({ ok: true, msg: `User ${deletedName} deleted successfully.` });
-        setTimeout(() => setAddStatus(null), 3500);
+        if (unassignedCount > 0) {
+          refreshConversations();
+        }
+        setAddStatus({
+          ok: true,
+          msg:
+            unassignedCount > 0
+              ? `User ${deletedName} deleted successfully. ${unassignedCount} assigned ${unassignedCount === 1 ? "lead was" : "leads were"} moved to Unassigned.`
+              : `User ${deletedName} deleted successfully.`,
+        });
+        setTimeout(() => setAddStatus(null), 4500);
         setDeletingMember(null);
       } else {
         setDeleteError(data.error || "Failed to delete member.");
@@ -1033,7 +1116,13 @@ export default function SettingsPage() {
                   <button
                     type="button"
                     disabled={!canManageTeam || (isChairmanMember && !userIsChairman) || isSelf || (!member.active && isSeatLimitReached)}
-                    onClick={() => handleUpdateMember(member.id, { active: !member.active })}
+                    onClick={() => {
+                      if (member.active) {
+                        handleOpenDeactivate(member);
+                      } else {
+                        handleUpdateMember(member.id, { active: true });
+                      }
+                    }}
                     title={
                       isSelf
                         ? "You cannot deactivate your own account"
@@ -1835,7 +1924,7 @@ export default function SettingsPage() {
 
               {/* Active status toggle */}
               <div
-                className="flex items-center justify-between rounded-[8px] px-3 py-2.5"
+                className="flex items-center justify-between gap-3 rounded-[8px] px-3 py-2.5"
                 style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)" }}
               >
                 <div>
@@ -1843,8 +1932,15 @@ export default function SettingsPage() {
                     Active
                   </p>
                   <p className="text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
-                    Inactive users cannot log in
+                    Deactivating closes all active sessions immediately; assigned leads stay intact
                   </p>
+                  {editingMember.active && !editActive && (
+                    <p className="text-[11px] mt-1 font-medium" style={{ color: "#b3261e" }}>
+                      Saving will sign out {editingMember.name} across all open tabs and keep their{" "}
+                      {getAssignedLeadCount(editingMember.name)} assigned{" "}
+                      {getAssignedLeadCount(editingMember.name) === 1 ? "lead" : "leads"}.
+                    </p>
+                  )}
                 </div>
                 <button
                   type="button"
@@ -1929,43 +2025,225 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* ── Delete User Confirmation Modal ────────────────────────────────── */}
-      {deletingMember && (
+      {/* ── Deactivate User Confirmation Modal ────────────────────────────── */}
+      {deactivatingMember && (
         <div
-          className="fixed inset-0 z-[200] flex items-center justify-center p-4"
-          style={{ background: "rgba(0,0,0,0.45)" }}
-          onClick={() => { if (!deleteSaving) setDeletingMember(null); }}
+          className="fixed inset-0 z-[200] flex items-center justify-center p-4 animate-in fade-in duration-150"
+          style={{ background: "rgba(0,0,0,0.45)", backdropFilter: "blur(2px)" }}
+          onClick={() => { if (!deactivateSaving) setDeactivatingMember(null); }}
         >
           <div
-            className="w-full max-w-[360px] rounded-xl shadow-xl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="deactivate-user-title"
+            className="w-full max-w-[420px] max-h-[90dvh] overflow-y-auto rounded-2xl shadow-2xl border animate-in fade-in zoom-in-95 duration-150"
             style={{
               background: "var(--bg-card)",
-              border: "1px solid var(--border-main)",
+              borderColor: "var(--border-main)",
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="px-5 py-5">
-              <p className="text-[13px] font-semibold mb-1" style={{ color: "var(--text-primary)" }}>
-                Delete user
-              </p>
-              <p className="text-[12px]" style={{ color: "var(--text-secondary)" }}>
-                This will permanently remove{" "}
-                <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
-                  {deletingMember.name}
-                </span>{" "}
-                ({deletingMember.email}) from the system. This action cannot be undone.
-              </p>
+            <div className="px-5 py-5 flex flex-col gap-3.5">
+              <div className="flex items-start gap-3">
+                <div
+                  className="w-9 h-9 rounded-full flex items-center justify-center shrink-0"
+                  style={{ background: "rgba(179, 38, 30, 0.1)", color: "#b3261e" }}
+                >
+                  <AlertTriangle className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <p
+                    id="deactivate-user-title"
+                    className="text-[14px] font-semibold"
+                    style={{ color: "var(--text-primary)" }}
+                  >
+                    Deactivate user account
+                  </p>
+                  <p className="text-[12px] mt-1 leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+                    You are about to deactivate{" "}
+                    <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
+                      {deactivatingMember.name}
+                    </span>{" "}
+                    ({deactivatingMember.email}).
+                  </p>
+                </div>
+              </div>
 
-              {deleteError && (
-                <p className="mt-3 text-[11px] font-medium text-[#FF3B30]">{deleteError}</p>
+              {(() => {
+                const keptLeads = getAssignedLeadCount(deactivatingMember.name);
+                return (
+                  <div
+                    className="rounded-xl p-3 text-[12px] leading-relaxed space-y-1.5"
+                    style={{
+                      background: "var(--bg-input)",
+                      border: "1px solid var(--border-main)",
+                      color: "var(--text-secondary)",
+                    }}
+                  >
+                    <p>
+                      <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
+                        Session access:
+                      </span>{" "}
+                      All active CRM sessions and open tabs for this user will be closed immediately,
+                      and login will be blocked until reactivated.
+                    </p>
+                    <p>
+                      <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
+                        Lead ownership:
+                      </span>{" "}
+                      {keptLeads > 0 ? (
+                        <>
+                          Their{" "}
+                          <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
+                            {keptLeads} assigned {keptLeads === 1 ? "lead" : "leads"}
+                          </span>{" "}
+                          will remain assigned to {deactivatingMember.name}.
+                        </>
+                      ) : (
+                        <>No currently assigned leads will be removed or reassigned.</>
+                      )}
+                    </p>
+                  </div>
+                );
+              })()}
+
+              {deactivateError && (
+                <p className="text-[11px] font-medium text-[#FF3B30]">{deactivateError}</p>
               )}
 
-              <div className="flex items-center justify-end gap-2 mt-5">
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => { if (!deactivateSaving) setDeactivatingMember(null); }}
+                  disabled={deactivateSaving}
+                  className="min-h-[36px] px-4 text-[12px] font-medium rounded-[8px] transition-colors cursor-pointer disabled:opacity-40"
+                  style={{
+                    background: "var(--bg-card)",
+                    border: "1px solid var(--border-main)",
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmDeactivate}
+                  disabled={deactivateSaving}
+                  className="min-h-[36px] px-4 text-[12px] font-semibold rounded-[8px] transition-colors cursor-pointer disabled:opacity-50"
+                  style={{
+                    background: "rgba(179, 38, 30, 0.1)",
+                    border: "1px solid rgba(179, 38, 30, 0.3)",
+                    color: "#b3261e",
+                  }}
+                >
+                  {deactivateSaving ? "Deactivating…" : "Deactivate user"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Delete User Confirmation Modal ────────────────────────────────── */}
+      {deletingMember && (
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center p-4 animate-in fade-in duration-150"
+          style={{ background: "rgba(0,0,0,0.45)", backdropFilter: "blur(2px)" }}
+          onClick={() => { if (!deleteSaving) setDeletingMember(null); }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-user-title"
+            className="w-full max-w-[420px] max-h-[90dvh] overflow-y-auto rounded-2xl shadow-2xl border animate-in fade-in zoom-in-95 duration-150"
+            style={{
+              background: "var(--bg-card)",
+              borderColor: "var(--border-main)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-5 flex flex-col gap-3.5">
+              <div className="flex items-start gap-3">
+                <div
+                  className="w-9 h-9 rounded-full flex items-center justify-center shrink-0"
+                  style={{ background: "rgba(179, 38, 30, 0.1)", color: "#b3261e" }}
+                >
+                  <AlertTriangle className="w-4 h-4" />
+                </div>
+                <div className="min-w-0">
+                  <p
+                    id="delete-user-title"
+                    className="text-[14px] font-semibold"
+                    style={{ color: "var(--text-primary)" }}
+                  >
+                    Delete user permanently
+                  </p>
+                  <p className="text-[12px] mt-1 leading-relaxed" style={{ color: "var(--text-secondary)" }}>
+                    This will permanently remove{" "}
+                    <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
+                      {deletingMember.name}
+                    </span>{" "}
+                    ({deletingMember.email}) from the system. This action cannot be undone.
+                  </p>
+                </div>
+              </div>
+
+              {(() => {
+                const assignedCount = getAssignedLeadCount(deletingMember.name);
+                return (
+                  <div
+                    className="rounded-xl p-3 text-[12px] leading-relaxed space-y-1.5"
+                    style={{
+                      background: "rgba(179, 38, 30, 0.06)",
+                      border: "1px solid rgba(179, 38, 30, 0.2)",
+                      color: "var(--text-secondary)",
+                    }}
+                  >
+                    <p>
+                      <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
+                        Session closure:
+                      </span>{" "}
+                      Any open session for {deletingMember.name} will be closed immediately.
+                    </p>
+                    <p>
+                      <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
+                        Lead reassignment:
+                      </span>{" "}
+                      {assignedCount > 0 ? (
+                        <>
+                          <span className="font-semibold" style={{ color: "#b3261e" }}>
+                            {assignedCount} assigned {assignedCount === 1 ? "lead" : "leads"}
+                          </span>{" "}
+                          currently owned by {deletingMember.name} will automatically move to{" "}
+                          <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
+                            Unassigned
+                          </span>
+                          . Historical performance metrics remain preserved.
+                        </>
+                      ) : (
+                        <>
+                          Any leads assigned to {deletingMember.name} will automatically move to{" "}
+                          <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
+                            Unassigned
+                          </span>
+                          . Historical performance metrics remain preserved.
+                        </>
+                      )}
+                    </p>
+                  </div>
+                );
+              })()}
+
+              {deleteError && (
+                <p className="text-[11px] font-medium text-[#FF3B30]">{deleteError}</p>
+              )}
+
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
                 <button
                   type="button"
                   onClick={() => { if (!deleteSaving) setDeletingMember(null); }}
                   disabled={deleteSaving}
-                  className="h-[30px] px-4 text-[12px] font-medium rounded-[6px] transition-colors cursor-pointer disabled:opacity-40"
+                  className="min-h-[36px] px-4 text-[12px] font-medium rounded-[8px] transition-colors cursor-pointer disabled:opacity-40"
                   style={{
                     background: "var(--bg-card)",
                     border: "1px solid var(--border-main)",
@@ -1978,11 +2256,11 @@ export default function SettingsPage() {
                   type="button"
                   onClick={handleConfirmDelete}
                   disabled={deleteSaving}
-                  className="h-[30px] px-4 text-[12px] font-medium rounded-[6px] transition-colors cursor-pointer disabled:opacity-50"
+                  className="min-h-[36px] px-4 text-[12px] font-semibold rounded-[8px] transition-colors cursor-pointer disabled:opacity-50"
                   style={{
-                    background: "rgba(179, 38, 30, 0.08)",
-                    border: "1px solid rgba(179, 38, 30, 0.25)",
-                    color: "#b3261e",
+                    background: "#b3261e",
+                    border: "1px solid #b3261e",
+                    color: "#ffffff",
                   }}
                 >
                   {deleteSaving ? "Deleting…" : "Delete user"}

@@ -19,8 +19,10 @@ import { EmojiPicker, recordRecentEmoji } from "./EmojiPicker";
 import { ComposerAssistBar, FormatAction } from "./ComposerAssistBar";
 import { FastRepliesPopover } from "./FastRepliesPopover";
 import { FastReplyModal } from "./FastReplyModal";
+import { useAuth } from "./AuthProvider";
 import {
   QuickReply,
+  FetchLike,
   getStoredQuickReplies,
   saveStoredQuickReplies,
   filterQuickReplies,
@@ -183,7 +185,8 @@ async function preUploadFile(
   file: File,
   forceDocument: boolean,
   previewUrl: string,
-  token?: string | null
+  token?: string | null,
+  fetchFn: FetchLike = fetch
 ): Promise<OutgoingAttachmentPayload> {
   const type = getFileType(file, forceDocument);
   const { blob, mimeType, fileName } = await compressImageIfNeeded(file, forceDocument);
@@ -198,7 +201,7 @@ async function preUploadFile(
     };
     if (token) headers["Authorization"] = `Bearer ${token}`;
 
-    const res = await fetch("/api/messages/upload", {
+    const res = await fetchFn("/api/messages/upload", {
       method: "POST",
       headers,
       body: blob,
@@ -292,6 +295,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   onJumpToMessage,
   externalDroppedFiles,
 }: ChatInputBarProps) {
+  const { authFetch } = useAuth();
   // Local state completely isolated from parent page — typing does NOT re-render chat or sidebar
   const [text, setText] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -325,14 +329,14 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   // Sync quick replies with backend & listen to SSE/storage updates
   useEffect(() => {
     let isMounted = true;
-    fetchRemoteQuickReplies(token).then((data) => {
+    fetchRemoteQuickReplies(token, authFetch).then((data) => {
       if (isMounted && data && data.length > 0) {
         setQuickReplies(data);
       }
     });
 
     const handleUpdated = () => {
-      fetchRemoteQuickReplies(token).then((data) => {
+      fetchRemoteQuickReplies(token, authFetch).then((data) => {
         if (isMounted && data && data.length > 0) {
           setQuickReplies(data);
         }
@@ -351,7 +355,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         window.removeEventListener("storage", handleUpdated);
       }
     };
-  }, [token]);
+  }, [token, authFetch]);
 
   // Reset input, attachments, and focus when switching conversations
   useEffect(() => {
@@ -420,7 +424,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         const type = getFileType(file, forceDocument);
         const previewUrl = URL.createObjectURL(file);
 
-        const uploadPromise = preUploadFile(file, forceDocument, previewUrl, token).then(
+        const uploadPromise = preUploadFile(file, forceDocument, previewUrl, token, authFetch).then(
           (payload) => {
             setQueuedAttachments((prev) =>
               prev.map((item) =>
@@ -453,7 +457,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         inputRef.current?.focus();
       });
     },
-    [token]
+    [token, authFetch]
   );
 
   // Handle files dropped onto the conversation area in parent page
@@ -776,7 +780,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
             saveStoredQuickReplies(next);
             return next;
           });
-          await updateRemoteQuickReply(data.id, data, token);
+          await updateRemoteQuickReply(data.id, data, token, authFetch);
           return { success: true };
         } else {
           const tempId = `qr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -793,7 +797,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
             saveStoredQuickReplies(next);
             return next;
           });
-          createRemoteQuickReply(data, token).then((remote) => {
+          createRemoteQuickReply(data, token, authFetch).then((remote) => {
             if (remote && remote.id) {
               setQuickReplies((prev) => {
                 const updated = prev.map((item) => (item.id === tempId ? remote : item));
@@ -808,7 +812,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         return { success: false, error: err.message || "Failed to save quick reply" };
       }
     },
-    [token, quickReplies.length]
+    [token, authFetch, quickReplies.length]
   );
 
   const handleDeleteQuickReply = useCallback(
@@ -821,9 +825,9 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         saveStoredQuickReplies(next);
         return next;
       });
-      deleteRemoteQuickReply(id, token);
+      deleteRemoteQuickReply(id, token, authFetch);
     },
-    [token]
+    [token, authFetch]
   );
 
   const showSuggestions = suggestion.emojis.length > 0 && !isSuggestionDismissed && !showFastReplies;
