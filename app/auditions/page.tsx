@@ -4,10 +4,16 @@ import React, { useState, useMemo, useCallback, useRef, useEffect, useSyncExtern
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useCRM } from '../context/CRMContext';
 import { useAuth } from '../components/AuthProvider';
-import { MessageSquare, Calendar, ChevronLeft, ChevronRight, X, MapPin, ChevronDown, Search, Lock, Unlock, User, Clock, Check, ArrowLeft } from 'lucide-react';
+import { MessageSquare, Calendar, ChevronLeft, ChevronRight, X, MapPin, ChevronDown, Search, Lock, Unlock, User, Clock, Check, ArrowLeft, Trash2, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { useBranches, LegacyBranchGroup } from '../lib/branches';
 import { BranchSelect } from '../components/BranchSelect';
 import { getTeamReturnBannerInfo, navigateBackToTeamActivities } from '../utils/teamAuditNav';
+import {
+  buildRemoveAuditionPatch,
+  collectSlotLocalKeys,
+  isLiveAuditionConversation,
+  omitRecordKeys,
+} from '../utils/auditionRemoval';
 
 type AuditionOutcome = 'registered' | 'schedule-followup' | 'paid-trial' | 'joining-later' | 'no-show';
 type SlotStatus = AuditionOutcome | 'booked' | 'closed';
@@ -31,6 +37,18 @@ type Slot = {
 
 type DaySlots = { [dateKey: string]: Slot[] };
 type CalendarViewMode = 'month' | 'week';
+type RemoveConfirmState = {
+  dateKey: string;
+  slotId: string | number;
+  conversationId?: string;
+  name: string;
+  time: string;
+  branch?: string;
+  currentPipeline?: string;
+  cashIn: number;
+  isEnrolledOrPaid: boolean;
+  isCustomSlot: boolean;
+} | null;
 
 const WEEKDAY_HEADERS = ['Sat', 'Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri'] as const;
 
@@ -1056,6 +1074,8 @@ function AuditionsPageInner() {
   const [bookingModal, setBookingModal] = useState<BookingModal>(null);
   const [bookForm, setBookForm] = useState({ branch: '', name: '', type: 'Adult', age: '', instrument: '', agent: 'Unassigned' });
   const [slotPanel, setSlotPanel] = useState<SlotPanelState>(null);
+  const [removeConfirm, setRemoveConfirm] = useState<RemoveConfirmState>(null);
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [panelComment, setPanelComment] = useState('');
   const [panelAgent, setPanelAgent] = useState('Unassigned');
   const [panelStatus, setPanelStatus] = useState<SlotStatus>('booked');
@@ -1170,31 +1190,117 @@ function AuditionsPageInner() {
     });
   }, []);
 
+  const clearLocalSlotCaches = useCallback((slotId: string | number, conversationId?: string) => {
+    const keys = collectSlotLocalKeys(slotId, conversationId);
+    const snapshot = {
+      closedSlots: omitRecordKeys(closedSlots, keys).removed,
+      statusOverrides: omitRecordKeys(statusOverrides, keys).removed,
+      auditionDates: omitRecordKeys(auditionDates, keys).removed,
+    };
+
+    setClosedSlots(prev => {
+      const { next, changed } = omitRecordKeys(prev, keys);
+      if (!changed) return prev;
+      try {
+        localStorage.setItem('audition_closed_slots', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+
+    setStatusOverrides(prev => {
+      const { next, changed } = omitRecordKeys(prev, keys);
+      if (!changed) return prev;
+      try {
+        localStorage.setItem('audition_status_overrides', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+
+    setAuditionDates(prev => {
+      const { next, changed } = omitRecordKeys(prev, keys);
+      if (!changed) return prev;
+      try {
+        localStorage.setItem('audition_locked_dates', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+
+    return snapshot;
+  }, [closedSlots, statusOverrides, auditionDates]);
+
+  const restoreLocalSlotCaches = useCallback((snapshot: {
+    closedSlots: Record<string, boolean>;
+    statusOverrides: Record<string, SlotStatus>;
+    auditionDates: Record<string, string>;
+  }) => {
+    if (Object.keys(snapshot.closedSlots).length > 0) {
+      setClosedSlots(prev => {
+        const next = { ...prev, ...snapshot.closedSlots };
+        try {
+          localStorage.setItem('audition_closed_slots', JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+    }
+    if (Object.keys(snapshot.statusOverrides).length > 0) {
+      setStatusOverrides(prev => {
+        const next = { ...prev, ...snapshot.statusOverrides };
+        try {
+          localStorage.setItem('audition_status_overrides', JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+    }
+    if (Object.keys(snapshot.auditionDates).length > 0) {
+      setAuditionDates(prev => {
+        const next = { ...prev, ...snapshot.auditionDates };
+        try {
+          localStorage.setItem('audition_locked_dates', JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleToastEvent = (event: Event) => {
+      const detail = (event as CustomEvent<{ type?: string; message?: string }>).detail;
+      if (!detail?.message) return;
+      setToast({
+        type: detail.type === 'error' ? 'error' : 'success',
+        message: detail.message,
+      });
+    };
+    window.addEventListener('crm:toast', handleToastEvent);
+    return () => window.removeEventListener('crm:toast', handleToastEvent);
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  useEffect(() => {
+    if (!removeConfirm && !slotPanel) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (removeConfirm) {
+        setRemoveConfirm(null);
+      } else if (slotPanel) {
+        setSlotPanel(null);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [removeConfirm, slotPanel]);
+
   const todayIso = isoDate(new Date());
 
   // Filter CRM conversations for live auditions (never drops overridden cards)
   const liveAuditionConvs = useMemo(() => {
     return conversations.filter(c =>
-      c.pipeline === "Audition Booked" ||
-      c.pipeline === "Attended" ||
-      c.pipeline === "Enrolled" ||
-      (Boolean(c.auditionOutcome) && (
-        c.auditionOutcome !== "joining-later" ||
-        Boolean(c.auditionDate) ||
-        Boolean(auditionDates[c.id]) ||
-        Boolean(auditionDates[`crm-${c.id}`])
-      )) ||
-      statusOverrides[c.id] !== undefined ||
-      statusOverrides[`crm-${c.id}`] !== undefined ||
-      (c.pipeline === "Contacted" && Boolean(c.auditionDate)) ||
-      (c.pipeline === "Qualified" && Boolean(c.auditionDate)) ||
-      (c.pipeline === "Joining Later" && Boolean(c.auditionDate)) ||
-      (c.pipeline === "Lost" && (
-        Boolean(c.auditionDate) ||
-        Boolean(c.followUpDate) ||
-        Boolean(c.notes) ||
-        Boolean(c.formAnswers?.instrument)
-      ))
+      isLiveAuditionConversation(c, statusOverrides, auditionDates)
     );
   }, [conversations, statusOverrides, auditionDates]);
 
@@ -1390,6 +1496,7 @@ function AuditionsPageInner() {
   };
 
   const deleteCustomSlot = useCallback((dateKey: string, slotId: string | number) => {
+    clearLocalSlotCaches(slotId);
     updateCustomSlotsState(prev => {
       const currentList = prev[dateKey] || [];
       const updatedList = currentList.filter(s => s.id !== slotId);
@@ -1401,7 +1508,7 @@ function AuditionsPageInner() {
       }
       return next;
     });
-  }, [updateCustomSlotsState]);
+  }, [clearLocalSlotCaches, updateCustomSlotsState]);
 
   const openBooking = (slotId: string | number, dateKey: string, time: string, day: Date) => {
     setBookingModal({ slotId, dateKey, time, dayLabel: formatDayLabel(day) });
@@ -1578,6 +1685,75 @@ function AuditionsPageInner() {
   const panelSlot = slotPanel ? (slots[slotPanel.dateKey] || []).find(s => s.id === slotPanel.slotId) : null;
   const isCurrentSlotClosed = panelSlot ? Boolean(closedSlots[String(panelSlot.id)] || panelSlot.status === 'closed') : false;
   const isCurrentDayClosed = slotPanel ? Boolean(closedDays[slotPanel.dateKey]) : false;
+
+  const openRemoveConfirm = useCallback(() => {
+    if (!slotPanel || !panelSlot || isReadOnly) return;
+    const conv = panelSlot.conversationId
+      ? conversations.find(c => c.id === panelSlot.conversationId)
+      : undefined;
+    const cashIn = Number(conv?.cashIn) || 0;
+    const isEnrolledOrPaid = Boolean(
+      conv && (conv.pipeline === 'Enrolled' || cashIn > 0)
+    );
+    setRemoveConfirm({
+      dateKey: slotPanel.dateKey,
+      slotId: panelSlot.id,
+      conversationId: panelSlot.conversationId,
+      name: panelSlot.name || (panelSlot.conversationId ? 'this lead' : `Slot ${panelSlot.time}`),
+      time: panelSlot.time,
+      branch: panelSlot.branch,
+      currentPipeline: conv?.pipeline,
+      cashIn,
+      isEnrolledOrPaid,
+      isCustomSlot: !panelSlot.conversationId,
+    });
+  }, [slotPanel, panelSlot, isReadOnly, conversations]);
+
+  const executeRemoveAudition = useCallback(async () => {
+    if (!removeConfirm || isReadOnly) return;
+    const target = removeConfirm;
+
+    // Close modals and clear local overrides immediately for 0ms UI response
+    setRemoveConfirm(null);
+    setSlotPanel(null);
+    const localSnapshot = clearLocalSlotCaches(target.slotId, target.conversationId);
+
+    if (target.isCustomSlot || !target.conversationId) {
+      deleteCustomSlot(target.dateKey, target.slotId);
+      setToast({ type: 'success', message: `Deleted slot for ${target.name}` });
+      return;
+    }
+
+    const conv = conversations.find(c => c.id === target.conversationId);
+    if (!conv) {
+      setToast({ type: 'success', message: `Removed audition for ${target.name}` });
+      return;
+    }
+
+    const patch = buildRemoveAuditionPatch(conv, {
+      actorName: user?.name || conv.agent || 'Staff',
+      actorRole: user?.role || '',
+    });
+
+    setToast({ type: 'success', message: `Removed audition for ${target.name}` });
+    const res = await patchConversation(conv.id, patch);
+    if (!res.ok) {
+      restoreLocalSlotCaches(localSnapshot);
+      setToast({
+        type: 'error',
+        message: res.error || `Failed to remove audition for ${target.name}. Restored.`,
+      });
+    }
+  }, [
+    removeConfirm,
+    isReadOnly,
+    clearLocalSlotCaches,
+    restoreLocalSlotCaches,
+    deleteCustomSlot,
+    conversations,
+    user,
+    patchConversation,
+  ]);
 
   // All distinct user/agent options (from assignableAgents + any agent present on audition slots)
   const agentOptions = useMemo(() => {
@@ -2244,8 +2420,13 @@ function AuditionsPageInner() {
 
       {/* Attendance & Notes modal */}
       {slotPanel && panelSlot && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="w-full max-w-md rounded-2xl p-5 shadow-2xl flex flex-col gap-4" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="slot-panel-title"
+        >
+          <div className="w-full max-w-md rounded-2xl p-5 shadow-2xl flex flex-col gap-4 max-h-[90vh] overflow-y-auto" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}>
             {/* Header */}
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0 flex-1 pr-1">
@@ -2253,7 +2434,7 @@ function AuditionsPageInner() {
                   {formatDayLabel(new Date(slotPanel.dateKey + 'T00:00:00'))} · {panelSlot.time}
                 </p>
                 <div className="flex items-baseline gap-1.5 mt-0.5 flex-wrap">
-                  <h3 className="text-[17px] font-bold leading-tight" style={{ color: 'var(--text-primary)' }}>
+                  <h3 id="slot-panel-title" className="text-[17px] font-bold leading-tight" style={{ color: 'var(--text-primary)' }}>
                     {panelSlot.name || 'Audition Slot'}
                   </h3>
                   {panelSlot.branch && (
@@ -2438,24 +2619,35 @@ function AuditionsPageInner() {
             </div>
 
             {/* Actions */}
-            <div className="flex gap-2">
-              <button onClick={saveSlotPanel} className="flex-1 h-[38px] text-[13px] font-semibold text-white rounded-xl cursor-pointer" style={{ background: '#0066FF' }}>
-                Save
-              </button>
-              {panelSlot && !panelSlot.conversationId && !isReadOnly && (
+            <div className="grid grid-cols-2 sm:flex sm:items-center gap-2">
+              {!isReadOnly && (
                 <button
                   type="button"
-                  onClick={() => {
-                    deleteCustomSlot(slotPanel.dateKey, slotPanel.slotId);
-                    setSlotPanel(null);
-                  }}
-                  className="h-[38px] px-4 text-[13px] font-medium text-red-500 hover:bg-red-500/10 rounded-xl transition-colors cursor-pointer"
-                  style={{ border: '1px solid rgba(239, 68, 68, 0.3)' }}
+                  onClick={saveSlotPanel}
+                  className="col-span-2 sm:col-span-1 sm:flex-1 min-h-[44px] sm:min-h-[38px] text-[13px] font-semibold text-white rounded-xl cursor-pointer transition-opacity hover:opacity-95"
+                  style={{ background: '#0066FF' }}
                 >
-                  Delete
+                  Save
                 </button>
               )}
-              <button onClick={() => setSlotPanel(null)} className="h-[38px] px-5 text-[13px] font-medium rounded-xl cursor-pointer" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}>
+              {panelSlot && !isReadOnly && (
+                <button
+                  type="button"
+                  onClick={openRemoveConfirm}
+                  aria-label={panelSlot.conversationId ? 'Remove audition' : 'Delete custom slot'}
+                  className="min-h-[44px] sm:min-h-[38px] px-4 text-[13px] font-medium hover:bg-red-500/10 rounded-xl transition-colors cursor-pointer inline-flex items-center justify-center gap-1.5"
+                  style={{ color: '#EF4444', border: '1px solid rgba(239, 68, 68, 0.35)' }}
+                >
+                  <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>{panelSlot.conversationId ? 'Remove' : 'Delete'}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setSlotPanel(null)}
+                className={`${isReadOnly ? 'col-span-2 sm:flex-1' : ''} min-h-[44px] sm:min-h-[38px] px-5 text-[13px] font-medium rounded-xl cursor-pointer`}
+                style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}
+              >
                 Cancel
               </button>
             </div>
@@ -2558,6 +2750,151 @@ function AuditionsPageInner() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Remove Audition / Delete Slot confirmation dialog */}
+      {removeConfirm && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/55 backdrop-blur-xs animate-in fade-in duration-150"
+          onClick={() => setRemoveConfirm(null)}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="remove-audition-title"
+        >
+          <div
+            className="w-full max-w-[420px] rounded-2xl p-5 sm:p-6 shadow-2xl border max-h-[90vh] overflow-y-auto"
+            style={{
+              background: 'var(--bg-card)',
+              borderColor: 'var(--border-main)',
+              color: 'var(--text-primary)',
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div
+              className="w-12 h-12 rounded-full flex items-center justify-center mb-4 mx-auto"
+              style={{ background: 'rgba(239, 68, 68, 0.12)', color: '#EF4444' }}
+            >
+              <AlertTriangle className="w-6 h-6" />
+            </div>
+
+            <h3
+              id="remove-audition-title"
+              className="text-[16px] font-bold text-center mb-2"
+              style={{ color: 'var(--text-primary)' }}
+            >
+              {removeConfirm.isCustomSlot ? 'Delete Custom Slot?' : 'Remove Audition?'}
+            </h3>
+
+            <p className="text-[13px] text-center mb-4 leading-relaxed" style={{ color: 'var(--text-secondary)' }}>
+              {removeConfirm.isCustomSlot ? (
+                <>
+                  Are you sure you want to delete the slot for{' '}
+                  <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>{removeConfirm.name}</span>
+                  {' '}({formatDayLabel(new Date(removeConfirm.dateKey + 'T00:00:00'))} · {removeConfirm.time})?
+                </>
+              ) : (
+                <>
+                  Are you sure you want to remove the audition for{' '}
+                  <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>{removeConfirm.name}</span>
+                  {' '}({formatDayLabel(new Date(removeConfirm.dateKey + 'T00:00:00'))} · {removeConfirm.time})?
+                </>
+              )}
+            </p>
+
+            {removeConfirm.isEnrolledOrPaid && (
+              <div
+                className="p-3 rounded-lg mb-3 text-[12px] leading-relaxed"
+                style={{
+                  background: 'rgba(239, 68, 68, 0.08)',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  color: 'var(--text-primary)',
+                }}
+              >
+                <span className="font-bold" style={{ color: '#EF4444' }}>Enrolled / Payment Warning:</span>{' '}
+                This lead is currently marked{' '}
+                <span className="font-semibold">{removeConfirm.currentPipeline || 'Enrolled'}</span>
+                {removeConfirm.cashIn > 0
+                  ? ` with ${removeConfirm.cashIn.toLocaleString()} EGP recorded`
+                  : ''}
+                . Removing this audition moves the stage back to <span className="font-semibold">Contacted</span> and clears audition booking and attendance metrics (recorded cash-in remains intact).
+              </div>
+            )}
+
+            <div
+              className="p-3 rounded-lg mb-5 text-[12px] leading-relaxed"
+              style={{
+                background: 'var(--bg-pill)',
+                border: '1px solid var(--border-main)',
+                color: 'var(--text-secondary)',
+              }}
+            >
+              {removeConfirm.isCustomSlot ? (
+                <span>
+                  This permanently deletes the custom slot from this day on the Auditions calendar.
+                </span>
+              ) : (
+                <>
+                  <span className="font-semibold" style={{ color: '#0066FF' }}>Safety Note:</span>{' '}
+                  Chat history, messages, and lead contact details stay safe in Inbox. Only the audition schedule, outcome, and Auditions/Booked/Attended metrics are undone, and the stage returns to Contacted.
+                </>
+              )}
+            </div>
+
+            <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => setRemoveConfirm(null)}
+                className="flex-1 min-h-[44px] sm:min-h-[40px] px-4 rounded-xl text-[13px] font-semibold border transition-colors cursor-pointer"
+                style={{
+                  borderColor: 'var(--border-main)',
+                  background: 'var(--bg-input)',
+                  color: 'var(--text-primary)',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isReadOnly}
+                onClick={executeRemoveAudition}
+                className="flex-1 min-h-[44px] sm:min-h-[40px] px-4 rounded-xl text-[13px] font-semibold text-white transition-opacity hover:opacity-90 cursor-pointer shadow-sm disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+                style={{ background: '#EF4444' }}
+              >
+                <Trash2 className="w-4 h-4 shrink-0" />
+                <span>{removeConfirm.isCustomSlot ? 'Delete Slot' : 'Remove Audition'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Action toast notification */}
+      {toast && (
+        <div
+          role={toast.type === 'error' ? 'alert' : 'status'}
+          className="fixed bottom-4 left-4 right-4 sm:left-auto sm:right-6 sm:max-w-sm z-[110] rounded-xl px-3.5 py-2.5 shadow-xl flex items-center gap-2.5 border"
+          style={{
+            background: 'var(--bg-card)',
+            borderColor: toast.type === 'error' ? 'rgba(239, 68, 68, 0.45)' : 'var(--border-main)',
+            color: 'var(--text-primary)',
+          }}
+        >
+          {toast.type === 'error' ? (
+            <AlertTriangle className="w-4 h-4 shrink-0" style={{ color: '#EF4444' }} />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 shrink-0" style={{ color: '#10B981' }} />
+          )}
+          <span className="text-[12.5px] font-medium flex-1 leading-snug">{toast.message}</span>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            aria-label="Dismiss notification"
+            className="min-w-[44px] min-h-[44px] sm:min-w-[28px] sm:min-h-[28px] -mr-1 rounded-lg flex items-center justify-center hover:opacity-75 cursor-pointer"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 

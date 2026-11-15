@@ -5,6 +5,12 @@ import Link from "next/link";
 import { ExternalLink, CheckCircle2, Calendar, Trash2, X, MessageSquare } from "lucide-react";
 import { useCRM, Conversation } from "../context/CRMContext";
 import { useAuth, canAccessRoute, isDirectorOrChairmanRole, isAdmissionRole } from "./AuthProvider";
+import EditableLeadName from "./EditableLeadName";
+import {
+  buildLeadNamePatchUpdates,
+  getEditableLeadDisplayName,
+  hasAgentEditedLeadName,
+} from "../utils/leadName";
 
 const PIPELINE_STAGES = [
   "New",
@@ -181,61 +187,47 @@ export function ConversationDetailsSidebar({
       className={`flex flex-col h-full overflow-y-auto p-5 shrink-0 ${className}`}
       style={{ background: "var(--bg-panel)", color: "var(--text-primary)" }}
     >
-      {/* Header: editable name + phone + close button */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex-1 min-w-0 pr-2">
-          <input
-            key={conversation.id + "-name"}
-            type="text"
-            defaultValue={
-              conversation.leadName || conversation.profileName || conversation.name
-            }
-            placeholder="Enter customer name..."
-            disabled={isReadOnly}
-            className="w-full text-[16px] font-bold bg-transparent outline-none border-b border-transparent focus:border-[#0066FF] transition-colors pb-0.5 truncate disabled:opacity-80"
-            style={{ color: "var(--text-primary)" }}
-            onBlur={(e) => {
-              if (isReadOnly) return;
-              const newName = e.target.value.trim();
-              const currentDisplayName =
-                conversation.leadName ||
-                conversation.profileName ||
-                conversation.name;
-              if (newName && newName !== currentDisplayName) {
-                patchConversation(conversation.id, {
-                  name: newName,
-                  leadName: newName,
-                });
-              }
-            }}
-          />
-          <p className="text-[11px] mt-0.5 truncate" style={{ color: "var(--text-secondary)" }}>
-            {conversation.phone || conversation.id}
-          </p>
-        </div>
-        <div className="flex items-center gap-1 shrink-0">
-          {onDelete && (
-            <button
-              type="button"
-              onClick={onDelete}
-              title="Delete from Pipeline"
-              className="p-1.5 rounded-md text-[var(--text-secondary)] hover:text-[#FF3B30] hover:bg-[rgba(255,59,48,0.1)] transition-colors cursor-pointer"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
-          )}
-          {onClose && (
-            <button
-              type="button"
-              onClick={onClose}
-              className="p-1.5 rounded-md text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
-              title="Close"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          )}
-        </div>
-      </div>
+      {/* Header: editable name + phone + optional actions */}
+      <EditableLeadName
+        conversationId={conversation.id}
+        displayName={getEditableLeadDisplayName(conversation)}
+        secondaryText={conversation.phone || conversation.id}
+        isNameCustomized={
+          conversation.channel !== "WA" || hasAgentEditedLeadName(conversation.source)
+        }
+        isReadOnly={isReadOnly}
+        onSaveName={(newName) =>
+          patchConversation(conversation.id, buildLeadNamePatchUpdates(newName))
+        }
+        rightSlot={
+          onDelete || onClose ? (
+            <>
+              {onDelete && (
+                <button
+                  type="button"
+                  onClick={onDelete}
+                  title="Delete from Pipeline"
+                  aria-label="Delete from Pipeline"
+                  className="p-1.5 rounded-md text-[var(--text-secondary)] hover:text-[#FF3B30] hover:bg-[rgba(255,59,48,0.1)] transition-colors cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              )}
+              {onClose && (
+                <button
+                  type="button"
+                  onClick={onClose}
+                  aria-label="Close contact details"
+                  className="p-1.5 rounded-md text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
+                  title="Close"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              )}
+            </>
+          ) : undefined
+        }
+      />
 
       {/* Optional Open Conversation button (e.g. In standalone details view) */}
       {showOpenConversationButton && onOpenConversation && (
@@ -493,7 +485,7 @@ export function ConversationDetailsSidebar({
         <div className="mb-2">
           <p className="text-[10px]" style={{ color: "var(--text-secondary)" }}>full name</p>
           <p className="text-[11px] font-medium" style={{ color: "var(--text-primary)" }}>
-            {conversation.profileName || conversation.name}
+            {conversation.leadName || conversation.profileName || conversation.name}
           </p>
         </div>
         {conversation.formAnswers?.instrument && (

@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildAssignedLeadsAgentPool,
   buildFunnelAuditReport,
   clampRatePct,
   collectLoggedMessageKeys,
@@ -13,6 +14,7 @@ import {
   isConvertedLead,
   isMessageAlreadyInActivityLog,
   isRealAssignedAgent,
+  matchesAssignedLeadAgentFilter,
 } from "./teamMetrics.ts";
 
 describe("teamMetrics", () => {
@@ -313,6 +315,28 @@ describe("teamMetrics", () => {
     assert.equal(report.excludedRows[0].excludedReason, "reassigned_actor");
     assert.equal(report.excludedRows[0].assignedAgent, "Youssef");
     assert.equal(report.excludedRows[0].actorName, "Mariam");
+  });
+
+  it("builds sorted Assigned Leads agent dropdown options from Settings agents only and filters by agent", () => {
+    const pool = buildAssignedLeadsAgentPool(
+      ["mariam", "Unassigned", "Youssef", "Staff", "Mariam", "System", "Meta Account (Test)", "Sara"],
+      ["Mai", "Mariam", "Youssef"]
+    );
+
+    assert.equal(pool.total, 5);
+    assert.deepEqual(pool.options, [
+      { name: "Mariam", count: 2 },
+      { name: "Youssef", count: 1 },
+      { name: "Mai", count: 0 },
+    ]);
+
+    // Matching excludes placeholder owners and compares real agents case-insensitively
+    assert.equal(matchesAssignedLeadAgentFilter("Unassigned", "all"), false);
+    assert.equal(matchesAssignedLeadAgentFilter("Staff", "all"), false);
+    assert.equal(matchesAssignedLeadAgentFilter("System", "all"), false);
+    assert.equal(matchesAssignedLeadAgentFilter("Mariam", "all"), true);
+    assert.equal(matchesAssignedLeadAgentFilter(" mariam ", "Mariam"), true);
+    assert.equal(matchesAssignedLeadAgentFilter("Youssef", "Mariam"), false);
   });
 });
 

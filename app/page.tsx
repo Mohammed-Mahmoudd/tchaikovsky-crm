@@ -32,6 +32,12 @@ import { ChatInputBar, OutgoingAttachmentPayload, formatFileSize } from "./compo
 import { renderWhatsAppText } from "./utils/messageFormatting";
 import { EmojiPicker, WHATSAPP_QUICK_REACTIONS, recordRecentEmoji } from "./components/EmojiPicker";
 import { formatMetaErrorMessage, ParsedMetaError } from "./utils/errorParser";
+import EditableLeadName from "./components/EditableLeadName";
+import {
+  buildLeadNamePatchUpdates,
+  getEditableLeadDisplayName,
+  hasAgentEditedLeadName,
+} from "./utils/leadName";
 
 type Channel = "WA" | "IG" | "FB";
 
@@ -83,7 +89,12 @@ type Conversation = {
 
 import { useCRM, isLastMessageFromLead } from "./context/CRMContext";
 import { useAuth, canAccessRoute, isDirectorOrChairmanRole, isAdmissionRole } from "./components/AuthProvider";
-import { formatLastMessageTime } from "./utils/time";
+import {
+  buildChatDateDividerLabels,
+  formatChatMessageTooltip,
+  formatLastMessageTime,
+} from "./utils/time";
+import { ChatDateDivider } from "./components/ChatDateDivider";
 import MessageTemplate, { parseTemplateAttachment } from "./components/MessageTemplate";
 import InstagramMedia from "./components/InstagramMedia";
 import { VoiceNotePlayer } from "./components/VoiceNotePlayer";
@@ -1249,6 +1260,8 @@ export default function InboxPage() {
                     <p className="text-[11px] truncate" style={{ color: isActive ? "#0066FF" : "var(--text-secondary)" }}>
                       {conv.leadName && conv.leadName !== conv.name
                         ? `${conv.leadName} · ${conv.agent}`
+                        : conv.phone && isRealPhone(conv.phone) && conv.phone !== conv.name
+                        ? `${conv.phone} · ${conv.agent}`
                         : conv.agent}
                     </p>
                   </div>
@@ -1378,7 +1391,7 @@ export default function InboxPage() {
                       ? ` · ${activeConv.leadName}`
                       : ""}
                   </h2>
-                  <div className="flex items-center text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
+                  <div className="flex items-center text-[11px] mt-0.5 min-w-0" style={{ color: "var(--text-secondary)" }}>
                     <span className="truncate">
                       {activeConv.channel === "WA"
                         ? activeConv.metaChannel === "FB"
@@ -1390,6 +1403,12 @@ export default function InboxPage() {
                         ? "Instagram"
                         : "Messenger"}
                     </span>
+                    {isRealPhone(activeConv.phone) && activeConv.phone !== activeConv.name && (
+                      <>
+                        <span className="mx-1.5 shrink-0">•</span>
+                        <span className="truncate">{activeConv.phone}</span>
+                      </>
+                    )}
                     {activeConv.channel === "WA" && (
                       <>
                         <span className="mx-1.5 shrink-0">•</span>
@@ -1519,7 +1538,10 @@ export default function InboxPage() {
               ) : null}
               {(() => {
                 const convPhone = extractPhoneFromConversation(activeConv);
-                return activeConv.messages.map((msg) => {
+                const dateDividerLabels = buildChatDateDividerLabels(activeConv.messages);
+                return activeConv.messages.map((msg, msgIdx) => {
+                  const dateDividerLabel = dateDividerLabels[msgIdx];
+                  const timeTooltip = formatChatMessageTooltip(msg.timestamp, msg.time);
                   const hasTemplateAttachment = (msg.attachments || []).some(isTemplateAttachment);
                   const hasSharedPostAttachment = (msg.attachments || []).some(
                     (a: any) => a.type === "ig_post" || a.type === "ig_reel" || a.type === "share"
@@ -1607,9 +1629,10 @@ export default function InboxPage() {
                   }, []);
 
                   return (
-                    <div
-                      key={msg.id}
-                      id={`msg-${msg.id}`}
+                    <React.Fragment key={msg.id}>
+                      {dateDividerLabel && <ChatDateDivider label={dateDividerLabel} />}
+                      <div
+                        id={`msg-${msg.id}`}
                       onDoubleClick={(e) => {
                         if (!canReplyToThisMessage) return;
                         const targetEl = e.target as HTMLElement | null;
@@ -2085,7 +2108,7 @@ export default function InboxPage() {
                             {!isDeletedMsg && msg.isEdited && (
                               <span className="italic opacity-90">Edited ·</span>
                             )}
-                            <span>{msg.time}</span>
+                            <span title={timeTooltip || undefined}>{msg.time}</span>
                             {!msg.isIncoming && !isDeletedMsg && (
                               <span className="inline-flex items-center ml-0.5" title={msg.status || "sent"}>
                                 {msg.status === "pending" ? (
@@ -2265,6 +2288,7 @@ export default function InboxPage() {
                         </div>
                       </div>
                     </div>
+                    </React.Fragment>
                   );
                 });
               })()}
@@ -2364,39 +2388,29 @@ export default function InboxPage() {
             `}
             style={{ background: "var(--bg-panel)", borderLeft: "1px solid var(--border-main)" }}
           >
-            {/* Mobile close button */}
-            <div className="flex items-center justify-between mb-6">
-              <div className="flex-1 min-w-0">
-                {/* Editable name — agents can set real name when auto-fetch fails */}
-                <input
-                  key={activeConv.id + '-name'}
-                  type="text"
-                  defaultValue={activeConv.leadName || activeConv.profileName || activeConv.name}
-                  placeholder="Enter customer name..."
-                  disabled={isReadOnly}
-                  className="w-full text-[16px] font-bold bg-transparent outline-none border-b border-transparent focus:border-[#0066FF] transition-colors pb-0.5 truncate disabled:opacity-80"
-                  style={{ color: "var(--text-primary)" }}
-                  onBlur={(e) => {
-                    if (isReadOnly) return;
-                    const newName = e.target.value.trim();
-                    const currentDisplayName = activeConv.leadName || activeConv.profileName || activeConv.name;
-                    if (newName && newName !== currentDisplayName) {
-                      patchConversation(activeConv.id, { name: newName, leadName: newName });
-                    }
-                  }}
-                />
-                <p className="text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
-                  {activeConv.phone || activeConv.id}
-                </p>
-              </div>
-              <button
-                onClick={() => setShowDetailsPanel(false)}
-                className="lg:hidden p-1.5 rounded-md"
-                style={{ color: "var(--text-secondary)" }}
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+            <EditableLeadName
+              conversationId={activeConv.id}
+              displayName={getEditableLeadDisplayName(activeConv)}
+              secondaryText={activeConv.phone || activeConv.id}
+              isNameCustomized={
+                activeConv.channel !== "WA" || hasAgentEditedLeadName(activeConv.source)
+              }
+              isReadOnly={isReadOnly}
+              onSaveName={(newName) =>
+                patchConversation(activeConv.id, buildLeadNamePatchUpdates(newName))
+              }
+              rightSlot={
+                <button
+                  type="button"
+                  onClick={() => setShowDetailsPanel(false)}
+                  aria-label="Close contact details"
+                  className="lg:hidden min-w-[44px] min-h-[44px] flex items-center justify-center -mr-2 rounded-md"
+                  style={{ color: "var(--text-secondary)" }}
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              }
+            />
 
             <div className="mb-5">
               <div className="flex items-center justify-between mb-2">
@@ -2602,7 +2616,9 @@ export default function InboxPage() {
               <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Form Answers</h3>
               <div className="mb-2">
                 <p className="text-[10px]" style={{ color: "var(--text-secondary)" }}>full name</p>
-                <p className="text-[11px] font-medium" style={{ color: "var(--text-primary)" }}>{activeConv.profileName || activeConv.name}</p>
+                <p className="text-[11px] font-medium" style={{ color: "var(--text-primary)" }}>
+                  {activeConv.leadName || activeConv.profileName || activeConv.name}
+                </p>
               </div>
               {activeConv.formAnswers?.instrument && (
                 <div className="mb-2">

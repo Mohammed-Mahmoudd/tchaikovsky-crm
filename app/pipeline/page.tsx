@@ -782,7 +782,7 @@ function PipelinePageInner() {
     if (!conv) return null;
     return {
       id: conv.id,
-      name: conv.leadName || conv.profileName || conv.name,
+      name: conv.name,
       campaign:
         typeof conv.source === "object"
           ? conv.source?.campaign || "Direct"
@@ -1475,7 +1475,10 @@ function PipelinePageInner() {
               <div className="px-6 py-4 flex items-start justify-between" style={{ borderBottom: '1px solid var(--border-main)' }}>
                 <div>
                   <h2 className="text-lg font-bold leading-tight" style={{ color: 'var(--text-primary)' }}>{panelLead.name}</h2>
-                  <p className="text-[11px] mt-1" style={{ color: 'var(--text-secondary)' }}>Lead added {panelLead.date.split(",")[0]}</p>
+                  <p className="text-[11px] mt-1" style={{ color: 'var(--text-secondary)' }}>
+                    {panelLead.phone && panelLead.phone !== panelLead.name ? `${panelLead.phone} · ` : ""}
+                    Lead added {panelLead.date.split(",")[0]}
+                  </p>
                 </div>
                 <div className="flex items-center gap-1">
                   <button
@@ -1828,7 +1831,7 @@ function PipelinePageInner() {
                   <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Form Answers</h3>
                   <div className="mb-1">
                     <p className="text-[11px] mb-0.5" style={{ color: 'var(--text-secondary)' }}>full name</p>
-                    <p className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{panelConv?.profileName || panelLead.name}</p>
+                    <p className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{panelConv?.leadName || panelConv?.profileName || panelLead.name}</p>
                   </div>
                   {panelConv?.formAnswers?.instrument && (
                     <div className="mb-1">

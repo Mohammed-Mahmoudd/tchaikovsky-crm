@@ -6,6 +6,7 @@ import { useCRM, Conversation, ActivityLogEntry } from '../context/CRMContext';
 import { isAutomatedTemplateMsg } from '../utils/conversationMessages';
 import { formatRoleLabel, isAdmissionRole } from '../utils/roles';
 import {
+  buildAssignedLeadsAgentPool,
   clampRatePct,
   collectLoggedMessageKeys,
   FunnelAuditTarget,
@@ -19,6 +20,7 @@ import {
   isConvertedLead,
   isMessageAlreadyInActivityLog,
   isRealAssignedAgent,
+  matchesAssignedLeadAgentFilter,
   parseValidTs,
 } from '../utils/teamMetrics';
 import { FunnelAuditModal } from '../components/FunnelAuditModal';
@@ -1407,6 +1409,9 @@ function TeamActivitiesPageInner() {
   const [agentRoleFilter, setAgentRoleFilter] = useState<string>(
     () => initialMemorySnap?.agentRoleFilter ?? 'all'
   );
+  const [leadsAgentFilter, setLeadsAgentFilter] = useState<string>(
+    () => initialMemorySnap?.leadsAgentFilter ?? 'all'
+  );
 
   const deferredActivitySearch = useDeferredValue(activitySearch);
   const deferredAgentSearch = useDeferredValue(agentSearch);
@@ -2058,6 +2063,40 @@ function TeamActivitiesPageInner() {
     return groups;
   }, [mainTab, displayedActivities, todayKey, yesterdayKey]);
 
+  const settingsAgentNames = useMemo(
+    () =>
+      assignableAgents
+        .filter((a) => a.active !== false && isRealAssignedAgent(a.name))
+        .map((a) => a.name.trim()),
+    [assignableAgents]
+  );
+
+  const effectiveLeadsAgentFilter = useMemo(() => {
+    if (!leadsAgentFilter || leadsAgentFilter === 'all') return 'all';
+    if (settingsAgentNames.length === 0) return leadsAgentFilter;
+    const lower = leadsAgentFilter.trim().toLowerCase();
+    const matched = settingsAgentNames.find((name) => name.toLowerCase() === lower);
+    return matched ?? 'all';
+  }, [leadsAgentFilter, settingsAgentNames]);
+
+  const assignedLeadsAgentPool = useMemo(() => {
+    if (!isAllAgents || mainTab !== 'leads') {
+      return { total: 0, options: [] };
+    }
+    const leadAgents: string[] = [];
+    for (let i = 0; i < conversations.length; i++) {
+      const p = getParsedConversationData(conversations[i]);
+      if (!isRealAssignedAgent(p.assignedAgent)) continue;
+      if (filterMode !== 'all' && (!p.createdTs || p.createdTs < periodStartMs || p.createdTs > periodEndMs)) {
+        continue;
+      }
+      leadAgents.push(p.assignedAgent);
+    }
+    return buildAssignedLeadsAgentPool(leadAgents, settingsAgentNames);
+  }, [isAllAgents, mainTab, conversations, filterMode, periodStartMs, periodEndMs, settingsAgentNames]);
+
+  const selectedLeadsAgentValue = effectiveLeadsAgentFilter;
+
   const agentAssignedLeads = useMemo(() => {
     if (!isAllAgents && !effectiveAgentLower) return [];
     const q = deferredActivitySearch.toLowerCase().trim();
@@ -2066,7 +2105,7 @@ function TeamActivitiesPageInner() {
       const c = conversations[i];
       const p = getParsedConversationData(c);
       if (isAllAgents) {
-        if (!isRealAssignedAgent(p.assignedAgent)) continue;
+        if (!matchesAssignedLeadAgentFilter(p.assignedAgent, effectiveLeadsAgentFilter)) continue;
       } else if (p.assignedAgentLower !== effectiveAgentLower) {
         continue;
       }
@@ -2087,7 +2126,7 @@ function TeamActivitiesPageInner() {
       res.push(c);
     }
     return res;
-  }, [conversations, isAllAgents, effectiveAgentLower, filterMode, periodStartMs, periodEndMs, deferredActivitySearch]);
+  }, [conversations, isAllAgents, effectiveAgentLower, effectiveLeadsAgentFilter, filterMode, periodStartMs, periodEndMs, deferredActivitySearch]);
 
   const displayedLeads = useMemo(() => {
     if (mainTab !== 'leads') return [];
@@ -2196,6 +2235,7 @@ function TeamActivitiesPageInner() {
 
   const handleSelectAgent = useCallback((name: string) => {
     setUserPickedAgent({ agent: name, urlAtPick: cleanUrlAgent });
+    setLeadsAgentFilter('all');
     setMobileAgentsOpen(false);
     setAuditTarget(null);
     setRestoredAuditModal(null);
@@ -2240,6 +2280,7 @@ function TeamActivitiesPageInner() {
       activitySearch,
       agentSearch,
       agentRoleFilter,
+      leadsAgentFilter: effectiveLeadsAgentFilter,
       visibleTimelineCount,
       visibleLeadsCount,
       scrollTop: scrollContainerRef.current?.scrollTop ?? 0,
@@ -2261,6 +2302,7 @@ function TeamActivitiesPageInner() {
       activitySearch,
       agentSearch,
       agentRoleFilter,
+      effectiveLeadsAgentFilter,
       visibleTimelineCount,
       visibleLeadsCount,
       leadsDrawerChatId,
@@ -2297,6 +2339,7 @@ function TeamActivitiesPageInner() {
       setActivitySearch(stored.activitySearch);
       setAgentSearch(stored.agentSearch);
       setAgentRoleFilter(stored.agentRoleFilter);
+      setLeadsAgentFilter(stored.leadsAgentFilter ?? 'all');
       setVisibleTimelineCount(stored.visibleTimelineCount);
       setVisibleLeadsCount(stored.visibleLeadsCount);
       setAuditTarget(stored.auditTarget);
@@ -2431,6 +2474,11 @@ function TeamActivitiesPageInner() {
   const handleActivitySearchChange = useCallback((value: string) => {
     setActivitySearch(value);
     setVisibleTimelineCount(TIMELINE_BATCH_SIZE);
+    setVisibleLeadsCount(LEADS_BATCH_SIZE);
+  }, []);
+
+  const handleLeadsAgentFilterChange = useCallback((value: string) => {
+    setLeadsAgentFilter(value || 'all');
     setVisibleLeadsCount(LEADS_BATCH_SIZE);
   }, []);
 
@@ -2820,8 +2868,8 @@ function TeamActivitiesPageInner() {
             </button>
           </div>
 
-          {/* Right: Active Date Pill + Presentation Toggle + Search */}
-          <div className="flex items-center gap-2 shrink-0 flex-wrap">
+          {/* Right: Active Date Pill + Presentation Toggle + Agent Filter + Search */}
+          <div className="flex items-center gap-2 flex-wrap w-full lg:w-auto min-w-0 max-w-full">
             {filterMode !== 'all' && (
               <div
                 className="h-[28px] pl-2.5 pr-1.5 rounded-[7px] flex items-center gap-1.5 text-[11px] font-semibold shrink-0"
@@ -2882,8 +2930,55 @@ function TeamActivitiesPageInner() {
               </div>
             )}
 
+            {mainTab === 'leads' && isAllAgents && (
+              <div className="flex items-center gap-1.5 w-full sm:w-auto min-w-0 max-w-full">
+                <label
+                  htmlFor="assigned-leads-agent-filter"
+                  className="text-[10px] font-bold uppercase tracking-wider shrink-0"
+                  style={{ color: 'var(--text-muted)' }}
+                >
+                  Agent
+                </label>
+                <select
+                  id="assigned-leads-agent-filter"
+                  value={selectedLeadsAgentValue}
+                  onChange={(e) => handleLeadsAgentFilterChange(e.target.value)}
+                  aria-label="Filter assigned leads by agent"
+                  className="flex-1 sm:flex-initial min-w-0 max-w-full sm:max-w-[200px] h-11 sm:h-7 px-2.5 text-base sm:text-[11px] font-medium rounded-lg outline-none cursor-pointer transition-colors focus-visible:ring-2 focus-visible:ring-[var(--text-primary)]"
+                  style={{
+                    background: selectedLeadsAgentValue !== 'all' ? 'var(--bg-selected)' : 'var(--bg-card)',
+                    border: '1px solid var(--border-input)',
+                    color: 'var(--text-primary)',
+                  }}
+                >
+                  <option value="all">All agents ({assignedLeadsAgentPool.total})</option>
+                  {assignedLeadsAgentPool.options.map((opt) => (
+                    <option key={opt.name} value={opt.name}>
+                      {opt.name} ({opt.count})
+                    </option>
+                  ))}
+                </select>
+                {selectedLeadsAgentValue !== 'all' && (
+                  <button
+                    type="button"
+                    onClick={() => handleLeadsAgentFilterChange('all')}
+                    aria-label="Clear agent filter"
+                    title="Show all agents"
+                    className="min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0 sm:h-7 sm:w-7 flex items-center justify-center rounded-lg cursor-pointer transition-colors hover:opacity-80 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--text-primary)]"
+                    style={{
+                      background: 'var(--bg-pill)',
+                      border: '1px solid var(--border-input)',
+                      color: 'var(--text-secondary)',
+                    }}
+                  >
+                    <X className="w-3.5 h-3.5 sm:w-3 sm:h-3" />
+                  </button>
+                )}
+              </div>
+            )}
+
             {(mainTab === 'timeline' || mainTab === 'leads') && (
-              <div className="relative w-full sm:w-56 shrink-0">
+              <div className="relative w-full sm:w-56 max-w-full min-w-0">
                 <Search
                   className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
                   style={{ color: 'var(--text-muted)' }}
@@ -2897,7 +2992,7 @@ function TeamActivitiesPageInner() {
                       ? isAllAgents
                         ? 'Search event, lead, staff...'
                         : 'Search event, lead...'
-                      : isAllAgents
+                      : isAllAgents && selectedLeadsAgentValue === 'all'
                       ? 'Search lead, phone, staff...'
                       : 'Search lead, phone...'
                   }
@@ -3832,18 +3927,44 @@ function TeamActivitiesPageInner() {
                   </p>
                   <p className="text-[11px] mt-1" style={{ color: 'var(--text-secondary)' }}>
                     {isAllAgents
-                      ? `No assigned leads match this filter across the team in ${periodDescription}.`
+                      ? selectedLeadsAgentValue !== 'all'
+                        ? `${selectedLeadsAgentValue} has no assigned leads matching this filter in ${periodDescription}.`
+                        : `No assigned leads match this filter across the team in ${periodDescription}.`
                       : `${selectedStaffObj?.name || effectiveAgent || 'This staff member'} has no leads matching this filter in ${periodDescription}.`}
                   </p>
-                  {filterMode !== 'all' && (
-                    <button
-                      type="button"
-                      onClick={goAllTime}
-                      className="mt-4 text-[11px] font-semibold px-3 py-1.5 rounded-[6px] cursor-pointer inline-flex items-center gap-1"
-                      style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
-                    >
-                      View All Time Operations
-                    </button>
+                  {(filterMode !== 'all' || (isAllAgents && selectedLeadsAgentValue !== 'all') || activitySearch.trim()) && (
+                    <div className="mt-4 flex items-center justify-center gap-2 flex-wrap">
+                      {isAllAgents && selectedLeadsAgentValue !== 'all' && (
+                        <button
+                          type="button"
+                          onClick={() => handleLeadsAgentFilterChange('all')}
+                          className="min-h-[44px] sm:min-h-0 sm:h-[30px] text-xs sm:text-[11px] font-semibold px-3 py-1.5 rounded-lg cursor-pointer inline-flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--text-primary)]"
+                          style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                        >
+                          Show all agents
+                        </button>
+                      )}
+                      {activitySearch.trim() && (
+                        <button
+                          type="button"
+                          onClick={() => handleActivitySearchChange('')}
+                          className="min-h-[44px] sm:min-h-0 sm:h-[30px] text-xs sm:text-[11px] font-semibold px-3 py-1.5 rounded-lg cursor-pointer inline-flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--text-primary)]"
+                          style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                        >
+                          Clear search
+                        </button>
+                      )}
+                      {filterMode !== 'all' && (
+                        <button
+                          type="button"
+                          onClick={goAllTime}
+                          className="min-h-[44px] sm:min-h-0 sm:h-[30px] text-xs sm:text-[11px] font-semibold px-3 py-1.5 rounded-lg cursor-pointer inline-flex items-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--text-primary)]"
+                          style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                        >
+                          View All Time Operations
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
               ) : (

@@ -9,6 +9,11 @@ import {
   getLastRealMessageDirection,
   isLastMessageFromLead,
 } from "../utils/conversationMessages";
+import {
+  hasAgentEditedLeadName,
+  isPlaceholderLeadName,
+  resolveConversationLeadNames,
+} from "../utils/leadName";
 
 export { computeUnreadFromMessages, getLastRealMessageDirection, isLastMessageFromLead };
 
@@ -207,7 +212,10 @@ type CRMContextType = {
   activeChatId: string | null;
   setActiveChatId: (id: string | null) => void;
   openChat: (id: string) => void;
-  patchConversation: (id: string, updates: Partial<Record<string, any>>) => Promise<void>;
+  patchConversation: (
+    id: string,
+    updates: Partial<Record<string, any>>
+  ) => Promise<{ ok: boolean; error?: string }>;
   createManualLead: (input: CreateManualLeadInput) => Promise<CreateManualLeadResult>;
   markConversationAsRead: (id: string) => Promise<void>;
   refresh: () => Promise<void>;
@@ -388,6 +396,23 @@ function slimConversationsForStorage(convs: Conversation[], limit?: number): Con
   });
 }
 
+function hydrateCachedConversationNames(c: Conversation): Conversation {
+  const resolved = resolveConversationLeadNames({
+    channel: c.channel,
+    name: c.profileName || c.name,
+    leadName: c.leadName,
+    phone: c.phone,
+    senderId: c.id,
+    source: c.source,
+  });
+  return {
+    ...c,
+    name: resolved.name,
+    leadName: resolved.leadName ?? c.leadName,
+    profileName: resolved.profileName ?? c.profileName,
+  };
+}
+
 function getCachedConversations(): Conversation[] {
   if (typeof window === "undefined") return [];
   try {
@@ -401,7 +426,7 @@ function getCachedConversations(): Conversation[] {
       } catch {}
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
+        return (parsed as Conversation[]).map(hydrateCachedConversationNames);
       }
     }
     // Migrate from v2 ONLY if it holds the full dataset (> 250 items), otherwise purge the truncated 250-item v2 cache
@@ -414,7 +439,7 @@ function getCachedConversations(): Conversation[] {
         try {
           localStorage.setItem(CACHE_KEY, JSON.stringify(migrated));
         } catch {}
-        return migrated;
+        return migrated.map(hydrateCachedConversationNames);
       }
     }
   } catch (e) {
@@ -573,12 +598,16 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       }
       setConversations((prev) => {
         if (prev.length === 0) {
-          return idbConvs.map((c) => ({
-            ...c,
-            messages: messagesCacheRef.current.get(c.id) || c.messages || [],
-          }));
+          return idbConvs.map((c) =>
+            hydrateCachedConversationNames({
+              ...c,
+              messages: messagesCacheRef.current.get(c.id) || c.messages || [],
+            })
+          );
         }
-        const idbMap = new Map<string, Conversation>(idbConvs.map((c) => [c.id, c]));
+        const idbMap = new Map<string, Conversation>(
+          idbConvs.map((c) => [c.id, hydrateCachedConversationNames(c)])
+        );
         return prev.map((current) => {
           const idbC = idbMap.get(current.id);
           if (!idbC) return current;
@@ -677,59 +706,13 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
   // Normalize raw API data to CRM Conversation model (without messages)
   const normalizeConversationMeta = useCallback((c: any): Omit<Conversation, "messages"> => {
+    const resolvedNames = resolveConversationLeadNames(c);
     return {
       id: c.senderId,
       _id: c._id ? String(c._id) : undefined,
-      name: (() => {
-        // WA leads are always displayed by their phone number only (never the
-        // WhatsApp push-name / username or the raw LID identifier).
-        if (c.channel === "WA") {
-          const isPhone = (v: any) => typeof v === "string" && /^\+\d{7,13}$/.test(v.trim());
-          if (isPhone(c.phone)) return c.phone.trim();
-          const digits = String(c.senderId || "").replace(/\D/g, "");
-          // Real phone JIDs are ≤13 digits; 14-15 digit values are unresolved LIDs
-          if (digits.length >= 7 && digits.length <= 13) return `+${digits}`;
-          // No resolvable phone (unresolved LID) → fall back to the WhatsApp profile name
-          const pushName = typeof c.name === "string" ? c.name.trim() : "";
-          if (pushName && pushName !== "WhatsApp User" && pushName !== "WhatsApp Contact" && !/^\+?\d+$/.test(pushName)) {
-            return pushName;
-          }
-          return "WhatsApp Contact";
-        }
-
-        // If a real human name is present, use it
-        const isPlaceholder = !c.name ||
-          c.name === "WhatsApp User" ||
-          c.name === "WhatsApp Contact" ||
-          /^\+\d{13,}$/.test(c.name); // Fake LID number placeholder
-
-        if (!isPlaceholder && !/^\+\d+$/.test(c.name)) return c.name;
-
-        if (c.channel === "FB") return c.name || "Messenger User";
-        if (c.channel === "IG") return c.name || "Instagram User";
-
-        // WA: prefer genuine E.164 phone number from DB (e.g. +201126633680)
-        const validPhone = c.phone && /^\+\d{7,13}$/.test(c.phone) ? c.phone : null;
-        const derivedPhone = c.senderId && c.senderId.length <= 13 ? `+${String(c.senderId).replace(/\D/g, "")}` : null;
-        return validPhone || (!isPlaceholder ? c.name : null) || derivedPhone || c.phone || "WhatsApp Contact";
-      })(),
-      profileName: (() => {
-        const ln = typeof c.leadName === "string" ? c.leadName.trim() : "";
-        if (ln && ln !== "WhatsApp User" && ln !== "WhatsApp Contact" && !/^\+?\d+$/.test(ln)) {
-          return ln;
-        }
-        if (c.channel !== "WA") return undefined;
-        const n = typeof c.name === "string" ? c.name.trim() : "";
-        if (!n || n === "WhatsApp User" || n === "WhatsApp Contact" || /^\+?\d+$/.test(n)) return undefined;
-        return n;
-      })(),
-      leadName: (() => {
-        const ln = typeof c.leadName === "string" ? c.leadName.trim() : "";
-        if (ln && ln !== "WhatsApp User" && ln !== "WhatsApp Contact" && !/^\+?\d+$/.test(ln)) {
-          return ln;
-        }
-        return undefined;
-      })(),
+      name: resolvedNames.name,
+      profileName: resolvedNames.profileName,
+      leadName: resolvedNames.leadName,
       metaChannel: (c.metaChannel as Channel) || undefined,
       metaSenderId: c.metaSenderId || undefined,
       formPhone: c.formPhone || undefined,
@@ -1094,6 +1077,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               oldConv.name === nextConv.name &&
               oldConv.profileName === nextConv.profileName &&
               oldConv.leadName === nextConv.leadName &&
+              hasAgentEditedLeadName(oldConv.source) === hasAgentEditedLeadName(nextConv.source) &&
               oldConv.phone === nextConv.phone &&
               oldConv.branch === nextConv.branch &&
               oldConv.auditionDate === nextConv.auditionDate &&
@@ -1195,6 +1179,19 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             c.id === chatId
               ? {
                   ...c,
+                  name: (hasActivePending && pending?.updates.name) || normActive.name || c.name,
+                  profileName:
+                    hasActivePending && pending?.updates.profileName !== undefined
+                      ? pending.updates.profileName
+                      : normActive.profileName ?? c.profileName,
+                  leadName:
+                    hasActivePending && pending?.updates.leadName !== undefined
+                      ? pending.updates.leadName
+                      : normActive.leadName ?? c.leadName,
+                  source:
+                    (hasActivePending && pending?.updates.source) ||
+                    normActive.source ||
+                    c.source,
                   messages: newMessages,
                   unreadCount: computedUnread,
                   lastMessageAt: Math.max(c.lastMessageAt || 0, normActive.lastMessageAt || 0),
@@ -1435,13 +1432,28 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                       : computeUnreadFromMessages(updatedMessagesForConv)
                     : fallbackUnread;
 
+                  const pendingPatch = pendingPatchesRef.current.get(conversationId);
+                  const hasActivePendingPatch = Boolean(
+                    pendingPatch && Date.now() <= pendingPatch.expiresAt
+                  );
                   const updated: Conversation = {
                     ...existing,
                     ...(normRemote
                       ? {
-                          name: normRemote.name || existing.name,
-                          profileName: normRemote.profileName || existing.profileName,
-                          leadName: normRemote.leadName || existing.leadName,
+                          name:
+                            (hasActivePendingPatch && pendingPatch?.updates.name) ||
+                            normRemote.name ||
+                            existing.name,
+                          profileName:
+                            hasActivePendingPatch &&
+                            pendingPatch?.updates.profileName !== undefined
+                              ? pendingPatch.updates.profileName
+                              : normRemote.profileName ?? existing.profileName,
+                          leadName:
+                            hasActivePendingPatch &&
+                            pendingPatch?.updates.leadName !== undefined
+                              ? pendingPatch.updates.leadName
+                              : normRemote.leadName ?? existing.leadName,
                           phone: normRemote.phone || existing.phone,
                           formPhone: normRemote.formPhone || existing.formPhone,
                           activityLog:
@@ -1451,7 +1463,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                           bookedBy: normRemote.bookedBy || existing.bookedBy,
                           attendedBy: normRemote.attendedBy || existing.attendedBy,
                           enrolledBy: normRemote.enrolledBy || existing.enrolledBy,
-                          source: normRemote.source || existing.source,
+                          source:
+                            (hasActivePendingPatch && pendingPatch?.updates.source) ||
+                            normRemote.source ||
+                            existing.source,
                         }
                       : {}),
                     lastMessageAt: Math.max(
@@ -1932,14 +1947,47 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
   // Instant optimistic update across all pages + background PATCH
   const patchConversation = useCallback(
-    async (id: string, rawUpdates: Partial<Record<string, any>>) => {
+    async (
+      id: string,
+      rawUpdates: Partial<Record<string, any>>
+    ): Promise<{ ok: boolean; error?: string }> => {
       if (isReadOnly) {
-        console.warn("View-only account: modifications are disabled.");
-        return;
+        const readOnlyMsg = "View-only account: modifications are disabled.";
+        console.warn(readOnlyMsg);
+        return { ok: false, error: readOnlyMsg };
       }
 
       const currentForSync = conversationsRef.current.find((conv) => conv.id === id);
+      const prevSnapshot = currentForSync ? { ...currentForSync } : undefined;
       const updates: Record<string, any> = { ...rawUpdates };
+      const isAgentNameEdit = updates.leadNameEdited === true;
+      delete updates.leadNameEdited;
+
+      if (
+        typeof updates.leadName === "string" &&
+        updates.name === undefined &&
+        !isPlaceholderLeadName(updates.leadName)
+      ) {
+        updates.name = updates.leadName.trim();
+      }
+      if (
+        typeof updates.name === "string" &&
+        updates.leadName === undefined &&
+        !isPlaceholderLeadName(updates.name)
+      ) {
+        updates.leadName = updates.name.trim();
+      }
+      const optimisticExtras: Record<string, string> = {};
+      const resolvedOptName = updates.leadName ?? updates.name;
+      const editedLeadName =
+        isAgentNameEdit &&
+        typeof resolvedOptName === "string" &&
+        !isPlaceholderLeadName(resolvedOptName)
+          ? resolvedOptName.trim()
+          : undefined;
+      if (typeof resolvedOptName === "string" && !isPlaceholderLeadName(resolvedOptName)) {
+        optimisticExtras.profileName = resolvedOptName.trim();
+      }
 
       const getDefaultJoiningLaterIso = () => {
         const d = new Date();
@@ -2031,11 +2079,18 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         updates.cashIn !== undefined && (Number(updates.cashIn) || 0) > 0;
 
       const needsSourceSync =
-        updates.cashIn !== undefined || isBooking || isAttending || isEnrolling || isPaying;
+        updates.cashIn !== undefined ||
+        updates.source !== undefined ||
+        updates.activityLog !== undefined ||
+        isBooking ||
+        isAttending ||
+        isEnrolling ||
+        isPaying ||
+        Boolean(editedLeadName);
 
       setConversations((prev) => {
         const current = prev.find((conv) => conv.id === id);
-        const enrichedUpdates: Record<string, any> = { ...updates };
+        const enrichedUpdates: Record<string, any> = { ...updates, ...optimisticExtras };
         const nowTs = Date.now();
         const actorName = (user?.name || current?.agent || "Staff").trim();
         const actorRole = user?.role || "";
@@ -2212,7 +2267,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (needsSourceSync || generatedActivities.length > 0) {
-          const currentSource = current?.source;
+          const currentSource =
+            updates.source !== undefined ? updates.source : current?.source;
           const baseSource =
             typeof currentSource === "object" && currentSource !== null
               ? { ...currentSource }
@@ -2223,11 +2279,22 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                       : "Organic / Direct",
                 };
 
-          if (generatedActivities.length > 0) {
-            const existingLog = Array.isArray(current?.activityLog) ? current.activityLog : [];
-            const nextLog = [...generatedActivities, ...existingLog].slice(0, 250);
+          const existingLog = Array.isArray(updates.activityLog)
+            ? updates.activityLog
+            : Array.isArray(current?.activityLog)
+              ? current.activityLog
+              : [];
+
+          if (generatedActivities.length > 0 || updates.activityLog !== undefined) {
+            const nextLog =
+              generatedActivities.length > 0
+                ? [...generatedActivities, ...existingLog].slice(0, 250)
+                : existingLog.slice(0, 250);
             baseSource.activityLog = nextLog;
             enrichedUpdates.activityLog = nextLog;
+            if (updates.activityLog !== undefined) {
+              patchPayload.activityLog = nextLog;
+            }
           }
 
           if (updates.cashIn !== undefined) {
@@ -2266,22 +2333,29 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             patchPayload.enrolledAt = nowIso;
             patchPayload.enrolledBy = actorName;
           }
+          if (editedLeadName) {
+            baseSource.leadNameEdited = true;
+            baseSource.editedLeadName = editedLeadName;
+            baseSource.leadNameEditedAt = nowIso;
+          }
 
           patchPayload.source = baseSource;
           enrichedUpdates.source = baseSource;
         }
 
         const next = prev.map((c) => (c.id === id ? { ...c, ...enrichedUpdates } : c));
-        persistConversationsCache(next, true);
+        persistConversationsCache(next);
         return next;
       });
+
+      const optimisticUpdates: Record<string, unknown> = { ...patchPayload, ...optimisticExtras };
 
       // Fix A: raise TTL to 30s and merge with any existing pending optimistic fields
       const existingPending = pendingPatchesRef.current.get(id);
       pendingPatchesRef.current.set(id, {
         updates: {
           ...(existingPending ? existingPending.updates : {}),
-          ...patchPayload,
+          ...optimisticUpdates,
         },
         expiresAt: Date.now() + 30000,
       });
@@ -2289,10 +2363,64 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       const recentEntry = recentlyCreatedRef.current.get(id);
       if (recentEntry) {
         recentlyCreatedRef.current.set(id, {
-          conv: { ...recentEntry.conv, ...patchPayload } as Conversation,
+          conv: { ...recentEntry.conv, ...optimisticUpdates } as Conversation,
           expiresAt: Date.now() + 60000,
         });
       }
+
+      const rollbackOptimisticUpdate = (restoredMeta?: Omit<Conversation, "messages">) => {
+        const currentPending = pendingPatchesRef.current.get(id);
+        if (currentPending) {
+          const nextUpdates = { ...currentPending.updates };
+          for (const key of Object.keys(optimisticUpdates)) {
+            if (nextUpdates[key] === optimisticUpdates[key]) {
+              delete nextUpdates[key];
+            }
+          }
+          if (Object.keys(nextUpdates).length === 0) {
+            pendingPatchesRef.current.delete(id);
+          } else {
+            pendingPatchesRef.current.set(id, {
+              updates: nextUpdates,
+              expiresAt: currentPending.expiresAt,
+            });
+          }
+        }
+        setConversations((prev) => {
+          const next = prev.map((c) => {
+            if (c.id !== id) return c;
+            if (restoredMeta) {
+              return { ...restoredMeta, messages: c.messages } as Conversation;
+            }
+            if (!prevSnapshot) return c;
+            const reverted: Record<string, unknown> = { ...c };
+            const currentRecord = c as Record<string, unknown>;
+            const prevRecord = prevSnapshot as Record<string, unknown>;
+            for (const key of Object.keys(optimisticUpdates)) {
+              if (currentRecord[key] === optimisticUpdates[key]) {
+                reverted[key] = prevRecord[key];
+              }
+            }
+            return reverted as Conversation;
+          });
+          persistConversationsCache(next);
+          return next;
+        });
+      };
+
+      const emitPatchError = (message: string) => {
+        if (typeof window === "undefined") return;
+        try {
+          window.dispatchEvent(
+            new CustomEvent("crm:toast", {
+              detail: {
+                type: "error",
+                message,
+              },
+            })
+          );
+        } catch {}
+      };
 
       // 3. Persist to API
       try {
@@ -2304,7 +2432,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           body: JSON.stringify(patchPayload),
         });
         const json = await res.json().catch(() => null);
-        if (json && json.success) {
+        if (res.ok && json && json.success) {
           // Fix C: on confirmed write, immediately merge the server-confirmed data
           // into state so the next poll cannot revert it (the source of truth is now
           // the server response, not the optimistic guess).
@@ -2324,7 +2452,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     } as Conversation) // keep loaded messages & newer message timestamps
                   : c
               );
-              persistConversationsCache(next, true);
+              persistConversationsCache(next);
               return next;
             });
           }
@@ -2336,47 +2464,47 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               expiresAt: Date.now() + 15000,
             });
           }
-        } else if (res.status === 404 && recentlyCreatedRef.current.has(id)) {
+          return { ok: true };
+        }
+
+        if (res.status === 404 && recentlyCreatedRef.current.has(id)) {
           // Brand-new manual lead whose POST /api/messages/manual is still in-flight; keep optimistic state
-        } else if (res.status === 401 || res.status === 403 || res.status === 409) {
-          // Server rejected the patch (e.g. 403 Forbidden or 409 Conflict): rollback
-          pendingPatchesRef.current.delete(id);
+          return { ok: true };
+        }
+
+        let restoredMeta: Omit<Conversation, "messages"> | undefined;
+        if (res.status === 401 || res.status === 403 || res.status === 409) {
           try {
             const rollbackRes = await fetch(`${API}/messages/${id}`, { headers });
             if (rollbackRes.ok) {
               const rollbackJson = await rollbackRes.json().catch(() => null);
               if (rollbackJson && rollbackJson.data) {
-                const confirmed = normalizeConversationMeta(rollbackJson.data);
-                setConversations((prev) => {
-                  const next = prev.map((c) =>
-                    c.id === id
-                      ? ({ ...confirmed, messages: c.messages } as Conversation)
-                      : c
-                  );
-                  persistConversationsCache(next, true);
-                  return next;
-                });
+                restoredMeta = normalizeConversationMeta(rollbackJson.data);
               }
             }
           } catch {}
-          if (json && json.error && typeof window !== "undefined") {
-            const parsed = formatMetaErrorMessage(json.error);
-            console.warn(`Conversation update notice: ${parsed.title} - ${parsed.message}`);
-            try {
-              window.dispatchEvent(
-                new CustomEvent("crm:toast", {
-                  detail: {
-                    type: "error",
-                    message: json.error || parsed.message || "Failed to update lead",
-                  },
-                })
-              );
-            } catch {}
-          }
         }
+
+        rollbackOptimisticUpdate(restoredMeta);
+
+        const parsed = json?.error ? formatMetaErrorMessage(json.error) : null;
+        const errMsg =
+          (typeof json?.error === "string" && json.error) ||
+          parsed?.message ||
+          `Could not save changes (HTTP ${res.status}).`;
+        if (parsed) {
+          console.warn(`Conversation update notice: ${parsed.title} - ${parsed.message}`);
+        } else {
+          console.warn(`Failed to patch conversation (${res.status}): ${errMsg}`);
+        }
+        emitPatchError(errMsg);
+        return { ok: false, error: errMsg };
       } catch (err) {
         console.warn("Failed to patch conversation:", err);
-        // On network error keep the optimistic update; it will reconcile on next poll
+        rollbackOptimisticUpdate();
+        const networkError = "Network error while saving changes. Please try again.";
+        emitPatchError(networkError);
+        return { ok: false, error: networkError };
       }
     },
     [isReadOnly, token, normalizeConversationMeta]

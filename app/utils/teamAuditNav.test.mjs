@@ -91,6 +91,7 @@ describe("teamAuditNav", () => {
       activitySearch: "",
       agentSearch: "",
       agentRoleFilter: "all",
+      leadsAgentFilter: "Mai",
       visibleTimelineCount: 50,
       visibleLeadsCount: 50,
       scrollTop: 420,
@@ -117,6 +118,7 @@ describe("teamAuditNav", () => {
     const restored = getMemoryTeamSnapshot("");
     assert.ok(restored);
     assert.equal(restored.mainTab, "funnel");
+    assert.equal(restored.leadsAgentFilter, "Mai");
     assert.equal(restored.scrollTop, 420);
     assert.equal(restored.auditTarget?.metric, "booked");
     assert.equal(restored.auditModal?.reasonFilter, "progressed_attended");
@@ -145,6 +147,7 @@ describe("teamAuditNav", () => {
       activitySearch: "",
       agentSearch: "",
       agentRoleFilter: "all",
+      leadsAgentFilter: "Mai",
       visibleTimelineCount: 50,
       visibleLeadsCount: 50,
       scrollTop: 0,

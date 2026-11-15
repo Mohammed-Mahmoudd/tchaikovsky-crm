@@ -28,6 +28,8 @@ import { formatMetaErrorMessage, ParsedMetaError } from "../utils/errorParser";
 import MessageTemplate, { parseTemplateAttachment } from "./MessageTemplate";
 import InstagramMedia from "./InstagramMedia";
 import { VoiceNotePlayer } from "./VoiceNotePlayer";
+import { ChatDateDivider } from "./ChatDateDivider";
+import { buildChatDateDividerLabels, formatChatMessageTooltip } from "../utils/time";
 
 // ─── Helper Functions ────────────────────────────────────────────────────────
 
@@ -864,7 +866,11 @@ export const ConversationChatView = React.memo(function ConversationChatView({
           </div>
         ) : null}
 
-        {activeConv.messages.map((msg) => {
+        {(() => {
+          const dateDividerLabels = buildChatDateDividerLabels(activeConv.messages);
+          return activeConv.messages.map((msg, msgIdx) => {
+            const dateDividerLabel = dateDividerLabels[msgIdx];
+            const timeTooltip = formatChatMessageTooltip(msg.timestamp, msg.time);
           const msgAttachments = (msg.attachments || []) as AttachmentItem[];
           const hasTemplateAttachment = msgAttachments.some(isTemplateAttachment);
           const hasSharedPostAttachment = msgAttachments.some(
@@ -952,9 +958,10 @@ export const ConversationChatView = React.memo(function ConversationChatView({
           }, []);
 
           return (
-            <div
-              key={msg.id}
-              id={`msg-${msg.id}`}
+            <React.Fragment key={msg.id}>
+              {dateDividerLabel && <ChatDateDivider label={dateDividerLabel} />}
+              <div
+                id={`msg-${msg.id}`}
               onDoubleClick={(e) => {
                 if (!canReplyToThisMessage) return;
                 const targetEl = e.target as HTMLElement | null;
@@ -1349,7 +1356,7 @@ export const ConversationChatView = React.memo(function ConversationChatView({
                       </span>
                     )}
                     {!isDeletedMsg && msg.isEdited && <span className="italic opacity-90">Edited ·</span>}
-                    <span>{msg.time}</span>
+                    <span title={timeTooltip || undefined}>{msg.time}</span>
                     {!msg.isIncoming && !isDeletedMsg && (
                       <span className="inline-flex items-center ml-0.5" title={msg.status || "sent"}>
                         {msg.status === "pending" ? (
@@ -1519,8 +1526,10 @@ export const ConversationChatView = React.memo(function ConversationChatView({
                 </div>
               </div>
             </div>
+            </React.Fragment>
           );
-        })}
+        });
+        })()}
         <div ref={messagesEndRef} className="h-3 shrink-0" />
       </div>
 

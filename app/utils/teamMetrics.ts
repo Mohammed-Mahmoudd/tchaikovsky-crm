@@ -1144,3 +1144,75 @@ export function buildFunnelAuditReport(
   };
 }
 
+export interface AssignedLeadAgentOption {
+  name: string;
+  count: number;
+}
+
+export interface AssignedLeadsAgentPool {
+  total: number;
+  options: AssignedLeadAgentOption[];
+}
+
+/**
+ * Returns true if `assignedAgent` belongs to a real staff member and matches
+ * the Assigned Leads agent dropdown filter (`"all"` matches any real agent).
+ */
+export function matchesAssignedLeadAgentFilter(
+  assignedAgent: string | null | undefined,
+  agentFilter: string
+): boolean {
+  if (!isRealAssignedAgent(assignedAgent)) return false;
+  const cleanFilter = (agentFilter || "").trim();
+  if (!cleanFilter || cleanFilter.toLowerCase() === "all") return true;
+  return (assignedAgent || "").trim().toLowerCase() === cleanFilter.toLowerCase();
+}
+
+/**
+ * Builds sorted agent dropdown options with period lead counts for Assigned Leads.
+ * Only agents present in `settingsAgentNames` are included as dropdown options,
+ * while `total` counts all real assigned leads in the period for "All agents".
+ */
+export function buildAssignedLeadsAgentPool(
+  leadAgents: ReadonlyArray<string | null | undefined>,
+  settingsAgentNames: ReadonlyArray<string>
+): AssignedLeadsAgentPool {
+  const canonicalByLower = new Map<string, string>();
+  const countsByLower = new Map<string, number>();
+
+  for (let i = 0; i < settingsAgentNames.length; i++) {
+    const rawName = settingsAgentNames[i];
+    if (!isRealAssignedAgent(rawName)) continue;
+    const clean = rawName.trim();
+    const lower = clean.toLowerCase();
+    if (!canonicalByLower.has(lower)) {
+      canonicalByLower.set(lower, clean);
+      countsByLower.set(lower, 0);
+    }
+  }
+
+  let total = 0;
+  for (let i = 0; i < leadAgents.length; i++) {
+    const rawAgent = leadAgents[i];
+    if (!isRealAssignedAgent(rawAgent)) continue;
+    total += 1;
+    const lower = (rawAgent || "").trim().toLowerCase();
+    if (canonicalByLower.has(lower)) {
+      countsByLower.set(lower, (countsByLower.get(lower) ?? 0) + 1);
+    }
+  }
+
+  const options: AssignedLeadAgentOption[] = [];
+  canonicalByLower.forEach((name, lower) => {
+    options.push({ name, count: countsByLower.get(lower) ?? 0 });
+  });
+
+  options.sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count;
+    return a.name.localeCompare(b.name);
+  });
+
+  return { total, options };
+}
+
+

@@ -61,6 +61,7 @@ export interface TeamActivitiesSnapshot {
   activitySearch: string;
   agentSearch: string;
   agentRoleFilter: string;
+  leadsAgentFilter?: string;
   visibleTimelineCount: number;
   visibleLeadsCount: number;
   scrollTop: number;
@@ -224,6 +225,7 @@ export function saveTeamActivitiesSnapshot(
     activitySearch: snapshot.activitySearch,
     agentSearch: snapshot.agentSearch,
     agentRoleFilter: snapshot.agentRoleFilter,
+    leadsAgentFilter: snapshot.leadsAgentFilter ?? "all",
     visibleTimelineCount: snapshot.visibleTimelineCount,
     visibleLeadsCount: snapshot.visibleLeadsCount,
     scrollTop: snapshot.scrollTop,
