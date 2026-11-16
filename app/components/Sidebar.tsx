@@ -18,8 +18,6 @@ import {
   Moon,
   Activity,
   User,
-  Bell,
-  BellOff,
 } from 'lucide-react';
 
 import { useCRM } from '../context/CRMContext';
@@ -45,13 +43,7 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
     conversations,
     labels,
     openChat,
-    pushSupported,
-    pushEnabled,
-    pushPermission,
-    pushBusy,
-    toggleDevicePush,
   } = useCRM();
-  const canUseNotifications = canAccessRoute(user?.role, '/');
   const closeTouchedRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchContainerRef = useRef<HTMLDivElement>(null);
@@ -395,49 +387,6 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
 
         {/* Footer */}
         <div className="p-3" style={{ borderTop: '1px solid var(--border-sidebar)' }}>
-          {canUseNotifications && (
-            <button
-              type="button"
-              disabled={pushBusy}
-              onClick={() => {
-                if (!pushSupported || pushPermission === 'denied') {
-                  markTeamSidebarNavigation();
-                  router.push('/settings');
-                  onCloseMobile?.();
-                  return;
-                }
-                void toggleDevicePush();
-              }}
-              aria-pressed={pushEnabled}
-              aria-label={pushEnabled ? 'Turn off message notifications' : 'Turn on message notifications'}
-              title={
-                pushPermission === 'denied'
-                  ? 'Notifications are blocked in browser settings (open Settings for help)'
-                  : pushEnabled
-                  ? 'Device notifications are on (click to turn off)'
-                  : 'Device notifications are off (click to turn on)'
-              }
-              className={`flex items-center justify-between min-h-[44px] md:min-h-[32px] mb-1 px-1 w-full rounded-md transition-colors hover:bg-[var(--bg-hover)] ${
-                pushBusy ? 'opacity-50 cursor-wait' : ''
-              }`}
-            >
-              <div className="flex items-center min-w-0" style={{ color: 'var(--text-secondary)' }}>
-                {pushEnabled ? <Bell className="w-4 h-4 mr-2 shrink-0" /> : <BellOff className="w-4 h-4 mr-2 shrink-0" />}
-                <span className="text-[13px] truncate">Notifications</span>
-              </div>
-              <span
-                className="px-1.5 py-0.5 text-[10px] font-bold rounded-md shrink-0"
-                style={
-                  pushEnabled
-                    ? { background: 'var(--bg-selected)', color: 'var(--text-primary)' }
-                    : { background: 'var(--bg-pill)', color: 'var(--text-muted)' }
-                }
-              >
-                {pushPermission === 'denied' ? 'BLOCKED' : pushEnabled ? 'ON' : 'OFF'}
-              </span>
-            </button>
-          )}
-
           <button
             type="button"
             onClick={toggle}
