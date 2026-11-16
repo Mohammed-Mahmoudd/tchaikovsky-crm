@@ -23,6 +23,7 @@ import {
 import { useCRM } from '../context/CRMContext';
 import { matchLeadSearch } from '../utils/search';
 import { markTeamSidebarNavigation } from '../utils/teamAuditNav';
+import { isConversationArchived, isConversationDone } from '../utils/inboxFilters';
 
 interface SidebarProps {
   isMobileOpen?: boolean;
@@ -223,15 +224,38 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
                           {lead.agent || 'Unassigned'}
                         </p>
                       </div>
-                      <span
-                        className="text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0"
-                        style={{
-                          background: 'var(--bg-pill)',
-                          color: 'var(--text-secondary)',
-                        }}
-                      >
-                        {lead.channel}
-                      </span>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {isConversationArchived(lead) ? (
+                          <span
+                            className="text-[9px] font-semibold px-1.5 py-0.5 rounded"
+                            style={{
+                              background: 'var(--bg-pill)',
+                              color: 'var(--text-muted)',
+                            }}
+                          >
+                            Archived
+                          </span>
+                        ) : isConversationDone(lead) ? (
+                          <span
+                            className="text-[9px] font-semibold px-1.5 py-0.5 rounded"
+                            style={{
+                              background: 'var(--bg-pill)',
+                              color: 'var(--text-secondary)',
+                            }}
+                          >
+                            DONE
+                          </span>
+                        ) : null}
+                        <span
+                          className="text-[9px] font-bold px-1.5 py-0.5 rounded"
+                          style={{
+                            background: 'var(--bg-pill)',
+                            color: 'var(--text-secondary)',
+                          }}
+                        >
+                          {lead.channel}
+                        </span>
+                      </div>
                     </button>
                   ))}
                   {pathname !== '/' && (

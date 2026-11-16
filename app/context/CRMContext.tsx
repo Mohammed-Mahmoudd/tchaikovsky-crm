@@ -14,6 +14,7 @@ import {
   isPlaceholderLeadName,
   resolveConversationLeadNames,
 } from "../utils/leadName";
+import { computeInboxUnreadBadge } from "../utils/inboxFilters";
 
 export { computeUnreadFromMessages, getLastRealMessageDirection, isLastMessageFromLead };
 
@@ -71,6 +72,12 @@ export type Conversation = {
   agent: string;
   channel: Channel;
   status: "Open" | "Pending" | "Resolved";
+  isArchived?: boolean;
+  archivedAt?: string;
+  archivedBy?: string;
+  isDone?: boolean;
+  doneAt?: string;
+  doneBy?: string;
   unreadCount?: number;
   windowLeft?: string;
   pipeline: "New" | "Contacted" | "Qualified" | "Audition Booked" | "Attended" | "Enrolled" | "Joining Later" | "Unqualified" | "Lost" | "direct";
@@ -365,6 +372,12 @@ function slimConversationsForStorage(convs: Conversation[], limit?: number): Con
     if (c.metaSenderId) item.metaSenderId = c.metaSenderId;
     if (c.formPhone) item.formPhone = c.formPhone;
     if (c.unreadCount) item.unreadCount = c.unreadCount;
+    if (c.isArchived) item.isArchived = true;
+    if (c.archivedAt) item.archivedAt = c.archivedAt;
+    if (c.archivedBy) item.archivedBy = c.archivedBy;
+    if (c.isDone) item.isDone = true;
+    if (c.doneAt) item.doneAt = c.doneAt;
+    if (c.doneBy) item.doneBy = c.doneBy;
     if (c.notes) item.notes = c.notes;
     if (c.followUpNote) item.followUpNote = c.followUpNote;
     if (c.followUpDate) item.followUpDate = c.followUpDate;
@@ -731,6 +744,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       agent: c.agent || "Unassigned",
       channel: (c.channel as Channel) || "FB",
       status: c.status || "Open",
+      isArchived: Boolean(c.isArchived),
+      archivedAt: c.archivedAt ? String(c.archivedAt) : undefined,
+      archivedBy: c.archivedBy ? String(c.archivedBy) : undefined,
+      isDone: !Boolean(c.isArchived) && Boolean(c.isDone),
+      doneAt: !Boolean(c.isArchived) && c.doneAt ? String(c.doneAt) : undefined,
+      doneBy: !Boolean(c.isArchived) && c.doneBy ? String(c.doneBy) : undefined,
       unreadCount: (() => {
         const rawUnread = Number(c.unreadCount) || 0;
         if (rawUnread > 0) return rawUnread;
@@ -872,7 +891,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // Track pending optimistic updates so periodic background polling does not overwrite recently moved/updated leads
-  const pendingPatchesRef = useRef<Map<string, { updates: Partial<Record<string, any>>; expiresAt: number }>>(new Map());
+  const pendingPatchesRef = useRef<Map<string, { updates: Partial<Record<string, any>>; expiresAt: number; patchedAt?: number }>>(new Map());
 
   // Track recently created/opened manual leads so in-flight background polls can NEVER wipe them out before server sync settles
   const recentlyCreatedRef = useRef<Map<string, { conv: Conversation; expiresAt: number }>>(new Map());
@@ -1070,6 +1089,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               oldConv.pipeline === nextConv.pipeline &&
               oldConv.agent === nextConv.agent &&
               oldConv.status === nextConv.status &&
+              Boolean(oldConv.isArchived) === Boolean(nextConv.isArchived) &&
+              oldConv.archivedAt === nextConv.archivedAt &&
+              oldConv.archivedBy === nextConv.archivedBy &&
+              Boolean(oldConv.isDone) === Boolean(nextConv.isDone) &&
+              oldConv.doneAt === nextConv.doneAt &&
+              oldConv.doneBy === nextConv.doneBy &&
               oldConv.name === nextConv.name &&
               oldConv.profileName === nextConv.profileName &&
               oldConv.leadName === nextConv.leadName &&
@@ -1217,6 +1242,30 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                       : normActive.followUpCompleted ?? c.followUpCompleted,
                   agent: (hasActivePending && pending?.updates.agent) || normActive.agent || c.agent,
                   status: (hasActivePending && pending?.updates.status) || normActive.status || c.status,
+                  isArchived:
+                    hasActivePending && pending?.updates.isArchived !== undefined
+                      ? Boolean(pending.updates.isArchived)
+                      : normActive.isArchived,
+                  archivedAt:
+                    hasActivePending && "archivedAt" in (pending?.updates || {})
+                      ? (pending?.updates.archivedAt as string | undefined)
+                      : normActive.archivedAt,
+                  archivedBy:
+                    hasActivePending && pending?.updates.archivedBy !== undefined
+                      ? (pending.updates.archivedBy as string | undefined)
+                      : normActive.archivedBy,
+                  isDone:
+                    hasActivePending && pending?.updates.isDone !== undefined
+                      ? Boolean(pending.updates.isDone)
+                      : normActive.isDone,
+                  doneAt:
+                    hasActivePending && "doneAt" in (pending?.updates || {})
+                      ? (pending?.updates.doneAt as string | undefined)
+                      : normActive.doneAt,
+                  doneBy:
+                    hasActivePending && pending?.updates.doneBy !== undefined
+                      ? (pending.updates.doneBy as string | undefined)
+                      : normActive.doneBy,
                 }
               : c
           )
@@ -1472,26 +1521,51 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     : fallbackUnread;
 
                   const pendingPatch = pendingPatchesRef.current.get(conversationId);
-                  const hasActivePendingPatch = Boolean(
+                  let hasActivePendingPatch = Boolean(
                     pendingPatch && Date.now() <= pendingPatch.expiresAt
                   );
+                  if (
+                    hasActivePendingPatch &&
+                    pendingPatch &&
+                    !isOutgoing &&
+                    normRemote &&
+                    !normRemote.isDone &&
+                    !normRemote.isArchived &&
+                    pendingPatch.updates.isDone === true &&
+                    (message?.timestamp || Date.now()) >= (pendingPatch.patchedAt || 0)
+                  ) {
+                    const cleanedUpdates = { ...pendingPatch.updates };
+                    delete cleanedUpdates.isDone;
+                    delete cleanedUpdates.doneAt;
+                    delete cleanedUpdates.doneBy;
+                    if (Object.keys(cleanedUpdates).length === 0) {
+                      pendingPatchesRef.current.delete(conversationId);
+                      hasActivePendingPatch = false;
+                    } else {
+                      pendingPatchesRef.current.set(conversationId, {
+                        ...pendingPatch,
+                        updates: cleanedUpdates,
+                      });
+                    }
+                  }
+                  const activePendingUpdates = hasActivePendingPatch ? pendingPatchesRef.current.get(conversationId)?.updates : undefined;
                   const updated: Conversation = {
                     ...existing,
                     ...(normRemote
                       ? {
                           name:
-                            (hasActivePendingPatch && pendingPatch?.updates.name) ||
+                            (hasActivePendingPatch && activePendingUpdates?.name) ||
                             normRemote.name ||
                             existing.name,
                           profileName:
                             hasActivePendingPatch &&
-                            pendingPatch?.updates.profileName !== undefined
-                              ? pendingPatch.updates.profileName
+                            activePendingUpdates?.profileName !== undefined
+                              ? activePendingUpdates.profileName
                               : normRemote.profileName ?? existing.profileName,
                           leadName:
                             hasActivePendingPatch &&
-                            pendingPatch?.updates.leadName !== undefined
-                              ? pendingPatch.updates.leadName
+                            activePendingUpdates?.leadName !== undefined
+                              ? activePendingUpdates.leadName
                               : normRemote.leadName ?? existing.leadName,
                           phone: normRemote.phone || existing.phone,
                           formPhone: normRemote.formPhone || existing.formPhone,
@@ -1502,8 +1576,32 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                           bookedBy: normRemote.bookedBy || existing.bookedBy,
                           attendedBy: normRemote.attendedBy || existing.attendedBy,
                           enrolledBy: normRemote.enrolledBy || existing.enrolledBy,
+                          isArchived:
+                            hasActivePendingPatch && activePendingUpdates?.isArchived !== undefined
+                              ? Boolean(activePendingUpdates.isArchived)
+                              : normRemote.isArchived,
+                          archivedAt:
+                            hasActivePendingPatch && activePendingUpdates && "archivedAt" in activePendingUpdates
+                              ? (activePendingUpdates.archivedAt as string | undefined)
+                              : normRemote.archivedAt,
+                          archivedBy:
+                            hasActivePendingPatch && activePendingUpdates?.archivedBy !== undefined
+                              ? (activePendingUpdates.archivedBy as string | undefined)
+                              : normRemote.archivedBy,
+                          isDone:
+                            hasActivePendingPatch && activePendingUpdates?.isDone !== undefined
+                              ? Boolean(activePendingUpdates.isDone)
+                              : normRemote.isDone,
+                          doneAt:
+                            hasActivePendingPatch && activePendingUpdates && "doneAt" in activePendingUpdates
+                              ? (activePendingUpdates.doneAt as string | undefined)
+                              : normRemote.doneAt,
+                          doneBy:
+                            hasActivePendingPatch && activePendingUpdates?.doneBy !== undefined
+                              ? (activePendingUpdates.doneBy as string | undefined)
+                              : normRemote.doneBy,
                           source:
-                            (hasActivePendingPatch && pendingPatch?.updates.source) ||
+                            (hasActivePendingPatch && activePendingUpdates?.source) ||
                             normRemote.source ||
                             existing.source,
                         }
@@ -1958,17 +2056,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   const badgeCounts = useMemo<BadgeCounts>(() => {
     const today = getLocalTodayIso();
 
-    let inbox = 0;
+    const inbox = computeInboxUnreadBadge(visibleConversations);
     let leads = 0;
     let auditions = 0;
     let followUps = 0;
 
     visibleConversations.forEach((c) => {
-      // 1. Inbox badge: total unread messages
-      if (c.unreadCount && c.unreadCount > 0) {
-        inbox += c.unreadCount;
-      }
-
       // 2. Leads badge: newly arrived uncontacted leads
       if (c.pipeline === "New") {
         leads += 1;
@@ -2106,6 +2199,51 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
       const nowIso = new Date().toISOString();
       const patchPayload: Record<string, any> = { ...updates };
+
+      // Keep Conversation state timestamps typed as `string | undefined` while sending `null` to MongoDB on clear
+      const normalizedInboxOptimistic: Record<string, boolean | string | undefined> = {};
+      if ("isArchived" in patchPayload) {
+        normalizedInboxOptimistic.isArchived = Boolean(patchPayload.isArchived);
+        if (normalizedInboxOptimistic.isArchived) {
+          const ts = patchPayload.archivedAt ? String(patchPayload.archivedAt) : nowIso;
+          patchPayload.archivedAt = ts;
+          normalizedInboxOptimistic.archivedAt = ts;
+          if (!patchPayload.archivedBy && user?.name) patchPayload.archivedBy = user.name;
+          normalizedInboxOptimistic.archivedBy = String(patchPayload.archivedBy || "");
+          patchPayload.isDone = false;
+          patchPayload.doneAt = null;
+          patchPayload.doneBy = "";
+          normalizedInboxOptimistic.isDone = false;
+          normalizedInboxOptimistic.doneAt = undefined;
+          normalizedInboxOptimistic.doneBy = "";
+        } else {
+          patchPayload.archivedAt = null;
+          patchPayload.archivedBy = "";
+          normalizedInboxOptimistic.archivedAt = undefined;
+          normalizedInboxOptimistic.archivedBy = "";
+        }
+      }
+      if ("isDone" in patchPayload && !normalizedInboxOptimistic.isArchived) {
+        normalizedInboxOptimistic.isDone = Boolean(patchPayload.isDone);
+        if (normalizedInboxOptimistic.isDone) {
+          const ts = patchPayload.doneAt ? String(patchPayload.doneAt) : nowIso;
+          patchPayload.doneAt = ts;
+          normalizedInboxOptimistic.doneAt = ts;
+          if (!patchPayload.doneBy && user?.name) patchPayload.doneBy = user.name;
+          normalizedInboxOptimistic.doneBy = String(patchPayload.doneBy || "");
+          patchPayload.isArchived = false;
+          patchPayload.archivedAt = null;
+          patchPayload.archivedBy = "";
+          normalizedInboxOptimistic.isArchived = false;
+          normalizedInboxOptimistic.archivedAt = undefined;
+          normalizedInboxOptimistic.archivedBy = "";
+        } else {
+          patchPayload.doneAt = null;
+          patchPayload.doneBy = "";
+          normalizedInboxOptimistic.doneAt = undefined;
+          normalizedInboxOptimistic.doneBy = "";
+        }
+      }
 
       if (updates.cashIn !== undefined) {
         const numCash = Number(updates.cashIn) || 0;
@@ -2397,12 +2535,19 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           enrichedUpdates.source = baseSource;
         }
 
-        const next = prev.map((c) => (c.id === id ? { ...c, ...enrichedUpdates } : c));
+        const next = prev.map((c) =>
+          c.id === id ? { ...c, ...enrichedUpdates, ...normalizedInboxOptimistic } : c
+        );
         persistConversationsCache(next);
         return next;
       });
 
-      const optimisticUpdates: Record<string, unknown> = { ...patchPayload, ...optimisticExtras };
+      const optimisticUpdates: Record<string, unknown> = {
+        ...patchPayload,
+        ...optimisticExtras,
+        ...normalizedInboxOptimistic,
+      };
+      const patchStartedAt = Date.now();
 
       // Fix A: raise TTL to 30s and merge with any existing pending optimistic fields
       const existingPending = pendingPatchesRef.current.get(id);
@@ -2411,7 +2556,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           ...(existingPending ? existingPending.updates : {}),
           ...optimisticUpdates,
         },
-        expiresAt: Date.now() + 30000,
+        expiresAt: patchStartedAt + 30000,
+        patchedAt: patchStartedAt,
       });
 
       const recentEntry = recentlyCreatedRef.current.get(id);
@@ -2514,6 +2660,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             pendingPatchesRef.current.set(id, {
               updates: currentPending.updates,
               expiresAt: Date.now() + 15000,
+              patchedAt: currentPending.patchedAt,
             });
           }
           return { ok: true };
@@ -2559,7 +2706,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         return { ok: false, error: networkError };
       }
     },
-    [isReadOnly, authFetch, normalizeConversationMeta]
+    [isReadOnly, authFetch, normalizeConversationMeta, user?.name, user?.role]
   );
 
   // Unread count is only cleared when a staff member replies (never on chat selection)

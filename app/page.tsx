@@ -25,6 +25,9 @@ import {
   Clock,
   UploadCloud,
   ChevronDown,
+  Archive,
+  ArchiveRestore,
+  RotateCcw,
 } from "lucide-react";
 import { useBranches } from "./lib/branches";
 import { BranchSelect } from "./components/BranchSelect";
@@ -33,11 +36,26 @@ import { renderWhatsAppText } from "./utils/messageFormatting";
 import { EmojiPicker, WHATSAPP_QUICK_REACTIONS, recordRecentEmoji } from "./components/EmojiPicker";
 import { formatMetaErrorMessage, ParsedMetaError } from "./utils/errorParser";
 import EditableLeadName from "./components/EditableLeadName";
+import { InboxBucketActions, type InboxBucketAction } from "./components/InboxBucketActions";
 import {
   buildLeadNamePatchUpdates,
   getEditableLeadDisplayName,
   hasAgentEditedLeadName,
 } from "./utils/leadName";
+import {
+  INBOX_FILTERS,
+  type InboxFilter,
+  isConvUnassigned,
+  isConversationArchived,
+  isConversationDone,
+  matchesInboxFilter,
+  getInboxBucketCounts,
+  getFilterBucketTotal,
+  buildMarkAsDonePatch,
+  buildReopenDonePatch,
+  buildArchivePatch,
+  buildUnarchivePatch,
+} from "./utils/inboxFilters";
 
 type Channel = "WA" | "IG" | "FB";
 
@@ -226,17 +244,6 @@ function formatShortIsoDate(isoDate: string): string {
   return dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
-export const isConvUnassigned = (agent?: string | null): boolean => {
-  if (!agent) return true;
-  const a = agent.trim().toLowerCase();
-  return a === "unassigned" || a === "";
-};
-
-export const isConvAssignedToUser = (agent?: string | null, userName?: string | null): boolean => {
-  if (!agent || !userName) return false;
-  return agent.trim().toLowerCase() === userName.trim().toLowerCase();
-};
-
 export const isUnassignedNewLead = (conv: any): boolean => {
   if (!isConvUnassigned(conv?.agent)) return false;
   if (conv?.status === "Resolved") return false;
@@ -248,8 +255,14 @@ export const isUnassignedNewLead = (conv: any): boolean => {
   return true;
 };
 
+type InboxToastState = {
+  type: "success" | "error";
+  message: string;
+  onUndo?: () => void;
+};
+
 export default function InboxPage() {
-  const [activeFilter, setActiveFilter] = useState("All");
+  const [activeFilter, setActiveFilter] = useState<InboxFilter>("All");
   const [datePreset, setDatePreset] = useState<DateFilterPreset>("ALL");
   const [customDateFrom, setCustomDateFrom] = useState<string>("");
   const [customDateTo, setCustomDateTo] = useState<string>("");
@@ -257,12 +270,13 @@ export default function InboxPage() {
   const datePopoverRef = useRef<HTMLDivElement | null>(null);
   const [mobileView, setMobileView] = useState<MobileView>("list");
   const [showDetailsPanel, setShowDetailsPanel] = useState(false);
+  const [inboxToast, setInboxToast] = useState<InboxToastState | null>(null);
   const { isReadOnly, user, token, authFetch } = useAuth();
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const chatScrollContainerRef = useRef<HTMLDivElement | null>(null);
 
-  const filters = ["All", "Mine", "Unassigned", "Open", "Resolved", "WA", "IG", "FB"];
+  const filters = INBOX_FILTERS;
 
   const {
     conversations,
@@ -316,18 +330,38 @@ export default function InboxPage() {
     };
   }, [showDatePopover]);
 
+  // Listen for CRMContext patch error toasts and auto-dismiss Inbox toasts
+  useEffect(() => {
+    const handleToastEvent = (event: Event) => {
+      const detail = (event as CustomEvent<{ type?: string; message?: string }>).detail;
+      if (!detail?.message) return;
+      setInboxToast({
+        type: detail.type === "error" ? "error" : "success",
+        message: detail.message,
+      });
+    };
+    window.addEventListener("crm:toast", handleToastEvent);
+    return () => window.removeEventListener("crm:toast", handleToastEvent);
+  }, []);
+
+  useEffect(() => {
+    if (!inboxToast) return;
+    const timer = window.setTimeout(() => setInboxToast(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [inboxToast]);
+
+  const bucketCounts = useMemo(() => getInboxBucketCounts(conversations), [conversations]);
+  const activeBucketTotal = useMemo(
+    () => getFilterBucketTotal(bucketCounts, activeFilter),
+    [bucketCounts, activeFilter]
+  );
+
   // ── Pre-date filter conversations (tab filter + search query) for live preset badge counts ──
   const tabAndSearchFilteredConvs = useMemo(() => {
     return conversations.filter((conv) => {
-      if (activeFilter === "Mine" && !isConvAssignedToUser(conv.agent, user?.name)) {
+      if (!matchesInboxFilter(conv, activeFilter, user?.name)) {
         return false;
       }
-      if (activeFilter === "Unassigned" && !isConvUnassigned(conv.agent)) return false;
-      if (activeFilter === "Open" && conv.status !== "Open") return false;
-      if (activeFilter === "Resolved" && conv.status !== "Resolved") return false;
-      if (activeFilter === "WA" && conv.channel !== "WA") return false;
-      if (activeFilter === "IG" && conv.channel !== "IG" && conv.metaChannel !== "IG") return false;
-      if (activeFilter === "FB" && conv.channel !== "FB" && conv.metaChannel !== "FB") return false;
 
       if (searchQuery.trim() && !matchLeadSearch(conv, searchQuery)) {
         return false;
@@ -335,6 +369,19 @@ export default function InboxPage() {
       return true;
     });
   }, [conversations, activeFilter, searchQuery, user?.name]);
+
+  const crossBucketSearchCounts = useMemo(() => {
+    const q = searchQuery.trim();
+    if (!q) return { done: 0, archived: 0 };
+    let done = 0;
+    let archived = 0;
+    for (const conv of conversations) {
+      if (!matchLeadSearch(conv, q)) continue;
+      if (isConversationArchived(conv)) archived += 1;
+      else if (isConversationDone(conv)) done += 1;
+    }
+    return { done, archived };
+  }, [conversations, searchQuery]);
 
   const dateBounds = useMemo(() => {
     const now = new Date();
@@ -962,6 +1009,67 @@ export default function InboxPage() {
     setMobileView("list");
   };
 
+  const applyInboxBucketChange = useCallback(
+    (
+      convId: string,
+      action: InboxBucketAction
+    ) => {
+      if (isReadOnly) return;
+      const target = conversations.find((c) => c.id === convId);
+      if (!target) return;
+
+      const prevState = {
+        isArchived: Boolean(target.isArchived),
+        archivedAt: target.archivedAt || null,
+        archivedBy: target.archivedBy || "",
+        isDone: Boolean(target.isDone),
+        doneAt: target.doneAt || null,
+        doneBy: target.doneBy || "",
+      };
+
+      const updates =
+        action === "done"
+          ? buildMarkAsDonePatch(user?.name)
+          : action === "reopen"
+          ? buildReopenDonePatch()
+          : action === "archive"
+          ? buildArchivePatch(user?.name)
+          : buildUnarchivePatch();
+
+      const nextSimulated = { ...target, ...updates };
+      if (
+        activeChatId === convId &&
+        !matchesInboxFilter(nextSimulated, activeFilter, user?.name)
+      ) {
+        setActiveChatId(null);
+        setShowDetailsPanel(false);
+        setMobileView("list");
+      }
+
+      patchConversation(convId, updates);
+
+      const displayLabel = target.leadName || target.name || "Conversation";
+      const toastMsg =
+        action === "done"
+          ? `${displayLabel} marked as done`
+          : action === "reopen"
+          ? `${displayLabel} moved back to Inbox`
+          : action === "archive"
+          ? `${displayLabel} archived`
+          : `${displayLabel} unarchived`;
+
+      setInboxToast({
+        type: "success",
+        message: toastMsg,
+        onUndo: () => {
+          patchConversation(convId, prevState);
+          setInboxToast(null);
+        },
+      });
+    },
+    [isReadOnly, conversations, user?.name, activeChatId, activeFilter, setActiveChatId, patchConversation]
+  );
+
   return (
     <div
       className="flex h-full overflow-hidden"
@@ -982,7 +1090,7 @@ export default function InboxPage() {
               Inbox
               <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full" style={{ background: "var(--bg-pill)", color: "var(--text-secondary)" }}>
                 {filteredConversations.length}
-                {(searchQuery.trim() || isDateFiltered) && ` of ${conversations.length}`}
+                {(searchQuery.trim() || isDateFiltered) && ` of ${activeBucketTotal}`}
               </span>
             </h1>
 
@@ -1175,19 +1283,42 @@ export default function InboxPage() {
           </div>
 
           {/* Filters */}
-          <div className="flex flex-wrap gap-1.5">
-            {filters.map((filter) => (
-              <button
-                key={filter}
-                onClick={() => setActiveFilter(filter)}
-                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full transition-colors ${
-                  activeFilter === filter ? "bg-[#0066FF] text-white" : ""
-                }`}
-                style={activeFilter !== filter ? { background: "var(--bg-pill)", color: "var(--text-secondary)" } : undefined}
-              >
-                {filter}
-              </button>
-            ))}
+          <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Inbox filters">
+            {filters.map((filter) => {
+              const isSelected = activeFilter === filter;
+              const pillCount =
+                filter === "DONE"
+                  ? bucketCounts.done
+                  : filter === "Archived"
+                  ? bucketCounts.archived
+                  : null;
+              return (
+                <button
+                  key={filter}
+                  type="button"
+                  role="tab"
+                  aria-selected={isSelected}
+                  onClick={() => setActiveFilter(filter)}
+                  className={`inline-flex items-center gap-1 text-[11px] sm:text-[10px] font-semibold px-2.5 sm:px-2 py-1.5 sm:py-0.5 min-h-[30px] sm:min-h-0 rounded-full transition-colors cursor-pointer ${
+                    isSelected ? "bg-[#0066FF] text-white" : "hover:opacity-90"
+                  }`}
+                  style={!isSelected ? { background: "var(--bg-pill)", color: "var(--text-secondary)" } : undefined}
+                >
+                  <span>{filter}</span>
+                  {pillCount !== null && pillCount > 0 && (
+                    <span
+                      className="text-[9px] font-bold px-1 rounded-full leading-tight"
+                      style={{
+                        background: isSelected ? "rgba(255,255,255,0.22)" : "var(--bg-card)",
+                        color: isSelected ? "#ffffff" : "var(--text-secondary)",
+                      }}
+                    >
+                      {pillCount}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -1195,19 +1326,63 @@ export default function InboxPage() {
           {filteredConversations.length === 0 ? (
             <div className="p-6 text-center">
               <div className="w-10 h-10 mx-auto mb-2 rounded-full flex items-center justify-center" style={{ background: "var(--bg-pill)" }}>
-                <Search className="w-5 h-5 opacity-40" style={{ color: "var(--text-secondary)" }} />
+                {activeFilter === "DONE" ? (
+                  <CheckCircle2 className="w-5 h-5 opacity-50" style={{ color: "var(--text-secondary)" }} />
+                ) : activeFilter === "Archived" ? (
+                  <Archive className="w-5 h-5 opacity-50" style={{ color: "var(--text-secondary)" }} />
+                ) : (
+                  <Search className="w-5 h-5 opacity-40" style={{ color: "var(--text-secondary)" }} />
+                )}
               </div>
               <p className="text-[13px] font-semibold" style={{ color: "var(--text-primary)" }}>
-                {searchQuery ? "No leads found" : "No conversations"}
+                {searchQuery
+                  ? "No leads found"
+                  : activeFilter === "DONE"
+                  ? "No done conversations"
+                  : activeFilter === "Archived"
+                  ? "No archived conversations"
+                  : "No conversations"}
               </p>
               <p className="text-[11px] mt-1 mb-3" style={{ color: "var(--text-secondary)" }}>
                 {searchQuery
-                  ? `No conversations match "${searchQuery}"`
+                  ? `No conversations match "${searchQuery}" in ${activeFilter}`
                   : isDateFiltered
                   ? `No conversations in ${activeFilter} for ${dateFilterDisplayLabel}`
+                  : activeFilter === "DONE"
+                  ? "Conversations you mark as done appear here and leave the main list."
+                  : activeFilter === "Archived"
+                  ? "Archived conversations appear here and stay muted until unarchived."
                   : `No conversations in ${activeFilter}`}
               </p>
               <div className="flex items-center justify-center gap-2 flex-wrap">
+                {searchQuery && activeFilter !== "DONE" && crossBucketSearchCounts.done > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveFilter("DONE")}
+                    className="text-[11px] font-semibold px-3 py-1.5 rounded-lg transition-opacity hover:opacity-90 cursor-pointer"
+                    style={{
+                      background: "var(--bg-pill)",
+                      border: "1px solid var(--border-input)",
+                      color: "var(--text-primary)",
+                    }}
+                  >
+                    Show in DONE ({crossBucketSearchCounts.done})
+                  </button>
+                )}
+                {searchQuery && activeFilter !== "Archived" && crossBucketSearchCounts.archived > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveFilter("Archived")}
+                    className="text-[11px] font-semibold px-3 py-1.5 rounded-lg transition-opacity hover:opacity-90 cursor-pointer"
+                    style={{
+                      background: "var(--bg-pill)",
+                      border: "1px solid var(--border-input)",
+                      color: "var(--text-primary)",
+                    }}
+                  >
+                    Show in Archived ({crossBucketSearchCounts.archived})
+                  </button>
+                )}
                 {searchQuery && (
                   <button
                     type="button"
@@ -1242,11 +1417,13 @@ export default function InboxPage() {
               const isActive = conv.id === activeChatId;
               const timeStr = formatLastMessageTime(conv.lastMessageAt);
               const showLeadTimer = Boolean(timeStr) && isLastMessageFromLead(conv);
+              const convDone = isConversationDone(conv);
+              const convArchived = isConversationArchived(conv);
               return (
                 <div
                   key={conv.id}
                   onClick={() => handleSelectConv(conv.id)}
-                  className="flex items-start justify-between p-3.5 cursor-pointer transition-colors"
+                  className="group flex items-start justify-between p-3.5 cursor-pointer transition-colors"
                   style={{
                     borderBottom: "1px solid var(--border-main)",
                     background: isActive ? "var(--bg-selected)" : undefined,
@@ -1265,15 +1442,55 @@ export default function InboxPage() {
                     </p>
                   </div>
                   <div className="flex flex-col items-end justify-between shrink-0 self-stretch gap-1">
-                    <span
-                      className="text-[9px] font-bold tracking-wide px-1.5 py-0.5 rounded"
-                      style={{
-                        background: isActive ? "var(--bg-card)" : "var(--bg-pill)",
-                        color: isActive ? "#0066FF" : "var(--text-secondary)",
-                      }}
-                    >
-                      {conv.metaChannel ? `${conv.channel} · ${conv.metaChannel}` : conv.channel}
-                    </span>
+                    <div className="flex items-center gap-1">
+                      {!isReadOnly && (
+                        <div className="hidden md:flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              applyInboxBucketChange(conv.id, convDone ? "reopen" : "done");
+                            }}
+                            aria-label={convDone ? `Reopen ${conv.name}` : `Mark ${conv.name} as done`}
+                            title={convDone ? "Reopen to Inbox" : "Mark as done"}
+                            className="p-1 rounded transition-colors cursor-pointer hover:bg-[var(--bg-hover)]"
+                            style={{ color: convDone ? "#34C759" : "var(--text-secondary)" }}
+                          >
+                            {convDone ? (
+                              <RotateCcw className="w-3.5 h-3.5" />
+                            ) : (
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              applyInboxBucketChange(conv.id, convArchived ? "unarchive" : "archive");
+                            }}
+                            aria-label={convArchived ? `Unarchive ${conv.name}` : `Archive ${conv.name}`}
+                            title={convArchived ? "Unarchive" : "Archive"}
+                            className="p-1 rounded transition-colors cursor-pointer hover:bg-[var(--bg-hover)]"
+                            style={{ color: "var(--text-secondary)" }}
+                          >
+                            {convArchived ? (
+                              <ArchiveRestore className="w-3.5 h-3.5" />
+                            ) : (
+                              <Archive className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </div>
+                      )}
+                      <span
+                        className="text-[9px] font-bold tracking-wide px-1.5 py-0.5 rounded"
+                        style={{
+                          background: isActive ? "var(--bg-card)" : "var(--bg-pill)",
+                          color: isActive ? "#0066FF" : "var(--text-secondary)",
+                        }}
+                      >
+                        {conv.metaChannel ? `${conv.channel} · ${conv.metaChannel}` : conv.channel}
+                      </span>
+                    </div>
                     <div className="flex items-center gap-1.5 mt-auto">
                       {timeStr && (
                         <span
@@ -1371,14 +1588,16 @@ export default function InboxPage() {
           <>
             {/* Chat Header */}
             <div
-              className="flex items-center justify-between px-4 md:px-6 py-3 gap-2 shrink-0"
+              className="flex flex-wrap items-center justify-between px-3 sm:px-4 md:px-6 py-2.5 sm:py-3 gap-2 shrink-0"
               style={{ background: "var(--bg-card)", borderBottom: "1px solid var(--border-main)" }}
             >
               {/* Mobile back button */}
-              <div className="flex items-center gap-2 min-w-0">
+              <div className="flex items-center gap-2 min-w-0 flex-1">
                 <button
+                  type="button"
                   onClick={handleBackToList}
-                  className="md:hidden p-1 -ml-1 shrink-0 rounded-md transition-colors"
+                  aria-label="Back to conversations"
+                  className="md:hidden min-w-[44px] min-h-[44px] flex items-center justify-center -ml-2 shrink-0 rounded-md transition-colors"
                   style={{ color: "var(--text-secondary)" }}
                 >
                   <ArrowLeft className="w-5 h-5" />
@@ -1422,7 +1641,7 @@ export default function InboxPage() {
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center flex-wrap gap-1.5 sm:gap-2 shrink-0">
                 {/* 1-click Quick "Assign to me" button for unassigned leads */}
                 {!isReadOnly && !isAssigned && (isAdmission || isChairman) && user?.name && (
                   <button
@@ -1436,7 +1655,7 @@ export default function InboxPage() {
                 )}
 
                 {/* Dropdowns — hidden on small mobile, shown on sm+ */}
-                <div className="hidden sm:flex items-center gap-2">
+                <div className="hidden sm:flex items-center gap-1.5">
                   <select
                     disabled={!canEditAgent}
                     title={
@@ -1482,9 +1701,10 @@ export default function InboxPage() {
                     )}
                   </select>
                   <select
+                    disabled={isReadOnly}
                     value={activeConv.status}
                     onChange={(e) => patchConversation(activeConv.id, { status: e.target.value })}
-                    className="rounded-[6px] text-[12px] py-1 px-2 outline-none"
+                    className="rounded-[6px] text-[12px] py-1 px-2 outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                     style={{ border: "1px solid var(--border-input)", color: "var(--text-primary)", background: "var(--bg-input)" }}
                   >
                     <option value="Open">Open</option>
@@ -1492,17 +1712,92 @@ export default function InboxPage() {
                     <option value="Resolved">Resolved</option>
                   </select>
                 </div>
-                {/* Details toggle button — mobile only */}
+
+                {/* Mark as Done & Archive actions (sm+) */}
+                {!isReadOnly && (
+                  <div className="hidden sm:flex items-center gap-1.5">
+                    <InboxBucketActions
+                      isDone={isConversationDone(activeConv)}
+                      isArchived={isConversationArchived(activeConv)}
+                      onAction={(action) => applyInboxBucketChange(activeConv.id, action)}
+                      variant="header"
+                    />
+                  </div>
+                )}
+
+                {/* Details toggle button — mobile & tablet */}
                 <button
+                  type="button"
                   onClick={() => setShowDetailsPanel(true)}
-                  className="lg:hidden p-1.5 rounded-md transition-colors"
+                  aria-label="Contact details"
+                  className="lg:hidden min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0 flex items-center justify-center p-1.5 rounded-md transition-colors"
                   style={{ color: "var(--text-secondary)", background: "var(--bg-pill)" }}
                   title="Contact details"
                 >
                   <Info className="w-4 h-4" />
                 </button>
               </div>
+
+              {/* Mobile Action Bar (labeled 44px touch targets) */}
+              {!isReadOnly && (
+                <div className="flex sm:hidden items-center gap-2 w-full pt-1">
+                  <InboxBucketActions
+                    isDone={isConversationDone(activeConv)}
+                    isArchived={isConversationArchived(activeConv)}
+                    onAction={(action) => applyInboxBucketChange(activeConv.id, action)}
+                    variant="mobile-bar"
+                  />
+                </div>
+              )}
             </div>
+
+            {/* Done / Archived State Strip */}
+            {(isConversationArchived(activeConv) || isConversationDone(activeConv)) && (
+              <div
+                className="px-4 md:px-6 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px] shrink-0"
+                style={{
+                  background: "var(--bg-panel)",
+                  borderBottom: "1px solid var(--border-main)",
+                  color: "var(--text-secondary)",
+                }}
+              >
+                <div className="flex items-center gap-1.5 min-w-0">
+                  {isConversationArchived(activeConv) ? (
+                    <>
+                      <Archive className="w-3.5 h-3.5 shrink-0" />
+                      <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
+                        Archived
+                      </span>
+                      {activeConv.archivedBy && <span>by {activeConv.archivedBy}</span>}
+                      <span>· Hidden from the main list and muted for new replies</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-[#34C759]" />
+                      <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
+                        Marked as done
+                      </span>
+                      {activeConv.doneBy && <span>by {activeConv.doneBy}</span>}
+                      <span>· Reopens on new customer reply</span>
+                    </>
+                  )}
+                </div>
+                {!isReadOnly && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      applyInboxBucketChange(
+                        activeConv.id,
+                        isConversationArchived(activeConv) ? "unarchive" : "reopen"
+                      )
+                    }
+                    className="text-[11px] font-semibold text-[#0066FF] hover:underline cursor-pointer shrink-0"
+                  >
+                    {isConversationArchived(activeConv) ? "Unarchive" : "Move back to Inbox"}
+                  </button>
+                )}
+              </div>
+            )}
 
             {/* Chat Messages */}
             <div
@@ -2455,6 +2750,55 @@ export default function InboxPage() {
             </div>
 
             <div className="mb-5">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase">Inbox Status</h3>
+                {isConversationArchived(activeConv) ? (
+                  <span
+                    className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                    style={{ background: "var(--bg-pill)", color: "var(--text-secondary)" }}
+                  >
+                    Archived
+                  </span>
+                ) : isConversationDone(activeConv) ? (
+                  <span
+                    className="text-[10px] font-semibold px-2 py-0.5 rounded-full text-[#34C759]"
+                    style={{ background: "var(--bg-pill)" }}
+                  >
+                    DONE
+                  </span>
+                ) : (
+                  <span
+                    className="text-[10px] font-medium"
+                    style={{ color: "var(--text-secondary)" }}
+                  >
+                    Active
+                  </span>
+                )}
+              </div>
+              {(isConversationArchived(activeConv) || isConversationDone(activeConv)) && (
+                <p className="text-[11px] mb-2" style={{ color: "var(--text-secondary)" }}>
+                  {isConversationArchived(activeConv)
+                    ? `Archived${activeConv.archivedBy ? ` by ${activeConv.archivedBy}` : ""}${
+                        activeConv.archivedAt ? ` · ${formatChatMessageTooltip(activeConv.archivedAt)}` : ""
+                      }`
+                    : `Marked as done${activeConv.doneBy ? ` by ${activeConv.doneBy}` : ""}${
+                        activeConv.doneAt ? ` · ${formatChatMessageTooltip(activeConv.doneAt)}` : ""
+                      }`}
+                </p>
+              )}
+              {!isReadOnly && (
+                <div className="flex items-center gap-2">
+                  <InboxBucketActions
+                    isDone={isConversationDone(activeConv)}
+                    isArchived={isConversationArchived(activeConv)}
+                    onAction={(action) => applyInboxBucketChange(activeConv.id, action)}
+                    variant="panel"
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="mb-5">
               <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Source</h3>
               {typeof activeConv.source !== "object" || !activeConv.source ? (
                 <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>{String(activeConv.source || "Direct / unknown")}</p>
@@ -3185,6 +3529,46 @@ export default function InboxPage() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+      {/* Inbox action & error toast */}
+      {inboxToast && (
+        <div
+          role={inboxToast.type === "error" ? "alert" : "status"}
+          className="fixed left-4 right-4 sm:left-auto sm:right-6 sm:max-w-sm z-[110] rounded-xl px-3.5 py-2.5 shadow-xl flex items-center gap-2.5 border"
+          style={{
+            bottom: "calc(env(safe-area-inset-bottom, 0px) + 1rem)",
+            background: "var(--bg-card)",
+            borderColor: inboxToast.type === "error" ? "rgba(239, 68, 68, 0.45)" : "var(--border-main)",
+            color: "var(--text-primary)",
+          }}
+        >
+          {inboxToast.type === "error" ? (
+            <AlertCircle className="w-4 h-4 shrink-0 text-[#FF3B30]" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 shrink-0 text-[#34C759]" />
+          )}
+          <span className="text-[12.5px] font-medium flex-1 leading-snug truncate">
+            {inboxToast.message}
+          </span>
+          {inboxToast.onUndo && (
+            <button
+              type="button"
+              onClick={inboxToast.onUndo}
+              className="min-h-[36px] sm:min-h-0 px-2 py-1 text-[12px] font-semibold text-[#0066FF] hover:underline cursor-pointer shrink-0"
+            >
+              Undo
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setInboxToast(null)}
+            aria-label="Dismiss notification"
+            className="min-w-[44px] min-h-[44px] sm:min-w-[28px] sm:min-h-[28px] -mr-1 rounded-lg flex items-center justify-center hover:opacity-75 cursor-pointer shrink-0"
+            style={{ color: "var(--text-muted)" }}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
     </div>
