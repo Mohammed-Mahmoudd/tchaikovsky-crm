@@ -8,6 +8,7 @@ export const CRM_CONVERSATION_CACHE_KEYS = [
 export const CRM_STATIC_LOCAL_STORAGE_KEYS = [
   ...CRM_CONVERSATION_CACHE_KEYS,
   "crm_branches_cache",
+  "crm_labels_cache_v1",
   "tchaikovsky_quick_replies_v1",
 ] as const;
 

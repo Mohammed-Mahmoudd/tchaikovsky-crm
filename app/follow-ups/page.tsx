@@ -3,6 +3,7 @@
 import React, { useMemo, useState, useCallback } from 'react';
 import { useCRM } from '../context/CRMContext';
 import { useAuth } from '../components/AuthProvider';
+import { buildLabelNameMap, normalizeSearchText } from '../utils/search';
 import {
   MessageSquare,
   Calendar,
@@ -28,6 +29,7 @@ type Item = {
   branch?: string;
   auditionOutcome?: string;
   followUpTags?: string[];
+  labels?: string[];
   pipeline?: string;
   completed: boolean;
   completedAt?: string;
@@ -89,7 +91,8 @@ function getWhatsAppUrl(phone?: string) {
 }
 
 export default function FollowUpsPage() {
-  const { conversations, loading, patchConversation, openChat } = useCRM();
+  const { conversations, labels, loading, patchConversation, openChat } = useCRM();
+  const labelNameMap = useMemo(() => buildLabelNameMap(labels), [labels]);
   const { isReadOnly } = useAuth();
   const [filter, setFilter] = useState<FilterMode>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -128,6 +131,7 @@ export default function FollowUpsPage() {
           branch: c.branch || '',
           auditionOutcome: isJL ? 'joining-later' : (c.auditionOutcome || ''),
           followUpTags: c.followUpTags || [],
+          labels: c.labels || [],
           pipeline: c.pipeline || '',
           completed: Boolean(c.followUpCompleted),
           completedAt: c.followUpCompletedAt || '',
@@ -250,19 +254,26 @@ export default function FollowUpsPage() {
       // 2. Client-side search query
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
+        const qNorm = normalizeSearchText(searchQuery);
         const matchName = i.name.toLowerCase().includes(q);
         const matchPhone = (i.phone || '').toLowerCase().includes(q);
         const matchText = i.text.toLowerCase().includes(q);
         const matchBranch = (i.branch || '').toLowerCase().includes(q);
         const matchTags = (i.followUpTags || []).some((t) => t.toLowerCase().includes(q));
-        if (!matchName && !matchPhone && !matchText && !matchBranch && !matchTags) {
+        const matchLabels =
+          Boolean(qNorm) &&
+          (i.labels || []).some((labelId) => {
+            const labelName = labelNameMap.get(labelId);
+            return Boolean(labelName && normalizeSearchText(labelName).includes(qNorm));
+          });
+        if (!matchName && !matchPhone && !matchText && !matchBranch && !matchTags && !matchLabels) {
           return false;
         }
       }
 
       return true;
     },
-    [filter, searchQuery, today]
+    [filter, searchQuery, today, labelNameMap]
   );
 
   // Sort: active pending items first, ended items after; sorted by date within each group
@@ -330,7 +341,8 @@ export default function FollowUpsPage() {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search name, phone, notes..."
+              placeholder="Search name, phone, label, notes..."
+              aria-label="Search follow-ups by name, phone, label, or notes"
               className="w-full pl-8 pr-7 py-1.5 text-[11px] rounded-lg outline-none transition-colors border"
               style={{
                 background: 'var(--bg-page)',

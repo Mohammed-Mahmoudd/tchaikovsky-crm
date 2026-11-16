@@ -12,7 +12,7 @@ import {
 import { useAuth, isDirectorOrChairmanRole, isAdmissionRole } from "../components/AuthProvider";
 import { useBranches } from "../lib/branches";
 import { BranchSelect } from "../components/BranchSelect";
-import { matchLeadSearch } from "../utils/search";
+import { buildLabelNameMap, matchLeadSearch } from "../utils/search";
 import {
   MessageSquare,
   Plus,
@@ -73,6 +73,7 @@ type Lead = {
   stage: string;
   agent: string;
   channel: string;
+  labels?: string[];
 };
 
 const PAGE_SIZE = 50;
@@ -938,6 +939,7 @@ const AddManualLeadModal = memo(function AddManualLeadModal({
 export default function LeadsPage() {
   const {
     conversations,
+    labels,
     loading,
     openChat,
     assignableAgents,
@@ -946,6 +948,7 @@ export default function LeadsPage() {
     searchQuery,
     setSearchQuery,
   } = useCRM();
+  const labelNameMap = useMemo(() => buildLabelNameMap(labels), [labels]);
   const { isReadOnly, user } = useAuth();
 
   const isChairman = isDirectorOrChairmanRole(user?.role);
@@ -1007,6 +1010,7 @@ export default function LeadsPage() {
       stage: c.pipeline || "New",
       agent: c.agent || "Unassigned",
       channel: c.channel || "—",
+      labels: c.labels || [],
     }));
   }, [conversations]);
 
@@ -1054,10 +1058,10 @@ export default function LeadsPage() {
     return leads.filter((l) => {
       if (filterStage !== "All" && l.stage !== filterStage) return false;
       if (filterCampaign !== "All campaigns" && l.campaign !== filterCampaign) return false;
-      if (effectiveSearch && !matchLeadSearch(l, effectiveSearch)) return false;
+      if (effectiveSearch && !matchLeadSearch(l, effectiveSearch, labelNameMap)) return false;
       return true;
     });
-  }, [leads, filterStage, filterCampaign, effectiveSearch]);
+  }, [leads, filterStage, filterCampaign, effectiveSearch, labelNameMap]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(currentPage, totalPages);
@@ -1151,8 +1155,8 @@ export default function LeadsPage() {
               type="text"
               value={localSearch}
               onChange={(e) => setLocalSearch(e.target.value)}
-              placeholder="Filter name or phone…"
-              aria-label="Filter leads by name or phone"
+              placeholder="Filter name, phone, or label…"
+              aria-label="Filter leads by name, phone, or label"
               className="flex-1 w-full h-full px-1.5 text-[12px] bg-transparent outline-none"
               style={{ color: "var(--text-primary)" }}
             />

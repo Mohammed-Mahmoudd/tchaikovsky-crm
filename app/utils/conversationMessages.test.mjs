@@ -1,10 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildConfirmedReplyMessages,
   computeUnreadFromMessages,
   getLastRealMessageDirection,
   isAutomatedTemplateMsg,
   isLastMessageFromLead,
+  isRealSenderName,
+  mergeExistingMessageFromSse,
+  resolvePreferredSenderName,
 } from "./conversationMessages.ts";
 
 describe("conversationMessages", () => {
@@ -100,6 +104,76 @@ describe("conversationMessages", () => {
       }),
       false
     );
+  });
+
+  it("preserves real agent senderName across confirmed attachments and SSE merges", () => {
+    assert.equal(isRealSenderName("Mariam"), true);
+    assert.equal(isRealSenderName("Staff"), false);
+    assert.equal(isRealSenderName(undefined), false);
+
+    assert.equal(resolvePreferredSenderName("Staff", "Mariam"), "Mariam");
+    assert.equal(resolvePreferredSenderName("Mariam", "Staff"), "Mariam");
+    assert.equal(resolvePreferredSenderName(undefined, "Staff"), "Staff");
+
+    // Attachment response without per-item senderName inherits top-level json.senderName / fallback user name
+    const attachmentConfirmed = buildConfirmedReplyMessages(
+      {
+        senderName: "Sara",
+        messages: [
+          { message_id: "m_1", text: "Photo", attachments: [{ type: "image" }], timestamp: 100 },
+          { message_id: "m_2", text: "Here is the schedule", attachments: [], timestamp: 101 },
+        ],
+      },
+      "Here is the schedule",
+      "FallbackUser"
+    );
+    assert.deepEqual(
+      attachmentConfirmed?.map((m) => m.senderName),
+      ["Sara", "Sara"]
+    );
+
+    // Single text reply response inherits fallback user name if senderName omitted
+    const textConfirmed = buildConfirmedReplyMessages(
+      { data: { message_id: "m_3", timestamp: 200 } },
+      " Hello ",
+      "Omar"
+    );
+    assert.equal(textConfirmed?.[0]?.senderName, "Omar");
+    assert.equal(textConfirmed?.[0]?.text, "Hello");
+
+    // SSE merge never downgrades real senderName, status, or reactions
+    const merged = mergeExistingMessageFromSse(
+      {
+        id: "wamid.1",
+        text: "Hello",
+        attachments: [{ type: "image", url: "/api/messages/media/a.jpg" }],
+        time: "10:00 AM",
+        timestamp: 1000,
+        isIncoming: false,
+        status: "read",
+        seenAt: 1100,
+        isRead: true,
+        senderName: "Sara",
+        reactions: [{ emoji: "👍", fromMe: false }],
+      },
+      {
+        id: "wamid.1",
+        text: "Hello",
+        attachments: [],
+        time: "10:00 AM",
+        timestamp: 1000,
+        isIncoming: false,
+        status: "sent",
+        senderName: "Staff",
+        reactions: [],
+      }
+    );
+    assert.equal(merged.senderName, "Sara");
+    assert.equal(merged.status, "read");
+    assert.equal(merged.isRead, true);
+    assert.equal(merged.seenAt, 1100);
+    assert.equal(merged.attachments?.length, 1);
+    assert.equal(merged.reactions?.length, 1);
   });
 });
 

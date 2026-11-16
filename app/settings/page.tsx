@@ -1,10 +1,10 @@
 "use client";
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { useAuth, Role, ROLE_OPTIONS, getRoleDisplayName, normalizeRole, canManageTeamRole } from "../components/AuthProvider";
+import { useAuth, Role, ROLE_OPTIONS, getRoleDisplayName, normalizeRole, canManageTeamRole, canAccessRoute } from "../components/AuthProvider";
 import { useCRM } from "../context/CRMContext";
 import { useBranches } from "../lib/branches";
-import { ChevronDown, Check, Trash2, Search, X, AlertTriangle } from "lucide-react";
+import { ChevronDown, Check, Trash2, Search, X, AlertTriangle, Bell, BellOff } from "lucide-react";
 
 interface TeamMember {
   id: string;
@@ -43,6 +43,45 @@ function resizeImageToAvatar(file: File, maxWidth = 256, maxHeight = 256): Promi
     };
     reader.readAsDataURL(file);
   });
+}
+
+function NotificationSwitch({
+  checked,
+  disabled = false,
+  labelledBy,
+  onToggle,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  labelledBy: string;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-labelledby={labelledBy}
+      disabled={disabled}
+      onClick={onToggle}
+      className={`inline-flex items-center justify-center min-w-[44px] min-h-[44px] -my-2 -mr-1.5 shrink-0 rounded-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--bg-banner)] ${
+        disabled ? "opacity-45 cursor-not-allowed" : "cursor-pointer"
+      }`}
+    >
+      <span
+        className="relative w-11 h-6 rounded-full transition-colors duration-150 block"
+        style={{
+          background: checked ? "var(--bg-banner)" : "var(--bg-column)",
+          border: `1px solid ${checked ? "var(--bg-banner)" : "var(--border-input)"}`,
+        }}
+      >
+        <span
+          className="absolute top-[2px] left-[2px] w-[18px] h-[18px] rounded-full bg-white shadow-sm transition-transform duration-150"
+          style={{ transform: checked ? "translateX(20px)" : "translateX(0)" }}
+        />
+      </span>
+    </button>
+  );
 }
 
 export default function SettingsPage() {
@@ -112,7 +151,72 @@ export default function SettingsPage() {
   const [newBranchRegion, setNewBranchRegion] = useState("");
   const [addingBranch, setAddingBranch] = useState(false);
   const [branchStatus, setBranchStatus] = useState<{ ok: boolean; msg: string } | null>(null);
-  const { conversations, refresh: refreshConversations } = useCRM();
+  const {
+    conversations,
+    refresh: refreshConversations,
+    pushSupported,
+    pushEnabled,
+    pushPermission,
+    pushBusy,
+    toggleDevicePush,
+    testDevicePush,
+  } = useCRM();
+  const canUseInboxNotifications = canAccessRoute(user?.role, "/");
+  const [pushStatus, setPushStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+  const pushStatusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (pushStatusTimerRef.current) {
+        clearTimeout(pushStatusTimerRef.current);
+      }
+    };
+  }, []);
+
+  const showTimedPushStatus = (status: { ok: boolean; msg: string }) => {
+    if (pushStatusTimerRef.current) {
+      clearTimeout(pushStatusTimerRef.current);
+      pushStatusTimerRef.current = null;
+    }
+    setPushStatus(status);
+    pushStatusTimerRef.current = setTimeout(() => {
+      setPushStatus(null);
+      pushStatusTimerRef.current = null;
+    }, 4500);
+  };
+
+  const handleToggleDevicePush = async () => {
+    const wasEnabled = pushEnabled;
+    const res = await toggleDevicePush();
+    if (!res.ok) {
+      showTimedPushStatus({
+        ok: false,
+        msg: res.error || "Unable to update notification permission.",
+      });
+      return;
+    }
+    showTimedPushStatus({
+      ok: true,
+      msg: wasEnabled
+        ? "Notifications turned off for this browser."
+        : "Notifications enabled using your device's default sound.",
+    });
+  };
+
+  const handleTestDevicePush = async () => {
+    const res = await testDevicePush();
+    if (!res.ok) {
+      showTimedPushStatus({
+        ok: false,
+        msg: res.error || "Unable to deliver test notification.",
+      });
+      return;
+    }
+    showTimedPushStatus({
+      ok: true,
+      msg: "Test notification sent.",
+    });
+  };
 
   const getAssignedLeadCount = (memberName: string): number => {
     const clean = memberName.trim().toLowerCase();
@@ -1007,6 +1111,138 @@ export default function SettingsPage() {
           )}
         </div>
       </div>
+
+      {/* Notifications Card */}
+      {canUseInboxNotifications && (
+        <div
+          className="rounded-xl p-5 mb-5"
+          style={{
+            background: "var(--bg-card)",
+            border: "1px solid var(--border-main)",
+            boxShadow: "var(--shadow-card)",
+          }}
+        >
+          <div className="flex items-start justify-between gap-3 sm:gap-4">
+            <div className="flex items-start gap-3 min-w-0 flex-1">
+              <div
+                className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 mt-0.5 transition-colors"
+                style={
+                  pushEnabled
+                    ? {
+                        background: "var(--bg-banner)",
+                        border: "1px solid var(--bg-banner)",
+                        color: "#ffffff",
+                      }
+                    : {
+                        background: "var(--bg-pill)",
+                        border: "1px solid var(--border-main)",
+                        color: "var(--text-muted)",
+                      }
+                }
+              >
+                {pushEnabled ? <Bell className="w-4 h-4" /> : <BellOff className="w-4 h-4" />}
+              </div>
+
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2
+                    id="device-push-heading"
+                    className="text-[13px] font-semibold"
+                    style={{ color: "var(--text-primary)" }}
+                  >
+                    New message notifications
+                  </h2>
+                  <span
+                    className="px-1.5 py-0.5 text-[10px] font-semibold rounded-md"
+                    style={
+                      pushEnabled
+                        ? {
+                            background: "var(--bg-selected)",
+                            border: "1px solid var(--border-main)",
+                            color: "var(--text-primary)",
+                          }
+                        : {
+                            background: "var(--bg-pill)",
+                            border: "1px solid var(--border-main)",
+                            color: "var(--text-secondary)",
+                          }
+                    }
+                  >
+                    {!pushSupported
+                      ? "Unavailable"
+                      : pushPermission === "denied"
+                      ? "Blocked"
+                      : pushEnabled
+                      ? "Enabled"
+                      : "Off"}
+                  </span>
+                </div>
+                <p className="text-[11px] mt-1 leading-relaxed max-w-xl" style={{ color: "var(--text-secondary)" }}>
+                  Shows a device notification with your system&apos;s default sound whenever any lead sends a new message, whether the CRM tab is open, minimized, or closed. Click a notification to open that conversation.
+                </p>
+              </div>
+            </div>
+
+            <NotificationSwitch
+              checked={pushEnabled}
+              disabled={!pushSupported || pushBusy || pushPermission === "denied"}
+              labelledBy="device-push-heading"
+              onToggle={() => {
+                void handleToggleDevicePush();
+              }}
+            />
+          </div>
+
+          <div
+            className="mt-4 pt-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+            style={{ borderTop: "1px solid var(--border-main)" }}
+          >
+            <p
+              role="status"
+              aria-live="polite"
+              className="text-[11px]"
+              style={{
+                color: pushStatus
+                  ? pushStatus.ok
+                    ? "var(--text-primary)"
+                    : "#FF3B30"
+                  : pushPermission === "denied"
+                  ? "#FF3B30"
+                  : "var(--text-muted)",
+              }}
+            >
+              {pushStatus
+                ? pushStatus.msg
+                : !pushSupported
+                ? "Requires HTTPS and a browser that supports Web Push."
+                : pushPermission === "denied"
+                ? "Blocked in browser site settings. Allow notifications for this site and reload to enable."
+                : "Uses your device default notification sound. Cleared automatically on sign out."}
+            </p>
+
+            <button
+              type="button"
+              disabled={!pushSupported || pushBusy || pushPermission === "denied"}
+              onClick={() => {
+                void handleTestDevicePush();
+              }}
+              className={`inline-flex items-center justify-center gap-1.5 w-full sm:w-auto min-h-[44px] sm:min-h-[28px] px-3 text-[12px] font-medium rounded-[6px] transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--bg-banner)] ${
+                !pushSupported || pushBusy || pushPermission === "denied"
+                  ? "opacity-45 cursor-not-allowed"
+                  : "cursor-pointer hover:bg-[var(--bg-hover)]"
+              }`}
+              style={{
+                background: "var(--bg-card)",
+                border: "1px solid var(--border-main)",
+                color: "var(--text-primary)",
+              }}
+            >
+              <Bell className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--text-secondary)" }} />
+              {pushBusy ? "Working…" : "Test notification"}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Team Card */}
       <div

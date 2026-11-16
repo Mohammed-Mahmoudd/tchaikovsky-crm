@@ -2,12 +2,15 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { useAuth, isAssignableRole, type LogoutReason } from "../components/AuthProvider";
+import { useAuth, isAssignableRole, canAccessRoute, type LogoutReason } from "../components/AuthProvider";
 import { formatMetaErrorMessage } from "../utils/errorParser";
 import {
   computeUnreadFromMessages,
   getLastRealMessageDirection,
   isLastMessageFromLead,
+  isRealSenderName,
+  mergeExistingMessageFromSse,
+  resolvePreferredSenderName,
 } from "../utils/conversationMessages";
 import {
   hasAgentEditedLeadName,
@@ -15,8 +18,35 @@ import {
   resolveConversationLeadNames,
 } from "../utils/leadName";
 import { computeInboxUnreadBadge } from "../utils/inboxFilters";
+import {
+  type LeadLabel,
+  type LeadLabelColor,
+  LABELS_CACHE_KEY,
+  areStringArraysEqual,
+  normalizeConversationLabelIds,
+  normalizeLeadLabelCatalog,
+} from "../utils/leadLabels";
+import {
+  type BrowserNotificationPermission,
+  type EnablePushResult,
+  type TestPushResult,
+  PUSH_PREF_KEY,
+  disableDevicePushNotifications,
+  enableDevicePushNotifications,
+  getBrowserNotificationPermission,
+  isPushSupported,
+  readPushOptInPreference,
+  sendTestDevicePush,
+  syncActivePushSubscription,
+} from "../utils/pushNotifications";
 
-export { computeUnreadFromMessages, getLastRealMessageDirection, isLastMessageFromLead };
+export {
+  computeUnreadFromMessages,
+  getLastRealMessageDirection,
+  isLastMessageFromLead,
+  type LeadLabel,
+  type LeadLabelColor,
+};
 
 export type Channel = "WA" | "IG" | "FB";
 
@@ -117,6 +147,7 @@ export type Conversation = {
   branch?: string;
   auditionOutcome?: string;
   followUpTags?: string[];
+  labels?: string[];
   activityLog?: ActivityLogEntry[];
   messages: Message[];
   createdAt?: string;
@@ -216,6 +247,18 @@ type CRMContextType = {
   badgeCounts: BadgeCounts;
   assignableAgents: AssignableAgent[];
   teamMembers: AssignableAgent[];
+  labels: LeadLabel[];
+  labelsLoading: boolean;
+  createLabel: (input: {
+    name: string;
+    color: LeadLabelColor;
+  }) => Promise<{ ok: boolean; label?: LeadLabel; error?: string }>;
+  updateLabel: (
+    id: string,
+    updates: { name?: string; color?: LeadLabelColor }
+  ) => Promise<{ ok: boolean; label?: LeadLabel; error?: string }>;
+  deleteLabel: (id: string) => Promise<{ ok: boolean; error?: string }>;
+  refreshLabels: () => Promise<void>;
   activeChatId: string | null;
   setActiveChatId: (id: string | null) => void;
   openChat: (id: string) => void;
@@ -238,6 +281,14 @@ type CRMContextType = {
   addOptimisticMessages: (chatId: string, msgs: Message[]) => void;
   finalizeOptimisticMessages: (chatId: string, tempIds: string[], confirmedRawMessages?: any[]) => void;
   fetchChatMessages: (chatId: string) => Promise<void>;
+  pushSupported: boolean;
+  pushEnabled: boolean;
+  pushPermission: BrowserNotificationPermission;
+  pushBusy: boolean;
+  enableDevicePush: () => Promise<EnablePushResult>;
+  disableDevicePush: () => Promise<void>;
+  toggleDevicePush: () => Promise<EnablePushResult | { ok: true }>;
+  testDevicePush: () => Promise<TestPushResult>;
 };
 
 const CRMContext = createContext<CRMContextType | undefined>(undefined);
@@ -393,6 +444,7 @@ function slimConversationsForStorage(convs: Conversation[], limit?: number): Con
     if (c.enrolledBy) item.enrolledBy = c.enrolledBy;
     if (c.auditionOutcome) item.auditionOutcome = c.auditionOutcome;
     if (c.followUpTags && c.followUpTags.length > 0) item.followUpTags = c.followUpTags;
+    if (c.labels && c.labels.length > 0) item.labels = c.labels;
     if (c.branch) item.branch = c.branch;
     if (c.formAnswers && Object.keys(c.formAnswers).length > 0) item.formAnswers = c.formAnswers;
     if (c.cashIn) item.cashIn = c.cashIn;
@@ -505,6 +557,24 @@ if (typeof window !== "undefined") {
   window.addEventListener("pagehide", flushCacheSnapshotSync);
 }
 
+function getCachedLabels(): LeadLabel[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(LABELS_CACHE_KEY);
+    if (!raw) return [];
+    return normalizeLeadLabelCatalog(JSON.parse(raw));
+  } catch {
+    return [];
+  }
+}
+
+function persistLabelsCache(nextLabels: LeadLabel[]) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(LABELS_CACHE_KEY, JSON.stringify(nextLabels));
+  } catch {}
+}
+
 const UTC_ISO_DATETIME_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|1\d|2[0-8])T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d{1,3})?Z$/;
 
 function safeDateIso(val: any): string {
@@ -579,13 +649,139 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [assignableAgents, setAssignableAgents] = useState<AssignableAgent[]>([]);
   const [teamMembers, setTeamMembers] = useState<AssignableAgent[]>([]);
+  const [labels, setLabels] = useState<LeadLabel[]>(() => getCachedLabels());
+  const [labelsLoading, setLabelsLoading] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>("");
+  const [pushSupported, setPushSupported] = useState<boolean>(false);
+  const [pushEnabled, setPushEnabled] = useState<boolean>(false);
+  const [pushPermission, setPushPermission] = useState<BrowserNotificationPermission>("default");
+  const [pushBusy, setPushBusy] = useState<boolean>(false);
 
   // ── Refs for stable closures (never cause re-creation of callbacks) ──
   const activeChatIdRef = useRef<string | null>(null);
   const conversationsRef = useRef<Conversation[]>(conversations);
   conversationsRef.current = conversations;
   const initialLoadDone = useRef(false);
+  const pushEndpointRef = useRef<string | null>(null);
+
+  // Sync device push notification preference across browser storage & tabs
+  useEffect(() => {
+    let cancelled = false;
+    const supported = isPushSupported();
+    const perm = getBrowserNotificationPermission();
+    const optIn = readPushOptInPreference();
+    queueMicrotask(() => {
+      if (!cancelled) {
+        setPushSupported(supported);
+        setPushPermission(perm);
+        setPushEnabled(supported && perm === "granted" && optIn);
+      }
+    });
+
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key !== PUSH_PREF_KEY) return;
+      const nextPerm = getBrowserNotificationPermission();
+      const nextOptIn = readPushOptInPreference();
+      const active = isPushSupported() && nextPerm === "granted" && nextOptIn;
+      setPushPermission(nextPerm);
+      setPushEnabled(active);
+    };
+
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, []);
+
+  const canUseInboxPush = Boolean(token && canAccessRoute(user?.role, "/"));
+
+  // Sync existing Web Push subscription for signed-in Inbox-authorized staff
+  useEffect(() => {
+    if (!canUseInboxPush || typeof window === "undefined") {
+      pushEndpointRef.current = null;
+      return;
+    }
+
+    let cancelled = false;
+
+    syncActivePushSubscription(authFetch).then((endpoint) => {
+      if (cancelled) return;
+      const perm = getBrowserNotificationPermission();
+      setPushPermission(perm);
+      if (endpoint) {
+        pushEndpointRef.current = endpoint;
+        setPushEnabled(true);
+      } else {
+        pushEndpointRef.current = null;
+        setPushEnabled(false);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [canUseInboxPush, authFetch]);
+
+  const enableDevicePush = useCallback(async (): Promise<EnablePushResult> => {
+    setPushBusy(true);
+    try {
+      const res = await enableDevicePushNotifications(authFetch);
+      setPushPermission(res.permission);
+      if (res.ok && res.endpoint) {
+        pushEndpointRef.current = res.endpoint;
+        setPushEnabled(true);
+      } else if (res.permission === "denied") {
+        setPushEnabled(false);
+      }
+      return res;
+    } finally {
+      setPushBusy(false);
+    }
+  }, [authFetch]);
+
+  const disableDevicePush = useCallback(async (): Promise<void> => {
+    setPushBusy(true);
+    try {
+      await disableDevicePushNotifications(authFetch);
+      pushEndpointRef.current = null;
+      setPushEnabled(false);
+      setPushPermission(getBrowserNotificationPermission());
+    } finally {
+      setPushBusy(false);
+    }
+  }, [authFetch]);
+
+  const toggleDevicePush = useCallback(async (): Promise<EnablePushResult | { ok: true }> => {
+    if (pushEnabled) {
+      await disableDevicePush();
+      return { ok: true };
+    }
+    return enableDevicePush();
+  }, [pushEnabled, disableDevicePush, enableDevicePush]);
+
+  const testDevicePush = useCallback(async (): Promise<TestPushResult> => {
+    setPushBusy(true);
+    try {
+      let endpoint = pushEndpointRef.current;
+      if (!endpoint) {
+        const enableRes = await enableDevicePushNotifications(authFetch);
+        setPushPermission(enableRes.permission);
+        if (!enableRes.ok || !enableRes.endpoint) {
+          return {
+            ok: false,
+            error: enableRes.error || "Enable device notifications before running a test.",
+          };
+        }
+        endpoint = enableRes.endpoint;
+        pushEndpointRef.current = endpoint;
+        setPushEnabled(true);
+      }
+      return await sendTestDevicePush(authFetch, endpoint);
+    } finally {
+      setPushBusy(false);
+    }
+  }, [authFetch]);
 
   // Keep the ref in sync with state
   useEffect(() => {
@@ -714,6 +910,163 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     fetchAgents();
   }, [fetchAgents]);
 
+  const fetchLabels = useCallback(async () => {
+    if (!token) return;
+    setLabelsLoading(true);
+    try {
+      let res = await authFetch(`${API}/labels`, { cache: "no-store" }).catch(() => null);
+      if (!res || (!res.ok && res.status !== 401 && res.status !== 403 && res.status !== 404)) {
+        res = await authFetch(`${DIRECT_API}/labels`, { cache: "no-store" }).catch(() => null);
+      }
+      if (!res || !res.ok) return;
+      const json = await res.json().catch(() => null);
+      if (json?.success && Array.isArray(json.data)) {
+        const normalized = normalizeLeadLabelCatalog(json.data);
+        setLabels(normalized);
+        persistLabelsCache(normalized);
+      }
+    } catch (e) {
+      console.warn("Failed to load lead labels:", e);
+    } finally {
+      setLabelsLoading(false);
+    }
+  }, [token, authFetch]);
+
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) {
+        void fetchLabels();
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, fetchLabels]);
+
+  const createLabel = useCallback(
+    async (input: { name: string; color: LeadLabelColor }): Promise<{ ok: boolean; label?: LeadLabel; error?: string }> => {
+      if (isReadOnly) {
+        return { ok: false, error: "View-only account: modifications are disabled." };
+      }
+      try {
+        const res = await authFetch(`${API}/labels`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success || !json?.data) {
+          return { ok: false, error: json?.error || "Could not create label. Please try again." };
+        }
+        const normalizedList = normalizeLeadLabelCatalog([json.data]);
+        const created = normalizedList[0];
+        if (!created) {
+          return { ok: false, error: "Invalid label response from server." };
+        }
+        setLabels((prev) => {
+          const next = prev.some((l) => l.id === created.id)
+            ? prev.map((l) => (l.id === created.id ? created : l))
+            : [...prev, created];
+          persistLabelsCache(next);
+          return next;
+        });
+        return { ok: true, label: created };
+      } catch {
+        return { ok: false, error: "Network error while creating label. Please try again." };
+      }
+    },
+    [isReadOnly, authFetch]
+  );
+
+  const updateLabel = useCallback(
+    async (
+      id: string,
+      updates: { name?: string; color?: LeadLabelColor }
+    ): Promise<{ ok: boolean; label?: LeadLabel; error?: string }> => {
+      if (isReadOnly) {
+        return { ok: false, error: "View-only account: modifications are disabled." };
+      }
+      try {
+        const res = await authFetch(`${API}/labels/${encodeURIComponent(id)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updates),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success || !json?.data) {
+          return { ok: false, error: json?.error || "Could not update label. Please try again." };
+        }
+        const normalizedList = normalizeLeadLabelCatalog([json.data]);
+        const updated = normalizedList[0];
+        if (!updated) {
+          return { ok: false, error: "Invalid label response from server." };
+        }
+        setLabels((prev) => {
+          const next = prev.map((l) => (l.id === id ? updated : l));
+          persistLabelsCache(next);
+          return next;
+        });
+        return { ok: true, label: updated };
+      } catch {
+        return { ok: false, error: "Network error while updating label. Please try again." };
+      }
+    },
+    [isReadOnly, authFetch]
+  );
+
+  const deleteLabel = useCallback(
+    async (id: string): Promise<{ ok: boolean; error?: string }> => {
+      if (isReadOnly) {
+        return { ok: false, error: "View-only account: modifications are disabled." };
+      }
+      try {
+        const res = await authFetch(`${API}/labels/${encodeURIComponent(id)}`, {
+          method: "DELETE",
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          return { ok: false, error: json?.error || "Could not delete label. Please try again." };
+        }
+        setLabels((prev) => {
+          const next = prev.filter((l) => l.id !== id);
+          persistLabelsCache(next);
+          return next;
+        });
+        // Immediately drop the deleted label ID from cached/in-memory conversations
+        for (const [cId, pending] of pendingPatchesRef.current.entries()) {
+          if (Array.isArray(pending.updates.labels) && pending.updates.labels.includes(id)) {
+            pendingPatchesRef.current.set(cId, {
+              ...pending,
+              updates: {
+                ...pending.updates,
+                labels: pending.updates.labels.filter((lId: string) => lId !== id),
+              },
+            });
+          }
+        }
+        setConversations((prev) => {
+          let changed = false;
+          const next = prev.map((c) => {
+            if (!Array.isArray(c.labels) || !c.labels.includes(id)) return c;
+            changed = true;
+            return { ...c, labels: c.labels.filter((lId) => lId !== id) };
+          });
+          if (changed) {
+            persistConversationsCache(next);
+            return next;
+          }
+          return prev;
+        });
+        return { ok: true };
+      } catch {
+        return { ok: false, error: "Network error while deleting label. Please try again." };
+      }
+    },
+    [isReadOnly, authFetch]
+  );
+
   // ── Messages cache: lives outside React state so slim polls never touch it ──
   const messagesCacheRef = useRef<Map<string, Message[]>>(new Map());
 
@@ -783,6 +1136,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       enrolledBy: c.enrolledBy || (typeof c.source === "object" && c.source?.enrolledBy ? String(c.source.enrolledBy) : undefined),
       auditionOutcome: c.auditionOutcome || "",
       followUpTags: Array.isArray(c.followUpTags) ? c.followUpTags : [],
+      labels: normalizeConversationLabelIds(c.labels),
       activityLog: (() => {
         const topLog = Array.isArray(c.activityLog) ? c.activityLog : [];
         const srcLog = typeof c.source === "object" && Array.isArray(c.source?.activityLog) ? c.source.activityLog : [];
@@ -1115,6 +1469,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               oldConv.followUpCompleted === nextConv.followUpCompleted &&
               oldConv.followUpCompletedAt === nextConv.followUpCompletedAt &&
               (oldConv.followUpTags?.length || 0) === (nextConv.followUpTags?.length || 0) &&
+              areStringArraysEqual(oldConv.labels, nextConv.labels) &&
               (oldConv.activityLog?.length || 0) === (nextConv.activityLog?.length || 0) &&
               oldConv.cashIn === nextConv.cashIn &&
               oldConv.notes === nextConv.notes &&
@@ -1266,6 +1621,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     hasActivePending && pending?.updates.doneBy !== undefined
                       ? (pending.updates.doneBy as string | undefined)
                       : normActive.doneBy,
+                  labels:
+                    hasActivePending && pending?.updates.labels !== undefined
+                      ? normalizeConversationLabelIds(pending.updates.labels)
+                      : normActive.labels ?? c.labels,
                 }
               : c
           )
@@ -1309,9 +1668,11 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         recentlyCreatedRef.current.clear();
         deletedIdsRef.current.clear();
         fetchConversations();
+        fetchLabels();
       } else {
         // Logged out: clear data and cache
         setConversations([]);
+        setLabels([]);
         setActiveChatId(null);
         lastServerRevRef.current = 0;
         messagesCacheRef.current.clear();
@@ -1324,11 +1685,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           localStorage.removeItem(CACHE_KEY);
           localStorage.removeItem(V2_CACHE_KEY);
           localStorage.removeItem(LEGACY_CACHE_KEY);
+          localStorage.removeItem(LABELS_CACHE_KEY);
           clearConversationsIDB();
         } catch {}
       }
     }
-  }, [token, fetchConversations, conversations.length]);
+  }, [token, fetchConversations, fetchLabels, conversations.length]);
 
   // ── Real-Time Server-Sent Events (SSE) Stream ──
   // Instant (< 30ms) reflection when messages arrive or someone replies in Meta Inbox
@@ -1451,18 +1813,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 let updatedMessages: Message[];
                 if (existingIdx >= 0) {
                   updatedMessages = cached.map((m, idx) =>
-                    idx === existingIdx
-                      ? {
-                          ...m,
-                          ...formattedMsg,
-                          attachments:
-                            formattedMsg.attachments && formattedMsg.attachments.length > 0
-                              ? formattedMsg.attachments
-                              : m.attachments,
-                          senderName: formattedMsg.senderName || m.senderName,
-                          replyTo: formattedMsg.replyTo || m.replyTo,
-                        }
-                      : m
+                    idx === existingIdx ? mergeExistingMessageFromSse(m, formattedMsg) : m
                   );
                 } else if (isOutgoing) {
                   const tempIdx = cached.findIndex(
@@ -1476,6 +1827,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                         ? {
                             ...m,
                             ...formattedMsg,
+                            senderName: resolvePreferredSenderName(
+                              formattedMsg.senderName,
+                              tempMsg.senderName
+                            ),
                             replyTo: mergedReplyTo,
                             status: "sent",
                           }
@@ -1600,6 +1955,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                             hasActivePendingPatch && activePendingUpdates?.doneBy !== undefined
                               ? (activePendingUpdates.doneBy as string | undefined)
                               : normRemote.doneBy,
+                          labels:
+                            hasActivePendingPatch && activePendingUpdates?.labels !== undefined
+                              ? normalizeConversationLabelIds(activePendingUpdates.labels)
+                              : normRemote.labels ?? existing.labels,
                           source:
                             (hasActivePendingPatch && activePendingUpdates?.source) ||
                             normRemote.source ||
@@ -1932,6 +2291,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               if (typeof window !== "undefined") {
                 window.dispatchEvent(new CustomEvent("crm:quick-replies-updated"));
               }
+            } else if (payload.type === "labels_updated") {
+              // Lead label catalog modified — refresh labels immediately
+              fetchLabels();
             }
           } catch (e) {
             console.warn("CRMContext: SSE message parse error", e);
@@ -1975,6 +2337,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     normalizeConversationMeta,
     fetchConversations,
     fetchAgents,
+    fetchLabels,
     isMetaReviewer,
   ]);
 
@@ -2107,6 +2470,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       const currentForSync = conversationsRef.current.find((conv) => conv.id === id);
       const prevSnapshot = currentForSync ? { ...currentForSync } : undefined;
       const updates: Record<string, any> = { ...rawUpdates };
+      if (updates.labels !== undefined) {
+        updates.labels = normalizeConversationLabelIds(updates.labels);
+      }
       const isAgentNameEdit = updates.leadNameEdited === true;
       delete updates.leadNameEdited;
 
@@ -2725,6 +3091,35 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     },
     [router]
   );
+
+  // Open deep-linked conversation from notification click (?chat=<id> or Service Worker postMessage)
+  useEffect(() => {
+    if (!token || typeof window === "undefined" || !canAccessRoute(user?.role, "/")) return;
+
+    const params = new URLSearchParams(window.location.search);
+    const chatParam = params.get("chat")?.trim();
+    if (chatParam) {
+      queueMicrotask(() => {
+        openChat(chatParam);
+      });
+      params.delete("chat");
+      const nextSearch = params.toString();
+      const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}${window.location.hash}`;
+      window.history.replaceState({}, "", nextUrl);
+    }
+
+    if (!("serviceWorker" in navigator)) return;
+    const handleSwMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: string; conversationId?: string } | null;
+      if (data?.type === "crm:open-chat" && data.conversationId) {
+        openChat(data.conversationId);
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", handleSwMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener("message", handleSwMessage);
+    };
+  }, [token, user?.role, openChat]);
 
   // Instant 0ms manual WhatsApp lead creation (e.g. Student / Instructor referral)
   const createManualLead = useCallback(
@@ -3358,10 +3753,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const toAdd = normalizedConfirmed.filter((m) => !existingIds.has(m.id));
         const mergedExisting = withoutTemp.map((m) => {
           const match = normalizedConfirmed.find((c) => c.id === m.id);
-          if (match && !m.replyTo && match.replyTo) {
-            return { ...m, replyTo: match.replyTo };
-          }
-          return m;
+          if (!match) return m;
+          return {
+            ...m,
+            replyTo: m.replyTo || match.replyTo,
+            senderName: resolvePreferredSenderName(match.senderName, m.senderName),
+          };
         });
         nextMessages = [...mergedExisting, ...toAdd].sort(
           (a, b) => (a.timestamp || 0) - (b.timestamp || 0)
@@ -3378,22 +3775,27 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const next = prev.map((c) => {
           if (c.id !== chatId) return c;
           let nextLog = c.activityLog || [];
-          if (newestConfirmed && newestConfirmed.senderName) {
-            const msgTs = newestConfirmed.timestamp || Date.now();
-            const msgId = `msg_${newestConfirmed.message_id || newestConfirmed.messageId || msgTs}`;
-            if (!nextLog.some((a) => a.id === msgId)) {
-              const chLabel = c.channel === "WA" ? "WhatsApp" : c.channel === "IG" ? "Instagram" : "Messenger";
-              nextLog = [
-                {
-                  id: msgId,
-                  type: "message_sent" as const,
-                  actor: String(newestConfirmed.senderName),
-                  summary: `Sent ${chLabel} reply`,
-                  detail: String(newestConfirmed.text || "").slice(0, 140),
-                  timestamp: msgTs,
-                },
-                ...nextLog,
-              ].slice(0, 250);
+          if (Array.isArray(confirmedRawMessages) && confirmedRawMessages.length > 0) {
+            const chLabel = c.channel === "WA" ? "WhatsApp" : c.channel === "IG" ? "Instagram" : "Messenger";
+            for (let i = 0; i < confirmedRawMessages.length; i++) {
+              const rm = confirmedRawMessages[i];
+              const actorName = typeof rm?.senderName === "string" ? rm.senderName.trim() : "";
+              if (!rm || !isRealSenderName(actorName)) continue;
+              const msgTs = rm.timestamp || Date.now();
+              const msgId = `msg_${rm.message_id || rm.messageId || msgTs}`;
+              if (!nextLog.some((a) => a.id === msgId)) {
+                nextLog = [
+                  {
+                    id: msgId,
+                    type: "message_sent" as const,
+                    actor: actorName,
+                    summary: `Sent ${chLabel} reply`,
+                    detail: String(rm.text || "").slice(0, 140),
+                    timestamp: msgTs,
+                  },
+                  ...nextLog,
+                ].slice(0, 250);
+              }
             }
           }
           const confirmedTs = newestConfirmed ? (newestConfirmed.timestamp || Date.now()) : 0;
@@ -3455,8 +3857,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   const forceRefresh = useCallback(async () => {
     lastServerRevRef.current = 0;
     fetchAgents();
+    fetchLabels();
     await fetchConversations();
-  }, [fetchAgents, fetchConversations]);
+  }, [fetchAgents, fetchLabels, fetchConversations]);
 
   return (
     <CRMContext.Provider
@@ -3466,6 +3869,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         badgeCounts,
         assignableAgents,
         teamMembers,
+        labels,
+        labelsLoading,
+        createLabel,
+        updateLabel,
+        deleteLabel,
+        refreshLabels: fetchLabels,
         activeChatId,
         setActiveChatId,
         openChat,
@@ -3484,6 +3893,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         addOptimisticMessages,
         finalizeOptimisticMessages,
         fetchChatMessages: fetchActiveChat,
+        pushSupported,
+        pushEnabled,
+        pushPermission,
+        pushBusy,
+        enableDevicePush,
+        disableDevicePush,
+        toggleDevicePush,
+        testDevicePush,
       }}
     >
       {children}

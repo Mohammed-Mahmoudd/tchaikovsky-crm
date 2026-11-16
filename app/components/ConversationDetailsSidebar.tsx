@@ -6,6 +6,7 @@ import { ExternalLink, CheckCircle2, Calendar, Trash2, X, MessageSquare } from "
 import { useCRM, Conversation } from "../context/CRMContext";
 import { useAuth, canAccessRoute, isDirectorOrChairmanRole, isAdmissionRole } from "./AuthProvider";
 import EditableLeadName from "./EditableLeadName";
+import LeadLabelsSection from "./LeadLabelsSection";
 import {
   buildLeadNamePatchUpdates,
   getEditableLeadDisplayName,
@@ -227,6 +228,13 @@ export function ConversationDetailsSidebar({
             </>
           ) : undefined
         }
+      />
+
+      <LeadLabelsSection
+        conversationId={conversation.id}
+        labelIds={conversation.labels}
+        isReadOnly={isReadOnly}
+        onUpdateLabels={(nextIds) => patchConversation(conversation.id, { labels: nextIds })}
       />
 
       {/* Optional Open Conversation button (e.g. In standalone details view) */}

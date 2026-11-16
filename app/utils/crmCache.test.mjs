@@ -28,6 +28,7 @@ describe("clearAllCrmClientCaches", () => {
       crm_conversations_cache: "[]",
       crm_manual_leads_v1: "{}",
       crm_branches_cache: "[]",
+      crm_labels_cache_v1: "[]",
       tchaikovsky_quick_replies_v1: "[]",
       crm_cash_lead_123: "500",
       "tchaikovsky-theme": "dark",
@@ -54,6 +55,7 @@ describe("clearAllCrmClientCaches", () => {
     assert.equal(localStorage.has("crm_conversations_cache"), false);
     assert.equal(localStorage.has("crm_manual_leads_v1"), false);
     assert.equal(localStorage.has("crm_branches_cache"), false);
+    assert.equal(localStorage.has("crm_labels_cache_v1"), false);
     assert.equal(localStorage.has("tchaikovsky_quick_replies_v1"), false);
     assert.equal(localStorage.has("crm_cash_lead_123"), false);
     assert.equal(localStorage.has("tchaikovsky-theme"), true);

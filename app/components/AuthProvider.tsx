@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { clearAllCrmClientCaches } from "../utils/crmCache";
+import { cleanupPushOnLogout } from "../utils/pushNotifications";
 import {
   type LogoutReason,
   mapAuthCodeToLogoutReason,
@@ -103,8 +104,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     (reason: LogoutReason = "manual") => {
       if (loggingOutRef.current) return;
       loggingOutRef.current = true;
+      const activeToken =
+        tokenRef.current || (typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null);
       tokenRef.current = null;
       verifyInFlightRef.current = null;
+
+      void cleanupPushOnLogout(activeToken);
 
       try {
         localStorage.removeItem(TOKEN_KEY);

@@ -28,6 +28,7 @@ import {
   Archive,
   ArchiveRestore,
   RotateCcw,
+  Tag,
 } from "lucide-react";
 import { useBranches } from "./lib/branches";
 import { BranchSelect } from "./components/BranchSelect";
@@ -37,11 +38,14 @@ import { EmojiPicker, WHATSAPP_QUICK_REACTIONS, recordRecentEmoji } from "./comp
 import { formatMetaErrorMessage, ParsedMetaError } from "./utils/errorParser";
 import EditableLeadName from "./components/EditableLeadName";
 import { InboxBucketActions, type InboxBucketAction } from "./components/InboxBucketActions";
+import { LeadLabelBadges } from "./components/LeadLabelBadges";
+import LeadLabelsSection from "./components/LeadLabelsSection";
 import {
   buildLeadNamePatchUpdates,
   getEditableLeadDisplayName,
   hasAgentEditedLeadName,
 } from "./utils/leadName";
+import { buildConfirmedReplyMessages } from "./utils/conversationMessages";
 import {
   INBOX_FILTERS,
   type InboxFilter,
@@ -116,7 +120,15 @@ import { ChatDateDivider } from "./components/ChatDateDivider";
 import MessageTemplate, { parseTemplateAttachment } from "./components/MessageTemplate";
 import InstagramMedia from "./components/InstagramMedia";
 import { VoiceNotePlayer } from "./components/VoiceNotePlayer";
-import { matchLeadSearch } from "./utils/search";
+import { buildLabelNameMap, matchLeadSearch } from "./utils/search";
+import {
+  filterLeadLabels,
+  getLabelConversationCounts,
+  getLabelFilterDisplayText,
+  getLeadLabelCssVars,
+  matchesLabelFilter,
+  toggleLeadLabelId,
+} from "./utils/leadLabels";
 
 const isPlaceholderText = (text?: string) => {
   if (!text) return true;
@@ -268,6 +280,10 @@ export default function InboxPage() {
   const [customDateTo, setCustomDateTo] = useState<string>("");
   const [showDatePopover, setShowDatePopover] = useState(false);
   const datePopoverRef = useRef<HTMLDivElement | null>(null);
+  const [selectedLabelIds, setSelectedLabelIds] = useState<string[]>([]);
+  const [showLabelPopover, setShowLabelPopover] = useState(false);
+  const [labelFilterSearch, setLabelFilterSearch] = useState("");
+  const labelPopoverRef = useRef<HTMLDivElement | null>(null);
   const [mobileView, setMobileView] = useState<MobileView>("list");
   const [showDetailsPanel, setShowDetailsPanel] = useState(false);
   const [inboxToast, setInboxToast] = useState<InboxToastState | null>(null);
@@ -280,6 +296,7 @@ export default function InboxPage() {
 
   const {
     conversations,
+    labels,
     activeChatId,
     setActiveChatId,
     assignableAgents,
@@ -330,6 +347,25 @@ export default function InboxPage() {
     };
   }, [showDatePopover]);
 
+  // Close label filter popover when clicking outside or pressing Escape
+  useEffect(() => {
+    if (!showLabelPopover) return;
+    const handleMouseDown = (e: MouseEvent) => {
+      if (labelPopoverRef.current && !labelPopoverRef.current.contains(e.target as Node)) {
+        setShowLabelPopover(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowLabelPopover(false);
+    };
+    document.addEventListener("mousedown", handleMouseDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleMouseDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showLabelPopover]);
+
   // Listen for CRMContext patch error toasts and auto-dismiss Inbox toasts
   useEffect(() => {
     const handleToastEvent = (event: Event) => {
@@ -356,6 +392,33 @@ export default function InboxPage() {
     [bucketCounts, activeFilter]
   );
 
+  const labelMap = useMemo(() => new Map(labels.map((l) => [l.id, l])), [labels]);
+  const labelNameMap = useMemo(() => buildLabelNameMap(labels), [labels]);
+  const effectiveSelectedLabelIds = useMemo(
+    () => selectedLabelIds.filter((id) => labelMap.has(id)),
+    [selectedLabelIds, labelMap]
+  );
+  const selectedLabelObjects = useMemo(
+    () =>
+      effectiveSelectedLabelIds
+        .map((id) => labelMap.get(id))
+        .filter((l): l is NonNullable<typeof l> => Boolean(l)),
+    [effectiveSelectedLabelIds, labelMap]
+  );
+  const isLabelFiltered = effectiveSelectedLabelIds.length > 0;
+  const labelFilterDisplayText = useMemo(
+    () => getLabelFilterDisplayText(selectedLabelObjects),
+    [selectedLabelObjects]
+  );
+  const filteredLabelOptions = useMemo(
+    () => filterLeadLabels(labels, labelFilterSearch),
+    [labels, labelFilterSearch]
+  );
+  const resetLabelFilter = useCallback(() => {
+    setSelectedLabelIds([]);
+    setLabelFilterSearch("");
+  }, []);
+
   // ── Pre-date filter conversations (tab filter + search query) for live preset badge counts ──
   const tabAndSearchFilteredConvs = useMemo(() => {
     return conversations.filter((conv) => {
@@ -363,12 +426,17 @@ export default function InboxPage() {
         return false;
       }
 
-      if (searchQuery.trim() && !matchLeadSearch(conv, searchQuery)) {
+      if (searchQuery.trim() && !matchLeadSearch(conv, searchQuery, labelNameMap)) {
         return false;
       }
       return true;
     });
-  }, [conversations, activeFilter, searchQuery, user?.name]);
+  }, [conversations, activeFilter, searchQuery, user?.name, labelNameMap]);
+
+  const labelFilterCounts = useMemo(
+    () => getLabelConversationCounts(tabAndSearchFilteredConvs, labels),
+    [tabAndSearchFilteredConvs, labels]
+  );
 
   const crossBucketSearchCounts = useMemo(() => {
     const q = searchQuery.trim();
@@ -376,12 +444,12 @@ export default function InboxPage() {
     let done = 0;
     let archived = 0;
     for (const conv of conversations) {
-      if (!matchLeadSearch(conv, q)) continue;
+      if (!matchLeadSearch(conv, q, labelNameMap)) continue;
       if (isConversationArchived(conv)) archived += 1;
       else if (isConversationDone(conv)) done += 1;
     }
     return { done, archived };
-  }, [conversations, searchQuery]);
+  }, [conversations, searchQuery, labelNameMap]);
 
   const dateBounds = useMemo(() => {
     const now = new Date();
@@ -414,7 +482,14 @@ export default function InboxPage() {
 
   // ── Filter logic (memoized to avoid re-calculating on unrelated renders) ──
   const filteredConversations = useMemo(() => {
-    if (datePreset === "ALL") return tabAndSearchFilteredConvs;
+    const base =
+      effectiveSelectedLabelIds.length === 0
+        ? tabAndSearchFilteredConvs
+        : tabAndSearchFilteredConvs.filter((conv) =>
+            matchesLabelFilter(conv.labels, effectiveSelectedLabelIds)
+          );
+
+    if (datePreset === "ALL") return base;
 
     let rangeStart: number | null = null;
     let rangeEnd: number | null = null;
@@ -441,18 +516,18 @@ export default function InboxPage() {
         rangeStart = toBounds.start;
         rangeEnd = toBounds.end;
       } else {
-        return tabAndSearchFilteredConvs;
+        return base;
       }
     }
 
-    return tabAndSearchFilteredConvs.filter((conv) => {
+    return base.filter((conv) => {
       const ts = conv.lastMessageAt || 0;
       if (!ts) return false;
       if (rangeStart !== null && ts < rangeStart) return false;
       if (rangeEnd !== null && ts > rangeEnd) return false;
       return true;
     });
-  }, [tabAndSearchFilteredConvs, datePreset, dateBounds, customDateFrom, customDateTo]);
+  }, [tabAndSearchFilteredConvs, effectiveSelectedLabelIds, datePreset, dateBounds, customDateFrom, customDateTo]);
 
   const isDateFiltered =
     datePreset !== "ALL" &&
@@ -854,18 +929,12 @@ export default function InboxPage() {
         });
         if (res.ok) {
           const json = await res.json().catch(() => null);
-          const confirmedList = Array.isArray(json?.messages)
-            ? json.messages
-            : json?.data
-            ? [
-                {
-                  ...json.data,
-                  text: textToSend.trim(),
-                  senderName: json.senderName || user?.name,
-                  replyTo: resolvedReplyTo || json.data.replyTo,
-                },
-              ]
-            : undefined;
+          const confirmedList = buildConfirmedReplyMessages(
+            json,
+            textToSend,
+            user?.name,
+            resolvedReplyTo
+          );
           finalizeOptimisticMessages(chatId, tempIds, confirmedList);
           refresh();
           return true;
@@ -1085,21 +1154,194 @@ export default function InboxPage() {
         style={{ background: "var(--bg-card)", borderRight: "1px solid var(--border-main)" }}
       >
         <div className="p-3.5 space-y-2.5" style={{ borderBottom: "1px solid var(--border-main)" }}>
-          <div className="flex items-center justify-between gap-2">
+          <div className="relative flex items-center justify-between gap-2 flex-wrap">
             <h1 className="text-[17px] font-bold flex items-center gap-2" style={{ color: "var(--text-primary)" }}>
               Inbox
               <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full" style={{ background: "var(--bg-pill)", color: "var(--text-secondary)" }}>
                 {filteredConversations.length}
-                {(searchQuery.trim() || isDateFiltered) && ` of ${activeBucketTotal}`}
+                {(searchQuery.trim() || isDateFiltered || isLabelFiltered) && ` of ${activeBucketTotal}`}
               </span>
             </h1>
 
-            {/* Date Filter Popover */}
-            <div className="relative inline-block" ref={datePopoverRef}>
-              <button
-                type="button"
-                onClick={() => setShowDatePopover((prev) => !prev)}
-                className="h-[22px] px-1.5 text-[10px] font-medium rounded-md flex items-center gap-1 transition-colors cursor-pointer select-none hover:opacity-90"
+            <div className="flex items-center gap-1.5 flex-wrap ms-auto">
+              {/* Label Filter Popover */}
+              <div className="inline-block" ref={labelPopoverRef}>
+                <div
+                  className="inline-flex items-center rounded-md overflow-hidden"
+                  style={{
+                    background: isLabelFiltered ? "var(--bg-selected)" : "var(--bg-pill)",
+                    border: isLabelFiltered ? "1px solid var(--bg-banner)" : "1px solid var(--border-input)",
+                    color: isLabelFiltered ? "var(--bg-banner)" : "var(--text-secondary)",
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowDatePopover(false);
+                      setShowLabelPopover((prev) => !prev);
+                    }}
+                    aria-expanded={showLabelPopover}
+                    aria-haspopup="dialog"
+                    title="Filter conversations by label"
+                    className="min-h-[44px] sm:min-h-[22px] sm:h-[22px] px-2 sm:px-1.5 text-[11px] sm:text-[10px] font-medium flex items-center gap-1 transition-opacity cursor-pointer select-none hover:opacity-90"
+                  >
+                    <Tag className="w-2.5 h-2.5 shrink-0" />
+                    <span className="truncate max-w-[82px] font-semibold leading-none">
+                      {labelFilterDisplayText}
+                    </span>
+                    <ChevronDown
+                      className={`w-2.5 h-2.5 opacity-70 transition-transform duration-150 shrink-0 ${
+                        showLabelPopover ? "rotate-180" : ""
+                      }`}
+                    />
+                  </button>
+                  {isLabelFiltered && (
+                    <button
+                      type="button"
+                      onClick={resetLabelFilter}
+                      aria-label="Clear label filter"
+                      title="Clear label filter"
+                      className="min-h-[44px] sm:min-h-[22px] sm:h-[22px] px-1.5 sm:px-1 flex items-center justify-center transition-opacity hover:opacity-75 cursor-pointer"
+                      style={{ borderInlineStart: "1px solid var(--border-input)" }}
+                    >
+                      <X className="w-2.5 h-2.5" />
+                    </button>
+                  )}
+                </div>
+
+                {showLabelPopover && (
+                  <div
+                    role="dialog"
+                    aria-label="Filter inbox by labels"
+                    className="absolute right-0 top-[calc(100%+4px)] z-50 w-[235px] max-w-full rounded-xl shadow-2xl p-2 flex flex-col gap-1.5"
+                    style={{
+                      background: "var(--bg-card)",
+                      border: "1px solid var(--border-main)",
+                    }}
+                  >
+                    <div
+                      className="flex items-center gap-1.5 rounded-lg px-2 h-[36px] sm:h-[28px]"
+                      style={{
+                        background: "var(--bg-input)",
+                        border: "1px solid var(--border-input)",
+                      }}
+                    >
+                      <Search className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--text-muted)" }} />
+                      <input
+                        type="text"
+                        value={labelFilterSearch}
+                        onChange={(e) => setLabelFilterSearch(e.target.value)}
+                        placeholder="Search labels…"
+                        aria-label="Search labels"
+                        className="w-full min-w-0 bg-transparent text-[16px] sm:text-[11px] outline-none"
+                        style={{ color: "var(--text-primary)" }}
+                      />
+                      {labelFilterSearch && (
+                        <button
+                          type="button"
+                          onClick={() => setLabelFilterSearch("")}
+                          aria-label="Clear label search"
+                          className="shrink-0 hover:opacity-80 cursor-pointer"
+                          style={{ color: "var(--text-muted)" }}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="max-h-[220px] overflow-y-auto flex flex-col gap-0.5">
+                      {labels.length === 0 ? (
+                        <p className="text-[11px] px-2 py-3 text-center" style={{ color: "var(--text-muted)" }}>
+                          No labels yet. Add labels from any lead&apos;s details panel.
+                        </p>
+                      ) : filteredLabelOptions.length === 0 ? (
+                        <p className="text-[11px] px-2 py-3 text-center" style={{ color: "var(--text-muted)" }}>
+                          No labels match &ldquo;{labelFilterSearch.trim()}&rdquo;.
+                        </p>
+                      ) : (
+                        filteredLabelOptions.map((label) => {
+                          const active = effectiveSelectedLabelIds.includes(label.id);
+                          const count = labelFilterCounts.get(label.id) ?? 0;
+                          const labelVars = getLeadLabelCssVars(label.color);
+                          return (
+                            <button
+                              key={label.id}
+                              type="button"
+                              aria-pressed={active}
+                              onClick={() =>
+                                setSelectedLabelIds(toggleLeadLabelId(effectiveSelectedLabelIds, label.id))
+                              }
+                              className="w-full min-h-[44px] sm:min-h-0 px-2 py-2 sm:py-1.5 rounded-lg text-start text-[11px] font-semibold flex items-center gap-2 transition-colors cursor-pointer"
+                              style={{
+                                background: active ? "var(--bg-selected)" : "transparent",
+                                color: active ? "var(--text-primary)" : "var(--text-secondary)",
+                              }}
+                            >
+                              <span
+                                className="w-3.5 h-3.5 rounded flex items-center justify-center shrink-0"
+                                style={{
+                                  background: active ? "var(--bg-banner)" : "transparent",
+                                  border: active ? "1px solid var(--bg-banner)" : "1px solid var(--border-input)",
+                                }}
+                              >
+                                {active && <Check className="w-2.5 h-2.5 text-white" />}
+                              </span>
+                              <span
+                                className="w-2 h-2 rounded-full shrink-0"
+                                style={{ background: labelVars.dotColor }}
+                              />
+                              <span className="truncate flex-1" style={{ color: "var(--text-primary)" }}>
+                                {label.name}
+                              </span>
+                              <span
+                                className="text-[10px] px-1.5 py-0.5 rounded-md font-bold shrink-0"
+                                style={{
+                                  background: active ? "var(--bg-selected)" : "var(--bg-pill)",
+                                  color: count > 0 || active ? "var(--bg-banner)" : "var(--text-muted)",
+                                }}
+                              >
+                                {count}
+                              </span>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+
+                    {isLabelFiltered && (
+                      <div
+                        className="pt-1.5 flex items-center justify-between gap-2 px-1"
+                        style={{ borderTop: "1px solid var(--border-main)" }}
+                      >
+                        <span className="text-[10px] truncate" style={{ color: "var(--text-secondary)" }}>
+                          Selected:{" "}
+                          <strong style={{ color: "var(--text-primary)" }}>
+                            {effectiveSelectedLabelIds.length}
+                          </strong>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={resetLabelFilter}
+                          className="text-[10px] font-bold hover:underline cursor-pointer shrink-0"
+                          style={{ color: "var(--bg-banner)" }}
+                        >
+                          Reset
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Date Filter Popover */}
+              <div className="relative inline-block" ref={datePopoverRef}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowLabelPopover(false);
+                    setShowDatePopover((prev) => !prev);
+                  }}
+                  className="h-[22px] px-1.5 text-[10px] font-medium rounded-md flex items-center gap-1 transition-colors cursor-pointer select-none hover:opacity-90"
                 style={{
                   background: isDateFiltered ? "rgba(0, 102, 255, 0.08)" : "var(--bg-pill)",
                   border: isDateFiltered ? "1px solid #0066FF" : "1px solid var(--border-input)",
@@ -1279,6 +1521,7 @@ export default function InboxPage() {
                   )}
                 </div>
               )}
+              </div>
             </div>
           </div>
 
@@ -1335,7 +1578,7 @@ export default function InboxPage() {
                 )}
               </div>
               <p className="text-[13px] font-semibold" style={{ color: "var(--text-primary)" }}>
-                {searchQuery
+                {searchQuery || isLabelFiltered
                   ? "No leads found"
                   : activeFilter === "DONE"
                   ? "No done conversations"
@@ -1344,8 +1587,14 @@ export default function InboxPage() {
                   : "No conversations"}
               </p>
               <p className="text-[11px] mt-1 mb-3" style={{ color: "var(--text-secondary)" }}>
-                {searchQuery
+                {searchQuery && isLabelFiltered
+                  ? `No conversations match "${searchQuery}" with ${labelFilterDisplayText} in ${activeFilter}`
+                  : searchQuery
                   ? `No conversations match "${searchQuery}" in ${activeFilter}`
+                  : isLabelFiltered && isDateFiltered
+                  ? `No conversations in ${activeFilter} with ${labelFilterDisplayText} for ${dateFilterDisplayLabel}`
+                  : isLabelFiltered
+                  ? `No conversations in ${activeFilter} with ${labelFilterDisplayText}`
                   : isDateFiltered
                   ? `No conversations in ${activeFilter} for ${dateFilterDisplayLabel}`
                   : activeFilter === "DONE"
@@ -1396,6 +1645,20 @@ export default function InboxPage() {
                     Clear search
                   </button>
                 )}
+                {isLabelFiltered && (
+                  <button
+                    type="button"
+                    onClick={resetLabelFilter}
+                    className="min-h-[44px] sm:min-h-0 text-[11px] font-semibold px-3 py-1.5 rounded-lg transition-opacity hover:opacity-90 cursor-pointer"
+                    style={{
+                      background: "var(--bg-pill)",
+                      border: "1px solid var(--border-input)",
+                      color: "var(--text-primary)",
+                    }}
+                  >
+                    Reset label filter
+                  </button>
+                )}
                 {isDateFiltered && (
                   <button
                     type="button"
@@ -1440,6 +1703,12 @@ export default function InboxPage() {
                         ? `${conv.phone} · ${conv.agent}`
                         : conv.agent}
                     </p>
+                    <LeadLabelBadges
+                      labelIds={conv.labels}
+                      catalog={labels}
+                      maxVisible={3}
+                      className="mt-1.5"
+                    />
                   </div>
                   <div className="flex flex-col items-end justify-between shrink-0 self-stretch gap-1">
                     <div className="flex items-center gap-1">
@@ -2704,6 +2973,13 @@ export default function InboxPage() {
                   <X className="w-5 h-5" />
                 </button>
               }
+            />
+
+            <LeadLabelsSection
+              conversationId={activeConv.id}
+              labelIds={activeConv.labels}
+              isReadOnly={isReadOnly}
+              onUpdateLabels={(nextIds) => patchConversation(activeConv.id, { labels: nextIds })}
             />
 
             <div className="mb-5">

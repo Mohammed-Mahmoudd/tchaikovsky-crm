@@ -26,16 +26,36 @@ export interface LeadSearchable {
   formPhone?: string;
   agent?: string;
   channel?: string;
+  labels?: ReadonlyArray<string>;
+}
+
+/**
+ * Builds a fast ID -> label name lookup map for `matchLeadSearch`.
+ */
+export function buildLabelNameMap(
+  catalog: ReadonlyArray<{ id: string; name: string }>
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (let i = 0; i < catalog.length; i += 1) {
+    const item = catalog[i];
+    if (!item || !item.id || !item.name) continue;
+    map.set(item.id, item.name);
+  }
+  return map;
 }
 
 /**
  * Checks if a conversation / lead matches a search query by:
  * 1. Exact or partial Lead ID (conv.id, conv._id, or conv.metaSenderId)
- * 2. Lead Name, Profile Name, or Form Lead Name (case-insensitive & Arabic normalized, word-by-word matching)
+ * 2. Lead Name, Profile Name, Form Lead Name, or assigned Label names (case-insensitive & Arabic normalized, word-by-word matching)
  * 3. Lead Phone Number (raw, E.164, or local format with leading 0)
  * Runs in microseconds for 0ms client-side response time.
  */
-export function matchLeadSearch(conv: LeadSearchable, query: string): boolean {
+export function matchLeadSearch(
+  conv: LeadSearchable,
+  query: string,
+  labelNameMap?: ReadonlyMap<string, string>
+): boolean {
   if (!query) return true;
   const cleanQ = query.trim();
   if (!cleanQ) return true;
@@ -54,7 +74,7 @@ export function matchLeadSearch(conv: LeadSearchable, query: string): boolean {
     return true;
   }
 
-  // 2. Normalized Name match across display name, WA profileName, and Meta form leadName
+  // 2. Normalized Name & Label match across display name, WA profileName, Meta form leadName, and assigned labels
   const normQ = normalizeSearchText(cleanQ);
   const combinedNames = [conv.name, conv.profileName, conv.leadName]
     .filter(Boolean)
@@ -65,10 +85,28 @@ export function matchLeadSearch(conv: LeadSearchable, query: string): boolean {
     return true;
   }
 
-  // Multi-token name match (e.g. "mohammed ali" matching "Ali Mohamed")
+  const labelNames: string[] = [];
+  if (labelNameMap && Array.isArray(conv.labels) && conv.labels.length > 0) {
+    for (let i = 0; i < conv.labels.length; i += 1) {
+      const labelName = labelNameMap.get(conv.labels[i]);
+      if (!labelName) continue;
+      const normLabel = normalizeSearchText(labelName);
+      if (!normLabel) continue;
+      if (normLabel.includes(normQ)) {
+        return true;
+      }
+      labelNames.push(normLabel);
+    }
+  }
+
+  // Multi-token match across name + assigned labels (e.g. "mohammed ali" or "vip ahmed")
   const tokens = normQ.split(/\s+/).filter(Boolean);
-  if (tokens.length > 1 && tokens.every((token) => combinedNames.includes(token))) {
-    return true;
+  if (tokens.length > 1) {
+    const combinedNamesAndLabels =
+      labelNames.length > 0 ? `${combinedNames} ${labelNames.join(" ")}`.trim() : combinedNames;
+    if (tokens.every((token) => combinedNamesAndLabels.includes(token))) {
+      return true;
+    }
   }
 
   // 3. Phone number match (digits-only comparison + local leading-zero normalization)

@@ -30,6 +30,7 @@ import InstagramMedia from "./InstagramMedia";
 import { VoiceNotePlayer } from "./VoiceNotePlayer";
 import { ChatDateDivider } from "./ChatDateDivider";
 import { buildChatDateDividerLabels, formatChatMessageTooltip } from "../utils/time";
+import { buildConfirmedReplyMessages } from "../utils/conversationMessages";
 
 // ─── Helper Functions ────────────────────────────────────────────────────────
 
@@ -517,18 +518,12 @@ export const ConversationChatView = React.memo(function ConversationChatView({
         });
         if (res.ok) {
           const json = await res.json().catch(() => null);
-          const confirmedList = Array.isArray(json?.messages)
-            ? json.messages
-            : json?.data
-            ? [
-                {
-                  ...json.data,
-                  text: textToSend.trim(),
-                  senderName: json.senderName || user?.name,
-                  replyTo: resolvedReplyTo || json.data.replyTo,
-                },
-              ]
-            : undefined;
+          const confirmedList = buildConfirmedReplyMessages(
+            json,
+            textToSend,
+            user?.name,
+            resolvedReplyTo
+          );
           finalizeOptimisticMessages(chatId, tempIds, confirmedList);
           refresh();
           return true;

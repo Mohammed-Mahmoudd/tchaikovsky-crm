@@ -114,3 +114,162 @@ export function isLastMessageFromLead(conv?: ConversationMessageState | null): b
   return Number(conv.unreadCount) > 0;
 }
 
+const PLACEHOLDER_SENDER_NAMES = new Set(["Staff", "System", "Unassigned"]);
+
+const MESSAGE_STATUS_RANK: Record<string, number> = {
+  pending: 0,
+  sent: 1,
+  delivered: 2,
+  read: 3,
+};
+
+export interface ConfirmedReplyMessageInput {
+  message_id?: string;
+  messageId?: string;
+  text?: string;
+  attachments?: unknown[];
+  timestamp?: number;
+  senderName?: string;
+  replyTo?: {
+    id?: string;
+    messageId?: string;
+    text?: string;
+    senderName?: string;
+    isIncoming?: boolean;
+  };
+  [key: string]: unknown;
+}
+
+export interface ReplySendResponseShape {
+  senderName?: string;
+  messages?: ConfirmedReplyMessageInput[];
+  data?: ConfirmedReplyMessageInput;
+}
+
+export interface MergeableChatMessage {
+  id: string;
+  text: string;
+  attachments?: unknown[];
+  time: string;
+  timestamp?: number;
+  isIncoming: boolean;
+  status?: "pending" | "sent" | "delivered" | "read";
+  seenAt?: number;
+  deliveredAt?: number;
+  isRead?: boolean;
+  senderName?: string;
+  isEdited?: boolean;
+  editedAt?: number;
+  isDeleted?: boolean;
+  deletedAt?: number;
+  deletedBy?: string;
+  reactions?: unknown[];
+  replyTo?: {
+    id: string;
+    text: string;
+    senderName?: string;
+    isIncoming?: boolean;
+  };
+}
+
+function cleanTrimmedName(name: unknown): string {
+  return typeof name === "string" ? name.trim() : "";
+}
+
+/**
+ * Returns true if `name` represents an actual staff member rather than
+ * a missing or generic placeholder label (`"Staff"`, `"System"`, `"Unassigned"`).
+ */
+export function isRealSenderName(name: unknown): boolean {
+  const clean = cleanTrimmedName(name);
+  return Boolean(clean) && !PLACEHOLDER_SENDER_NAMES.has(clean);
+}
+
+/**
+ * Picks the strongest available senderName so a real agent name is never downgraded
+ * to `"Staff"` or cleared by a concurrent echo or confirmation payload.
+ */
+export function resolvePreferredSenderName(
+  incomingName?: string | null,
+  existingName?: string | null
+): string | undefined {
+  const cleanIncoming = cleanTrimmedName(incomingName);
+  const cleanExisting = cleanTrimmedName(existingName);
+  if (cleanIncoming && !PLACEHOLDER_SENDER_NAMES.has(cleanIncoming)) return cleanIncoming;
+  if (cleanExisting && !PLACEHOLDER_SENDER_NAMES.has(cleanExisting)) return cleanExisting;
+  return cleanIncoming || cleanExisting || undefined;
+}
+
+/**
+ * Normalizes the `/api/messages/:senderId/reply` response into confirmed message items,
+ * ensuring every item retains the sending agent's `senderName` across text and attachment replies.
+ */
+export function buildConfirmedReplyMessages(
+  json: ReplySendResponseShape | null | undefined,
+  textToSend: string,
+  fallbackUserName?: string | null,
+  fallbackReplyTo?: ConfirmedReplyMessageInput["replyTo"]
+): ConfirmedReplyMessageInput[] | undefined {
+  const topSender = resolvePreferredSenderName(json?.senderName, fallbackUserName);
+
+  if (Array.isArray(json?.messages) && json.messages.length > 0) {
+    return json.messages.map((item) => ({
+      ...item,
+      senderName: resolvePreferredSenderName(item.senderName, topSender),
+    }));
+  }
+
+  if (json?.data) {
+    const trimmed = textToSend.trim();
+    return [
+      {
+        ...json.data,
+        text: trimmed || json.data.text || "",
+        senderName: resolvePreferredSenderName(json.data.senderName, topSender),
+        replyTo: fallbackReplyTo || json.data.replyTo,
+      },
+    ];
+  }
+
+  return undefined;
+}
+
+/**
+ * Merges an SSE `message` update onto an already-cached message without downgrading
+ * a real agent `senderName` to `"Staff"`, losing delivery/read ticks, or clearing reactions.
+ */
+export function mergeExistingMessageFromSse<T extends MergeableChatMessage>(
+  existing: T,
+  incoming: T
+): T {
+  const existingRank = existing.status ? (MESSAGE_STATUS_RANK[existing.status] ?? 1) : 0;
+  const incomingRank = incoming.status ? (MESSAGE_STATUS_RANK[incoming.status] ?? 1) : 0;
+  const bestStatus = existingRank > incomingRank ? existing.status : incoming.status || existing.status;
+
+  const mergedReactions =
+    Array.isArray(incoming.reactions) && incoming.reactions.length > 0
+      ? incoming.reactions
+      : existing.reactions;
+
+  return {
+    ...existing,
+    ...incoming,
+    attachments:
+      Array.isArray(incoming.attachments) && incoming.attachments.length > 0
+        ? incoming.attachments
+        : existing.attachments,
+    senderName: resolvePreferredSenderName(incoming.senderName, existing.senderName),
+    status: bestStatus,
+    seenAt: incoming.seenAt ?? existing.seenAt,
+    deliveredAt: incoming.deliveredAt ?? existing.deliveredAt,
+    isRead: Boolean(existing.isRead || incoming.isRead || bestStatus === "read"),
+    isEdited: Boolean(existing.isEdited || incoming.isEdited),
+    editedAt: incoming.editedAt ?? existing.editedAt,
+    isDeleted: Boolean(existing.isDeleted || incoming.isDeleted),
+    deletedAt: incoming.deletedAt ?? existing.deletedAt,
+    deletedBy: incoming.deletedBy ?? existing.deletedBy,
+    reactions: mergedReactions,
+    replyTo: incoming.replyTo || existing.replyTo,
+  };
+}
+
