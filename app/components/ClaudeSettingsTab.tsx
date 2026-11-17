@@ -736,7 +736,7 @@ export function ClaudeSettingsTab({
     icon: React.ReactNode;
     badge?: number;
   }> = [
-    { id: "overview", label: "Overview & Safety", icon: <ShieldCheck className="w-3.5 h-3.5" /> },
+    { id: "overview", label: "Overview & Rules", icon: <ShieldCheck className="w-3.5 h-3.5" /> },
     { id: "sandbox", label: "Test Sandbox", icon: <Sparkles className="w-3.5 h-3.5" /> },
     {
       id: "leads",
@@ -744,8 +744,20 @@ export function ClaudeSettingsTab({
       icon: <Users className="w-3.5 h-3.5" />,
       badge: leadCounts.totalAssigned,
     },
-    { id: "studio", label: "Prompt & Branches", icon: <Layers className="w-3.5 h-3.5" /> },
+    { id: "studio", label: "Behavior & Branches", icon: <Layers className="w-3.5 h-3.5" /> },
   ];
+
+  const isSetupComplete = connection.hasApiKey && connection.hasAgentId;
+  const overviewStatusTone = !isSetupComplete
+    ? "red"
+    : settingsDraft.enabled
+    ? "green"
+    : "amber";
+  const overviewStatusLabel = !isSetupComplete
+    ? "Needs setup"
+    : settingsDraft.enabled
+    ? "Active"
+    : "Paused";
 
   return (
     <div className="space-y-4">
@@ -791,7 +803,7 @@ export function ClaudeSettingsTab({
 
         <div className="flex items-center gap-2 shrink-0">
           <ClaudeStatusPill
-            label={settingsDraft.enabled ? "Auto-Reply ON" : "Master OFF"}
+            label={settingsDraft.enabled ? "Auto-Reply ON" : "Auto-Reply OFF"}
             tone={settingsDraft.enabled ? "green" : "amber"}
           />
           {subTab !== "overview" && (
@@ -806,16 +818,16 @@ export function ClaudeSettingsTab({
                 color: settingsDraft.enabled ? "var(--text-primary)" : "#fff",
               }}
             >
-              {settingsDraft.enabled ? "Pause Master" : "Turn ON Master"}
+              {settingsDraft.enabled ? "Turn OFF" : "Turn ON"}
             </button>
           )}
         </div>
       </div>
 
-      {/* ── SUB-TAB 1: Overview & Safety Permissions ───────────────────────── */}
+      {/* ── SUB-TAB 1: Chairman-Friendly Overview & Rules ──────────────────── */}
       {subTab === "overview" && (
         <div className="space-y-4">
-          {/* Unified Hero Header + Master Status + KPI Strip */}
+          {/* Card 1: Adham AI Assistant Status, Master Switch & 3 Key Numbers */}
           <section
             className="rounded-xl p-4 sm:p-5 space-y-4"
             style={{
@@ -824,8 +836,8 @@ export function ClaudeSettingsTab({
               boxShadow: "var(--shadow-card)",
             }}
           >
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-              <div className="min-w-0 space-y-1.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="min-w-0 space-y-1">
                 <div className="flex items-center gap-2 flex-wrap">
                   <div
                     className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
@@ -838,19 +850,12 @@ export function ClaudeSettingsTab({
                     <Bot className="w-4 h-4" />
                   </div>
                   <h2 className="text-[15px] font-bold" style={{ color: "var(--text-primary)" }}>
-                    {platformAgent?.name || agentName || "Adham (AI Agent)"}
+                    {platformAgent?.name || agentName || "Adham — Admissions Assistant"}
                   </h2>
-                  {platformAgent && <ClaudeStatusPill label={`v${platformAgent.version}`} tone="blue" />}
-                  <ClaudeStatusPill
-                    label={connection.hasApiKey ? "API Ready" : "API Key Missing"}
-                    tone={connection.hasApiKey ? "green" : "red"}
-                  />
-                  {connection.dryRun && (
-                    <ClaudeStatusPill label="MESSAGING_DRY_RUN ON" tone="amber" />
-                  )}
+                  <ClaudeStatusPill label={overviewStatusLabel} tone={overviewStatusTone} />
                 </div>
-                <p className="text-[11.5px]" style={{ color: "var(--text-secondary)" }}>
-                  Managed Agent synced with platform.claude.com{connection.agentId ? ` · ID: ${connection.agentId}` : ""}.
+                <p className="text-[12px]" style={{ color: "var(--text-secondary)" }}>
+                  Replies to assigned leads automatically and books Free Discovery Sessions with branch school managers.
                 </p>
               </div>
 
@@ -861,26 +866,25 @@ export function ClaudeSettingsTab({
                   style={{ background: "var(--bg-banner)" }}
                 >
                   <UserPlus className="w-3.5 h-3.5" />
-                  <span>Assign Leads Page</span>
+                  <span>Assign Leads</span>
                 </Link>
-                <a
-                  href="https://platform.claude.com"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 min-h-[38px] px-3 rounded-lg text-[12px] font-medium"
+                <button
+                  type="button"
+                  onClick={() => handleSelectSubTab("sandbox")}
+                  className="inline-flex items-center gap-1.5 min-h-[38px] px-3 rounded-lg text-[12px] font-medium cursor-pointer"
                   style={{
                     background: "var(--bg-input)",
                     border: "1px solid var(--border-input)",
                     color: "var(--text-primary)",
                   }}
                 >
-                  <span>Claude Platform</span>
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
+                  <Sparkles className="w-3.5 h-3.5" style={{ color: "var(--bg-banner)" }} />
+                  <span>Test Adham</span>
+                </button>
               </div>
             </div>
 
-            {/* Create Agent Banner when not yet linked */}
+            {/* Setup prompt shown only if Agent is not connected yet */}
             {!connection.hasAgentId && connection.hasApiKey && (
               <div
                 className="rounded-lg p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
@@ -890,7 +894,7 @@ export function ClaudeSettingsTab({
                 }}
               >
                 <p className="text-[12px]" style={{ color: "var(--text-secondary)" }}>
-                  No Agent ID is configured yet. Create Adham directly on platform.claude.com with all CRM tools pre-attached.
+                  Adham is not created yet. Click to set up the AI assistant automatically.
                 </p>
                 <button
                   type="button"
@@ -936,9 +940,9 @@ export function ClaudeSettingsTab({
               </div>
             )}
 
-            {/* Prominent Master Auto-Reply Strip */}
+            {/* Primary Auto-Reply Master Switch */}
             <div
-              className="rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-4"
+              className="rounded-xl px-4 py-3 flex items-center justify-between gap-4"
               style={{
                 background: settingsDraft.enabled ? "var(--label-green-bg)" : "var(--bg-panel)",
                 border: `1px solid ${settingsDraft.enabled ? "var(--label-green-border)" : "var(--border-main)"}`,
@@ -950,10 +954,10 @@ export function ClaudeSettingsTab({
                   className="text-[13px] font-semibold"
                   style={{ color: settingsDraft.enabled ? "var(--label-green-text)" : "var(--text-primary)" }}
                 >
-                  Master Auto-Reply: {settingsDraft.enabled ? "Active for assigned leads" : "Paused globally"}
+                  Automatic replies for assigned leads: {settingsDraft.enabled ? "ON" : "OFF"}
                 </p>
-                <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
-                  When off, Adham never sends automatic replies even if a lead is assigned.
+                <p className="text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
+                  Turn OFF at any time to immediately stop all automatic AI messages across the school.
                 </p>
               </div>
               <ClaudeSettingSwitch
@@ -964,39 +968,30 @@ export function ClaudeSettingsTab({
               />
             </div>
 
-            {/* Clickable KPI Summary Strip */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            {/* 3 Simple Executive Metrics */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
               {[
                 {
                   label: "Assigned Leads",
                   value: leadCounts.totalAssigned,
                   tone: "var(--label-blue-text)",
-                  targetTab: "leads" as ClaudeSubTab,
                 },
                 {
-                  label: "Active Auto-Reply",
+                  label: "Active Conversations",
                   value: leadCounts.activeCount,
                   tone: "var(--label-green-text)",
-                  targetTab: "leads" as ClaudeSubTab,
                 },
                 {
-                  label: "Paused / Attention",
+                  label: "Paused / Needs Attention",
                   value: leadCounts.pausedCount + leadCounts.errorCount,
                   tone: "var(--label-amber-text)",
-                  targetTab: "leads" as ClaudeSubTab,
-                },
-                {
-                  label: "Branch Rules",
-                  value: settingsDraft.branches.length,
-                  tone: "var(--text-primary)",
-                  targetTab: "studio" as ClaudeSubTab,
                 },
               ].map((kpi) => (
                 <button
                   key={kpi.label}
                   type="button"
-                  onClick={() => handleSelectSubTab(kpi.targetTab)}
-                  className="rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-[var(--bg-hover)] cursor-pointer"
+                  onClick={() => handleSelectSubTab("leads")}
+                  className="rounded-lg px-3.5 py-2.5 text-left transition-colors hover:bg-[var(--bg-hover)] cursor-pointer"
                   style={{
                     background: "var(--bg-panel)",
                     border: "1px solid var(--border-main)",
@@ -1005,7 +1000,7 @@ export function ClaudeSettingsTab({
                   <p className="text-[11px] font-medium" style={{ color: "var(--text-secondary)" }}>
                     {kpi.label}
                   </p>
-                  <p className="text-[18px] font-bold mt-0.5 tabular-nums" style={{ color: kpi.tone }}>
+                  <p className="text-[19px] font-bold mt-0.5 tabular-nums" style={{ color: kpi.tone }}>
                     {kpi.value}
                   </p>
                 </button>
@@ -1013,166 +1008,7 @@ export function ClaudeSettingsTab({
             </div>
           </section>
 
-          {/* Assigned Leads Snapshot directly inside Settings */}
-          <section
-            className="rounded-xl p-4 sm:p-5 space-y-3.5"
-            style={{
-              background: "var(--bg-card)",
-              border: "1px solid var(--border-main)",
-              boxShadow: "var(--shadow-card)",
-            }}
-          >
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <div className="flex items-center gap-2">
-                  <h3 className="text-[13.5px] font-semibold" style={{ color: "var(--text-primary)" }}>
-                    Leads Assigned to Adham
-                  </h3>
-                  <ClaudeStatusPill label={`${leadCounts.totalAssigned} total`} tone="blue" />
-                </div>
-                <p className="text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
-                  Search CRM leads to assign or remove Adham, then monitor or pause them right from Settings.
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                {mergedAssignedLeads.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => handleSelectSubTab("leads")}
-                    className="min-h-[36px] px-3 rounded-lg text-[11.5px] font-medium cursor-pointer"
-                    style={{
-                      background: "var(--bg-input)",
-                      border: "1px solid var(--border-input)",
-                      color: "var(--text-primary)",
-                    }}
-                  >
-                    Manage all ({mergedAssignedLeads.length})
-                  </button>
-                )}
-                <Link
-                  href="/claude-leads"
-                  className="inline-flex items-center gap-1.5 min-h-[36px] px-3.5 rounded-lg text-[11.5px] font-semibold text-white"
-                  style={{ background: "var(--bg-banner)" }}
-                >
-                  <UserPlus className="w-3.5 h-3.5" />
-                  <span>Search & Assign Leads</span>
-                </Link>
-              </div>
-            </div>
-
-            {mergedAssignedLeads.length === 0 ? (
-              <div
-                className="rounded-lg p-5 text-center space-y-2.5"
-                style={{ background: "var(--bg-panel)", border: "1px solid var(--border-main)" }}
-              >
-                <p className="text-[12.5px] font-medium" style={{ color: "var(--text-primary)" }}>
-                  No leads are assigned to Adham yet
-                </p>
-                <p className="text-[11.5px] max-w-md mx-auto" style={{ color: "var(--text-secondary)" }}>
-                  Open the dedicated Lead Assignment page to search by name, phone, branch, or stage and assign leads individually or in bulk.
-                </p>
-                <Link
-                  href="/claude-leads"
-                  className="inline-flex items-center gap-1.5 min-h-[38px] px-4 rounded-lg text-[12px] font-semibold text-white"
-                  style={{ background: "var(--bg-banner)" }}
-                >
-                  <UserPlus className="w-3.5 h-3.5" />
-                  <span>Open Assign Leads Page</span>
-                </Link>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {mergedAssignedLeads.slice(0, 5).map((lead) => {
-                  const meta = getLeadClaudeStatusMeta({
-                    claudeEnabled: lead.claudeEnabled,
-                    claudePaused: lead.claudePaused,
-                    claudePausedReason: lead.claudePausedReason,
-                    globalEnabled: settingsDraft.enabled,
-                  });
-                  const isBusy = leadBusyId === lead.senderId;
-                  return (
-                    <div
-                      key={lead.senderId}
-                      className="rounded-lg px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
-                      style={{
-                        background: "var(--bg-panel)",
-                        border: "1px solid var(--border-main)",
-                      }}
-                    >
-                      <div className="min-w-0 space-y-0.5">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[13px] font-semibold truncate" style={{ color: "var(--text-primary)" }}>
-                            {lead.leadName || lead.name || lead.phone || lead.senderId}
-                          </span>
-                          <ClaudeStatusPill label={lead.channel} tone="slate" />
-                          <ClaudeStatusPill
-                            label={meta.label}
-                            tone={
-                              meta.state === "active"
-                                ? "green"
-                                : meta.state === "paused"
-                                ? "amber"
-                                : meta.state === "global_off"
-                                ? "blue"
-                                : "slate"
-                            }
-                          />
-                        </div>
-                        <p className="text-[11px] truncate" style={{ color: "var(--text-secondary)" }}>
-                          {lead.claudeLastError
-                            ? `Error: ${lead.claudeLastError}`
-                            : lead.claudePaused
-                            ? meta.description
-                            : lead.branch || "No branch set yet"}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        {lead.claudeEnabled && (
-                          <button
-                            type="button"
-                            disabled={isBusy}
-                            onClick={() =>
-                              void handleLeadBoardAction(lead.senderId, { claudePaused: !lead.claudePaused })
-                            }
-                            className="min-h-[34px] px-2.5 rounded-md text-[11px] font-semibold cursor-pointer disabled:opacity-50"
-                            style={
-                              lead.claudePaused
-                                ? { background: "var(--bg-banner)", color: "#fff" }
-                                : {
-                                    background: "var(--bg-card)",
-                                    border: "1px solid var(--border-input)",
-                                    color: "var(--text-primary)",
-                                  }
-                            }
-                          >
-                            {lead.claudePaused ? "Resume" : "Pause"}
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onOpenLeadChat
-                              ? onOpenLeadChat(lead.senderId)
-                              : openChat(lead.senderId)
-                          }
-                          className="min-h-[34px] px-2.5 rounded-md text-[11px] font-medium cursor-pointer"
-                          style={{
-                            background: "var(--bg-card)",
-                            border: "1px solid var(--border-input)",
-                            color: "var(--text-primary)",
-                          }}
-                        >
-                          Open
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-
-          {/* Tool Safety & Escalation Controls */}
+          {/* Card 2: Plain-English Guardrails & Handoff Rules */}
           <section
             className="rounded-xl p-4 sm:p-5 space-y-3.5"
             style={{
@@ -1183,10 +1019,10 @@ export function ClaudeSettingsTab({
           >
             <div>
               <h3 className="text-[13.5px] font-semibold" style={{ color: "var(--text-primary)" }}>
-                Safety Permissions & Escalation
+                Rules & Guardrails
               </h3>
               <p className="text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
-                Control what CRM actions Adham can execute automatically during live conversations.
+                Control how Adham works alongside your admission officers.
               </p>
             </div>
 
@@ -1197,7 +1033,7 @@ export function ClaudeSettingsTab({
                     Pause automatically when staff replies
                   </p>
                   <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
-                    Pauses Adham on a thread as soon as a staff member sends a manual reply until resumed.
+                    Stops Adham immediately as soon as a human team member messages the lead.
                   </p>
                 </div>
                 <ClaudeSettingSwitch
@@ -1216,10 +1052,10 @@ export function ClaudeSettingsTab({
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <p id="claude-book-label" className="text-[13px] font-medium" style={{ color: "var(--text-primary)" }}>
-                    Allow Adham to book Discovery Sessions in CRM
+                    Allow automatic Discovery Session booking
                   </p>
                   <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
-                    Lets Adham mark booked slots and move leads to Audition Booked.
+                    Lets Adham reserve open branch times and move leads to Audition Booked.
                   </p>
                 </div>
                 <ClaudeSettingSwitch
@@ -1238,10 +1074,10 @@ export function ClaudeSettingsTab({
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <p id="claude-update-lead-label" className="text-[13px] font-medium" style={{ color: "var(--text-primary)" }}>
-                    Allow Adham to update lead details and tags
+                    Allow saving lead details automatically
                   </p>
                   <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
-                    Updates branch, instrument, student age, and silent tags such as Existing student.
+                    Updates branch, instrument, and student age mentioned in the chat.
                   </p>
                 </div>
                 <ClaudeSettingSwitch
@@ -1260,10 +1096,10 @@ export function ClaudeSettingsTab({
               <div className="flex items-center justify-between gap-4">
                 <div>
                   <p id="claude-wa-escalation-label" className="text-[13px] font-medium" style={{ color: "var(--text-primary)" }}>
-                    Send WhatsApp escalation alerts
+                    Notify team on WhatsApp for escalations
                   </p>
                   <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
-                    Forwards escalations (complaints, discounts, under-6, human requests) to the escalation contact.
+                    Alerts your team for complaints, discount requests, children under 6, or requests to speak with staff.
                   </p>
                 </div>
                 <ClaudeSettingSwitch
@@ -1279,10 +1115,10 @@ export function ClaudeSettingsTab({
                 />
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
-                <div>
+              {settingsDraft.allowWhatsAppEscalation && (
+                <div className="pt-1">
                   <label className="block text-[11px] font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
-                    Escalation contact (WhatsApp)
+                    WhatsApp number for escalation alerts
                   </label>
                   <input
                     type="tel"
@@ -1291,29 +1127,11 @@ export function ClaudeSettingsTab({
                       setSettingsDraft({ ...settingsDraft, escalationPhone: e.target.value })
                     }
                     placeholder="+20 100 418 9200"
-                    className="w-full min-h-[40px] px-3 text-[16px] sm:text-[13px] rounded-lg outline-none"
+                    className="w-full max-w-sm min-h-[40px] px-3 text-[16px] sm:text-[13px] rounded-lg outline-none"
                     style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)", color: "var(--text-primary)" }}
                   />
                 </div>
-                <div>
-                  <label className="block text-[11px] font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
-                    Silent existing-student CRM label
-                  </label>
-                  <input
-                    type="text"
-                    value={settingsDraft.existingStudentLabelName}
-                    onChange={(e) =>
-                      setSettingsDraft({
-                        ...settingsDraft,
-                        existingStudentLabelName: e.target.value,
-                      })
-                    }
-                    placeholder="Existing student"
-                    className="w-full min-h-[40px] px-3 text-[16px] sm:text-[13px] rounded-lg outline-none"
-                    style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)", color: "var(--text-primary)" }}
-                  />
-                </div>
-              </div>
+              )}
 
               <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
                 <div>
@@ -1335,11 +1153,95 @@ export function ClaudeSettingsTab({
                   className="min-h-[40px] px-4 rounded-lg text-[12px] font-semibold text-white cursor-pointer disabled:opacity-50"
                   style={{ background: "var(--bg-banner)" }}
                 >
-                  {savingSettings ? "Saving..." : "Save controls"}
+                  {savingSettings ? "Saving..." : "Save rules"}
                 </button>
               </div>
             </div>
           </section>
+
+          {/* Collapsed Technical & Connection Details (hidden by default for Chairman clarity) */}
+          <details
+            className="rounded-xl overflow-hidden text-[12px]"
+            style={{
+              background: "var(--bg-card)",
+              border: "1px solid var(--border-main)",
+              boxShadow: "var(--shadow-card)",
+            }}
+          >
+            <summary
+              className="px-4 sm:px-5 py-3 cursor-pointer flex items-center justify-between gap-2 font-medium select-none hover:bg-[var(--bg-hover)]"
+              style={{ color: "var(--text-secondary)" }}
+            >
+              <span>Technical & connection details</span>
+              <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                Internal IDs, label name & Claude console link
+              </span>
+            </summary>
+            <div
+              className="px-4 sm:px-5 py-4 space-y-3"
+              style={{ borderTop: "1px solid var(--border-main)", background: "var(--bg-panel)" }}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <ClaudeStatusPill
+                  label={connection.hasApiKey ? "ANTHROPIC_API_KEY ready" : "API key missing"}
+                  tone={connection.hasApiKey ? "green" : "red"}
+                />
+                {connection.agentId && (
+                  <ClaudeStatusPill label={`Agent: ${connection.agentId}`} tone="blue" />
+                )}
+                {platformAgent && <ClaudeStatusPill label={`v${platformAgent.version}`} tone="slate" />}
+                {connection.dryRun && (
+                  <ClaudeStatusPill label="MESSAGING_DRY_RUN ON" tone="amber" />
+                )}
+              </div>
+
+              <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+                <div className="flex-1 max-w-sm">
+                  <label className="block text-[11px] font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
+                    Silent existing-student CRM label
+                  </label>
+                  <input
+                    type="text"
+                    value={settingsDraft.existingStudentLabelName}
+                    onChange={(e) =>
+                      setSettingsDraft({
+                        ...settingsDraft,
+                        existingStudentLabelName: e.target.value,
+                      })
+                    }
+                    placeholder="Existing student"
+                    className="w-full min-h-[38px] px-3 text-[16px] sm:text-[12px] rounded-lg outline-none"
+                    style={{ background: "var(--bg-card)", border: "1px solid var(--border-input)", color: "var(--text-primary)" }}
+                  />
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={savingSettings}
+                    onClick={() => void saveGlobalSettings()}
+                    className="min-h-[38px] px-3.5 rounded-lg text-[11.5px] font-semibold text-white cursor-pointer disabled:opacity-50"
+                    style={{ background: "var(--bg-banner)" }}
+                  >
+                    Save label
+                  </button>
+                  <a
+                    href="https://platform.claude.com"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 min-h-[38px] px-3 rounded-lg text-[11.5px] font-medium"
+                    style={{
+                      background: "var(--bg-card)",
+                      border: "1px solid var(--border-input)",
+                      color: "var(--text-primary)",
+                    }}
+                  >
+                    <span>Open Claude Platform</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+              </div>
+            </div>
+          </details>
         </div>
       )}
 
@@ -1645,7 +1547,7 @@ export function ClaudeSettingsTab({
       {/* ── SUB-TAB 4: Prompt Studio & Branches ──────────────────────────────── */}
       {subTab === "studio" && (
         <div className="space-y-4">
-          {/* Prompt and Model Studio */}
+          {/* Assistant Instructions & Model */}
           <section
             className="rounded-xl p-4 sm:p-5 space-y-4"
             style={{
@@ -1654,52 +1556,20 @@ export function ClaudeSettingsTab({
               boxShadow: "var(--shadow-card)",
             }}
           >
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <h3 className="text-[13.5px] font-semibold" style={{ color: "var(--text-primary)" }}>
-                    Prompt and Model Studio
-                  </h3>
-                  {platformAgent && <ClaudeStatusPill label={`Version ${platformAgent.version}`} tone="blue" />}
-                  {platformAgent && !platformAgent.hasAllCrmTools && (
-                    <ClaudeStatusPill label="CRM tools not yet synced" tone="amber" />
-                  )}
-                </div>
-                <p className="text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
-                  Published directly to your Managed Agent on platform.claude.com with CRM tools attached.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => void fetchStatus()}
-                className="inline-flex items-center gap-1.5 min-h-[38px] px-3 rounded-lg text-[12px] font-medium cursor-pointer"
-                style={{
-                  background: "var(--bg-input)",
-                  border: "1px solid var(--border-input)",
-                  color: "var(--text-primary)",
-                }}
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Reload from Claude</span>
-              </button>
+            <div>
+              <h3 className="text-[13.5px] font-semibold" style={{ color: "var(--text-primary)" }}>
+                Assistant Instructions & Model
+              </h3>
+              <p className="text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
+                Customize how Adham responds to parents and leads, and choose which AI model runs his replies.
+              </p>
             </div>
-
-            {platformAgent && platformAgent.attachedCrmTools.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-[11px] font-medium inline-flex items-center gap-1 mr-1" style={{ color: "var(--text-secondary)" }}>
-                  <Wrench className="w-3 h-3" /> Tools:
-                </span>
-                {platformAgent.attachedCrmTools.map((toolName) => (
-                  <ClaudeStatusPill key={toolName} label={toolName} tone="slate" />
-                ))}
-              </div>
-            )}
 
             <form onSubmit={handleSaveAgentToPlatform} className="space-y-3">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
-                    Agent name
+                    Assistant name
                   </label>
                   <input
                     type="text"
@@ -1713,7 +1583,7 @@ export function ClaudeSettingsTab({
 
                 <div>
                   <label className="block text-[11px] font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
-                    Model
+                    AI Model
                   </label>
                   <select
                     value={agentModel}
@@ -1740,7 +1610,7 @@ export function ClaudeSettingsTab({
                     type="text"
                     value={customModel}
                     onChange={(e) => setCustomModel(e.target.value)}
-                    placeholder="claude-sonnet-4-6"
+                    placeholder="claude-sonnet-5-5"
                     required
                     className="w-full min-h-[40px] px-3 text-[16px] sm:text-[13px] rounded-lg outline-none"
                     style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)", color: "var(--text-primary)" }}
@@ -1750,14 +1620,9 @@ export function ClaudeSettingsTab({
 
               <div>
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
-                  <div className="flex items-center gap-2">
-                    <label htmlFor="claude-system-prompt" className="text-[11px] font-medium" style={{ color: "var(--text-secondary)" }}>
-                      System prompt
-                    </label>
-                    <span className="text-[10px] font-mono" style={{ color: "var(--text-muted)" }}>
-                      {agentSystem.length.toLocaleString()} chars
-                    </span>
-                  </div>
+                  <label htmlFor="claude-system-prompt" className="text-[11px] font-medium" style={{ color: "var(--text-secondary)" }}>
+                    Instructions (Adham Playbook)
+                  </label>
                   {!confirmLoadPlaybook ? (
                     <button
                       type="button"
@@ -1765,11 +1630,11 @@ export function ClaudeSettingsTab({
                       className="text-[11px] font-medium hover:underline cursor-pointer"
                       style={{ color: "var(--bg-banner)" }}
                     >
-                      Load Adham Playbook template
+                      Reset to default Playbook
                     </button>
                   ) : (
                     <div className="flex items-center gap-2 text-[11px]">
-                      <span style={{ color: "var(--text-secondary)" }}>Replace editor text?</span>
+                      <span style={{ color: "var(--text-secondary)" }}>Replace current text?</span>
                       <button
                         type="button"
                         onClick={() => {
@@ -1780,7 +1645,7 @@ export function ClaudeSettingsTab({
                         className="font-semibold cursor-pointer hover:underline"
                         style={{ color: "var(--bg-banner)" }}
                       >
-                        Yes, load playbook
+                        Yes, reset
                       </button>
                       <button
                         type="button"
@@ -1807,7 +1672,62 @@ export function ClaudeSettingsTab({
                 />
               </div>
 
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              {/* Collapsed Developer & Sync Details */}
+              <details
+                className="rounded-lg overflow-hidden text-[11.5px]"
+                style={{
+                  background: "var(--bg-panel)",
+                  border: "1px solid var(--border-main)",
+                }}
+              >
+                <summary
+                  className="px-3 py-2 cursor-pointer flex items-center justify-between gap-2 font-medium select-none hover:bg-[var(--bg-hover)]"
+                  style={{ color: "var(--text-secondary)" }}
+                >
+                  <span>Developer & sync details</span>
+                  <span className="text-[10.5px]" style={{ color: "var(--text-muted)" }}>
+                    {platformAgent ? `v${platformAgent.version} · ` : ""}
+                    {agentSystem.length.toLocaleString()} chars
+                  </span>
+                </summary>
+                <div
+                  className="px-3 py-3 space-y-2.5"
+                  style={{ borderTop: "1px solid var(--border-main)", background: "var(--bg-card)" }}
+                >
+                  {platformAgent && platformAgent.attachedCrmTools.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px] font-medium inline-flex items-center gap-1 mr-1" style={{ color: "var(--text-secondary)" }}>
+                        <Wrench className="w-3 h-3" /> Attached CRM tools:
+                      </span>
+                      {platformAgent.attachedCrmTools.map((toolName) => (
+                        <ClaudeStatusPill key={toolName} label={toolName} tone="slate" />
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                      {platformAgent && !platformAgent.hasAllCrmTools
+                        ? "Tools not yet synced to latest definition."
+                        : "All CRM booking & escalation tools attached."}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void fetchStatus()}
+                      className="inline-flex items-center gap-1.5 min-h-[34px] px-3 rounded-lg text-[11px] font-medium cursor-pointer"
+                      style={{
+                        background: "var(--bg-input)",
+                        border: "1px solid var(--border-input)",
+                        color: "var(--text-primary)",
+                      }}
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>Reload from Claude</span>
+                    </button>
+                  </div>
+                </div>
+              </details>
+
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1">
                 <div className="min-w-0">
                   {agentFeedback && (
                     <p
@@ -1826,7 +1746,7 @@ export function ClaudeSettingsTab({
                   className="min-h-[42px] px-4 rounded-lg text-[12px] font-semibold text-white cursor-pointer disabled:opacity-50"
                   style={{ background: "var(--bg-banner)" }}
                 >
-                  {savingAgent ? "Saving to Claude Platform..." : "Save to Claude Platform"}
+                  {savingAgent ? "Saving..." : "Save changes"}
                 </button>
               </div>
             </form>
