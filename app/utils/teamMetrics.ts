@@ -1215,4 +1215,35 @@ export function buildAssignedLeadsAgentPool(
   return { total, options };
 }
 
+export interface SettingsStaffEntry {
+  name: string;
+  role?: string;
+  email?: string;
+  avatar?: string;
+  active?: boolean;
+}
+
+/**
+ * Indexes active staff members configured in Settings by lowercase name so
+ * historical or deleted test accounts (e.g. from old lead logs) are excluded from staff lists.
+ */
+export function buildSettingsStaffLookup<T extends SettingsStaffEntry>(
+  members: ReadonlyArray<T> | null | undefined,
+  { includeInactive = false }: { includeInactive?: boolean } = {}
+): Map<string, T> {
+  const map = new Map<string, T>();
+  if (!Array.isArray(members)) return map;
+  for (let i = 0; i < members.length; i++) {
+    const m = members[i];
+    if (!m || (!includeInactive && m.active === false) || !isRealAssignedAgent(m.name)) continue;
+    const cleanName = m.name.trim();
+    const lower = cleanName.toLowerCase();
+    if (!map.has(lower)) {
+      map.set(lower, { ...m, name: cleanName, active: m.active !== false });
+    }
+  }
+  return map;
+}
+
+
 

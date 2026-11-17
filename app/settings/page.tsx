@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { useAuth, Role, ROLE_OPTIONS, getRoleDisplayName, normalizeRole, canManageTeamRole, canAccessRoute } from "../components/AuthProvider";
+import { organizeTeamMembersByRole } from "../utils/roles";
 import { useCRM } from "../context/CRMContext";
 import { useBranches } from "../lib/branches";
 import { ChevronDown, Check, Trash2, Search, X, AlertTriangle, Bell, BellOff } from "lucide-react";
@@ -556,6 +557,7 @@ export default function SettingsPage() {
 
   const activeSeats = team.filter((m) => m.active).length;
   const isSeatLimitReached = activeSeats >= maxSeats;
+  const organizedTeamGroups = useMemo(() => organizeTeamMembersByRole(team), [team]);
 
   // Update team member role or active state
   const handleUpdateMember = async (id: string, updates: Partial<TeamMember>) => {
@@ -1261,14 +1263,36 @@ export default function SettingsPage() {
           </span>
         </div>
 
-        <div className="mb-1" style={{ borderBottom: "1px solid var(--border-main)" }} />
-
         {loadingTeam ? (
-          <div className="py-6 text-center text-[12px]" style={{ color: "var(--text-muted)" }}>
+          <div className="py-6 text-center text-[12px]" style={{ color: "var(--text-muted)", borderTop: "1px solid var(--border-main)" }}>
             Loading team members…
           </div>
+        ) : organizedTeamGroups.length === 0 ? (
+          <div className="py-6 text-center text-[12px]" style={{ color: "var(--text-muted)", borderTop: "1px solid var(--border-main)" }}>
+            No team members found.
+          </div>
         ) : (
-          team.map((member) => {
+          <div className="space-y-4">
+            {organizedTeamGroups.map((group) => (
+              <section key={group.key} aria-label={group.label}>
+                <div
+                  className="flex items-center justify-between py-1.5"
+                  style={{ borderBottom: "1px solid var(--border-main)" }}
+                >
+                  <span
+                    className="text-[10px] font-bold uppercase tracking-wider"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    {group.label}
+                  </span>
+                  <span
+                    className="text-[10px] font-medium tabular-nums"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    {group.members.length}
+                  </span>
+                </div>
+                {group.members.map((member) => {
             const isSelf = member.id === user?.id || member.email === user?.email;
             const normMemberRole = normalizeRole(member.role);
             const isChairmanMember = normMemberRole === "chairman";
@@ -1449,7 +1473,10 @@ export default function SettingsPage() {
                 </div>
               </div>
             );
-          })
+          })}
+              </section>
+            ))}
+          </div>
         )}
 
 

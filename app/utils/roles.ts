@@ -143,3 +143,81 @@ export function getDefaultRouteForRole(role?: string): string {
   }
 }
 
+export type SettingsTeamGroupKey = "chairman" | "admissions" | "other";
+
+export interface SettingsTeamGroup<T> {
+  key: SettingsTeamGroupKey;
+  label: string;
+  members: T[];
+}
+
+export interface RoleSortableMember {
+  name?: string;
+  email?: string;
+  role?: string;
+  active?: boolean;
+}
+
+const SETTINGS_ROLE_SORT_RANK: Record<CanonicalRole, number> = {
+  chairman: 0,
+  admission_advanced: 1,
+  admission_officer: 2,
+  enrollment_director: 3,
+  finance: 4,
+  marketing: 5,
+};
+
+const SETTINGS_GROUP_META: ReadonlyArray<{ key: SettingsTeamGroupKey; label: string }> = [
+  { key: "chairman", label: "Chairman" },
+  { key: "admissions", label: "Admissions" },
+  { key: "other", label: "Other Roles" },
+];
+
+/** Compares two team members by active state (active first), role hierarchy (Chairman, Admissions, other roles), and name. */
+export function compareTeamMembersByRole(a: RoleSortableMember, b: RoleSortableMember): number {
+  const aActive = a.active !== false;
+  const bActive = b.active !== false;
+  if (aActive !== bActive) return aActive ? -1 : 1;
+
+  const rankDiff =
+    SETTINGS_ROLE_SORT_RANK[normalizeRole(a.role)] - SETTINGS_ROLE_SORT_RANK[normalizeRole(b.role)];
+  if (rankDiff !== 0) return rankDiff;
+
+  const nameCompare = (a.name || "").trim().localeCompare((b.name || "").trim(), undefined, {
+    sensitivity: "base",
+  });
+  if (nameCompare !== 0) return nameCompare;
+
+  return (a.email || "").trim().localeCompare((b.email || "").trim(), undefined, {
+    sensitivity: "base",
+  });
+}
+
+/** Groups Settings team members into Chairman, Admissions, and Other Roles with deactivated accounts at the end of their own role group. */
+export function organizeTeamMembersByRole<T extends RoleSortableMember>(
+  members: ReadonlyArray<T>
+): SettingsTeamGroup<T>[] {
+  const buckets: Record<SettingsTeamGroupKey, T[]> = {
+    chairman: [],
+    admissions: [],
+    other: [],
+  };
+
+  for (const member of [...members].sort(compareTeamMembersByRole)) {
+    const norm = normalizeRole(member.role);
+    if (norm === "chairman") {
+      buckets.chairman.push(member);
+    } else if (norm === "admission_advanced" || norm === "admission_officer") {
+      buckets.admissions.push(member);
+    } else {
+      buckets.other.push(member);
+    }
+  }
+
+  return SETTINGS_GROUP_META.filter(({ key }) => buckets[key].length > 0).map(({ key, label }) => ({
+    key,
+    label,
+    members: buckets[key],
+  }));
+}
+

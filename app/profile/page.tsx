@@ -35,7 +35,22 @@ import {
   Crown,
   Activity,
   ChevronRight,
+  Clock,
+  Timer,
+  Zap,
 } from "lucide-react";
+import { useTeamPerformanceMetrics } from "../hooks/useTeamPerformanceMetrics";
+import { ResponseAuditModal, type ResponseAuditTarget } from "../components/ResponseAuditModal";
+import { ScreenTimeAuditModal } from "../components/ScreenTimeAuditModal";
+import { ScreenTimeBreakdownCard } from "../components/ScreenTimeBreakdownCard";
+import {
+  formatOnlineDuration,
+  formatPresenceWithScreen,
+  formatResponseDuration,
+  getPresenceStatusMeta,
+  getResponseSpeedTone,
+  pickHeadlineDurationMs,
+} from "../utils/agentMetrics";
 
 /* ── Image resize utility for avatar optimization ── */
 function resizeImageToAvatar(file: File, maxWidth = 256, maxHeight = 256): Promise<string> {
@@ -68,14 +83,14 @@ function resizeImageToAvatar(file: File, maxWidth = 256, maxHeight = 256): Promi
   });
 }
 
-/* ── Date range helpers ── */
+/* ── Date range helpers (DST-safe calendar boundaries matching Team Activities) ── */
 function getPeriodBounds(mode: "all" | "today" | "week" | "month") {
   const now = new Date();
   if (mode === "all") return { start: 0, end: Infinity };
 
   if (mode === "today") {
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    const end = start + 86400000;
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0).getTime();
+    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime() + 1;
     return { start, end };
   }
 
@@ -83,15 +98,14 @@ function getPeriodBounds(mode: "all" | "today" | "week" | "month") {
     // Saudi / Cairo week starts on Saturday (day 6 in JS Date: Sun=0, Sat=6)
     const day = now.getDay();
     const diff = day === 6 ? 0 : day + 1; // days past since Saturday
-    const sat = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diff);
-    const start = sat.getTime();
-    const end = start + 7 * 86400000;
-    return { start, end };
+    const sat = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diff, 0, 0, 0, 0);
+    const fri = new Date(sat.getFullYear(), sat.getMonth(), sat.getDate() + 6, 23, 59, 59, 999);
+    return { start: sat.getTime(), end: fri.getTime() + 1 };
   }
 
   // Month
-  const start = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-  const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
+  const start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0).getTime();
+  const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0, 0).getTime();
   return { start, end: nextMonth };
 }
 
@@ -181,6 +195,45 @@ export default function ProfilePage() {
 
   // Time filter for analytics
   const [timeFilter, setTimeFilter] = useState<"all" | "month" | "week" | "today">("all");
+  const [responseAuditTarget, setResponseAuditTarget] = useState<ResponseAuditTarget | null>(null);
+  const [screenAuditOpen, setScreenAuditOpen] = useState(false);
+
+  const { startMs: perfStartMs, endMs: perfEndMs } = useMemo(() => {
+    if (timeFilter === "all") return { startMs: 0, endMs: 0 };
+    const bounds = getPeriodBounds(timeFilter);
+    return {
+      startMs: bounds.start,
+      endMs: Number.isFinite(bounds.end) ? bounds.end - 1 : 0,
+    };
+  }, [timeFilter]);
+
+  const {
+    metrics: perfMetrics,
+    loading: perfLoading,
+    unsupported: perfUnsupported,
+  } = useTeamPerformanceMetrics({
+    startMs: perfStartMs,
+    endMs: perfEndMs,
+    agent: user?.name || null,
+    enabled: Boolean(user?.name),
+  });
+
+  const selfPerf = useMemo(() => {
+    if (!perfMetrics || perfMetrics.agents.length === 0) return null;
+    const cleanName = (user?.name || "").trim().toLowerCase();
+    return (
+      perfMetrics.agents.find((a) => a.name.trim().toLowerCase() === cleanName) ||
+      perfMetrics.agents[0] ||
+      null
+    );
+  }, [perfMetrics, user?.name]);
+
+  const profilePeriodLabel = useMemo(() => {
+    if (timeFilter === "today") return "Today";
+    if (timeFilter === "week") return "This Week";
+    if (timeFilter === "month") return "This Month";
+    return "All Time";
+  }, [timeFilter]);
 
   // Profile photo state
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -685,13 +738,34 @@ export default function ProfilePage() {
                       </button>
                     </div>
                   ) : (
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <h2
                         className="text-2xl sm:text-3xl font-extrabold tracking-tight"
                         style={{ color: "var(--text-primary)" }}
                       >
                         {currentStaff.name}
                       </h2>
+                      {selfPerf && (() => {
+                        const statusMeta = getPresenceStatusMeta(selfPerf.status);
+                        return (
+                          <span
+                            className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-0.5 rounded-full"
+                            style={{
+                              background: statusMeta.bgVar,
+                              color: statusMeta.textVar,
+                              border: `1px solid ${statusMeta.borderVar}`,
+                            }}
+                          >
+                            {selfPerf.status !== "offline" && (
+                              <span
+                                className="w-1.5 h-1.5 rounded-full"
+                                style={{ background: statusMeta.dotVar }}
+                              />
+                            )}
+                            {formatPresenceWithScreen(selfPerf.status, selfPerf.currentScreenLabel)}
+                          </span>
+                        );
+                      })()}
                       {isSelf && (
                         <button
                           type="button"
@@ -871,6 +945,184 @@ export default function ProfilePage() {
             />
           </div>
 
+          {/* Responsiveness & CRM Presence Cards */}
+          {perfLoading && !perfMetrics ? (
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5" aria-busy="true">
+              {[0, 1, 2, 3].map((idx) => (
+                <div
+                  key={idx}
+                  className="rounded-2xl p-4 h-28 animate-pulse"
+                  style={{ background: "var(--bg-card)", border: "1px solid var(--border-main)" }}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
+              {(() => {
+                const firstHeadlineMs = pickHeadlineDurationMs(
+                  selfPerf?.firstResponseMedianMs,
+                  selfPerf?.firstResponseAvgMs
+                );
+                const replyHeadlineMs = pickHeadlineDurationMs(
+                  selfPerf?.medianReplyMs,
+                  selfPerf?.avgReplyMs
+                );
+                const firstTone = getResponseSpeedTone(firstHeadlineMs);
+                const replyTone = getResponseSpeedTone(replyHeadlineMs);
+                return (
+                  <>
+                    <button
+                      type="button"
+                      disabled={perfUnsupported}
+                      onClick={() =>
+                        setResponseAuditTarget({ kind: "first", agentName: currentStaff.name })
+                      }
+                      className="rounded-2xl p-4 text-left w-full cursor-pointer disabled:cursor-default transition-all hover:border-[var(--border-input)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--bg-banner)] shadow-xs flex flex-col justify-between"
+                      style={{ background: "var(--bg-card)", border: "1px solid var(--border-main)" }}
+                    >
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className="text-xs font-medium truncate" style={{ color: "var(--text-secondary)" }}>
+                          First Response Time
+                        </span>
+                        <Timer className="w-4 h-4 shrink-0" style={{ color: "var(--text-muted)" }} />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xl sm:text-2xl font-extrabold tracking-tight tabular-nums" style={{ color: "var(--text-primary)" }}>
+                            {formatResponseDuration(firstHeadlineMs)}
+                          </span>
+                          {selfPerf && selfPerf.firstResponseCount > 0 && (
+                            <span
+                              className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                              style={{
+                                background: firstTone.bgVar,
+                                color: firstTone.textVar,
+                                border: `1px solid ${firstTone.borderVar}`,
+                              }}
+                            >
+                              {firstTone.label}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] truncate mt-1" style={{ color: "var(--text-muted)" }}>
+                          Avg {formatResponseDuration(selfPerf?.firstResponseAvgMs)} · {selfPerf?.firstResponseCount || 0} leads
+                        </p>
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={perfUnsupported}
+                      onClick={() =>
+                        setResponseAuditTarget({ kind: "all", agentName: currentStaff.name })
+                      }
+                      className="rounded-2xl p-4 text-left w-full cursor-pointer disabled:cursor-default transition-all hover:border-[var(--border-input)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--bg-banner)] shadow-xs flex flex-col justify-between"
+                      style={{ background: "var(--bg-card)", border: "1px solid var(--border-main)" }}
+                    >
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className="text-xs font-medium truncate" style={{ color: "var(--text-secondary)" }}>
+                          Median Reply Time
+                        </span>
+                        <Clock className="w-4 h-4 shrink-0" style={{ color: "var(--text-muted)" }} />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xl sm:text-2xl font-extrabold tracking-tight tabular-nums" style={{ color: "var(--text-primary)" }}>
+                            {formatResponseDuration(replyHeadlineMs)}
+                          </span>
+                          {selfPerf && selfPerf.replyTurnsCount > 0 && (
+                            <span
+                              className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                              style={{
+                                background: replyTone.bgVar,
+                                color: replyTone.textVar,
+                                border: `1px solid ${replyTone.borderVar}`,
+                              }}
+                            >
+                              {replyTone.label}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] truncate mt-1" style={{ color: "var(--text-muted)" }}>
+                          Avg {formatResponseDuration(selfPerf?.avgReplyMs)} · {selfPerf?.replyTurnsCount || 0} replies
+                        </p>
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={perfUnsupported}
+                      onClick={() =>
+                        setResponseAuditTarget({ kind: "all", agentName: currentStaff.name })
+                      }
+                      className="rounded-2xl p-4 text-left w-full cursor-pointer disabled:cursor-default transition-all hover:border-[var(--border-input)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--bg-banner)] shadow-xs flex flex-col justify-between"
+                      style={{ background: "var(--bg-card)", border: "1px solid var(--border-main)" }}
+                    >
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className="text-xs font-medium truncate" style={{ color: "var(--text-secondary)" }}>
+                          Replies Within 15m
+                        </span>
+                        <Zap className="w-4 h-4 shrink-0" style={{ color: "var(--text-muted)" }} />
+                      </div>
+                      <div>
+                        <p className="text-xl sm:text-2xl font-extrabold tracking-tight tabular-nums" style={{ color: "var(--text-primary)" }}>
+                          {selfPerf && selfPerf.replyTurnsCount > 0 ? `${selfPerf.fastReply15mPct}%` : "—"}
+                        </p>
+                        <p className="text-[11px] truncate mt-1" style={{ color: "var(--text-muted)" }}>
+                          {selfPerf?.fastReply15mCount || 0} of {selfPerf?.replyTurnsCount || 0} replies
+                          {(selfPerf?.currentlyWaitingCount || 0) > 0
+                            ? ` · ${selfPerf?.currentlyWaitingCount} waiting`
+                            : ""}
+                        </p>
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={perfUnsupported}
+                      onClick={() => setScreenAuditOpen(true)}
+                      className="rounded-2xl p-4 text-left w-full cursor-pointer disabled:cursor-default transition-all hover:border-[var(--border-input)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--bg-banner)] shadow-xs flex flex-col justify-between"
+                      style={{ background: "var(--bg-card)", border: "1px solid var(--border-main)" }}
+                    >
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className="text-xs font-medium truncate" style={{ color: "var(--text-secondary)" }}>
+                          CRM Online Time
+                        </span>
+                        <Activity className="w-4 h-4 shrink-0" style={{ color: "var(--text-muted)" }} />
+                      </div>
+                      <div>
+                        <div className="flex items-baseline gap-1.5 flex-wrap">
+                          <span className="text-xl sm:text-2xl font-extrabold tracking-tight tabular-nums" style={{ color: "var(--text-primary)" }}>
+                            {perfUnsupported ? "—" : formatOnlineDuration(selfPerf?.activeMs ?? 0)}
+                          </span>
+                          <span className="text-xs font-medium" style={{ color: "var(--text-secondary)" }}>
+                            active
+                          </span>
+                        </div>
+                        <p className="text-[11px] truncate mt-1" style={{ color: "var(--text-muted)" }}>
+                          {perfUnsupported
+                            ? "Backend update pending"
+                            : `${formatOnlineDuration(selfPerf?.connectedMs ?? 0)} open${selfPerf?.daysActiveCount ? ` · ${selfPerf.daysActiveCount}d active` : ""}`}
+                        </p>
+                      </div>
+                    </button>
+                  </>
+                );
+              })()}
+            </div>
+          )}
+
+          {!(perfLoading && !perfMetrics) && (
+            <ScreenTimeBreakdownCard
+              title="Your Screen Activity"
+              activeMs={selfPerf?.activeMs ?? 0}
+              connectedMs={selfPerf?.connectedMs ?? 0}
+              screens={selfPerf?.screens}
+              unsupported={perfUnsupported}
+              onOpenAudit={perfMetrics ? () => setScreenAuditOpen(true) : undefined}
+            />
+          )}
+
           {/* Visual Funnel Card */}
           <div
             className="rounded-2xl p-4 sm:p-5 transition-all shadow-xs"
@@ -1039,6 +1291,27 @@ export default function ProfilePage() {
           </div>
         </div>
       </div>
+
+      {screenAuditOpen && perfMetrics && (
+        <ScreenTimeAuditModal
+          agents={perfMetrics.agents}
+          teamSummary={perfMetrics.team}
+          initialAgentName={currentStaff.name}
+          periodDescription={profilePeriodLabel}
+          onClose={() => setScreenAuditOpen(false)}
+        />
+      )}
+
+      {responseAuditTarget && (
+        <ResponseAuditModal
+          target={responseAuditTarget}
+          startMs={perfStartMs}
+          endMs={perfEndMs}
+          periodDescription={profilePeriodLabel}
+          onChangeTarget={setResponseAuditTarget}
+          onClose={() => setResponseAuditTarget(null)}
+        />
+      )}
     </div>
   );
 }

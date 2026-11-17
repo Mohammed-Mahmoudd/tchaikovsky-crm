@@ -1,7 +1,7 @@
 "use client";
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useAuth, isAssignableRole, canAccessRoute, type LogoutReason } from "../components/AuthProvider";
 import { formatMetaErrorMessage } from "../utils/errorParser";
 import {
@@ -39,6 +39,10 @@ import {
   sendTestDevicePush,
   syncActivePushSubscription,
 } from "../utils/pushNotifications";
+import {
+  postPresenceHeartbeat,
+  resetPresenceClientSupportState,
+} from "../utils/presenceClient";
 
 export {
   computeUnreadFromMessages,
@@ -844,6 +848,13 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     pollPausedRef.current = paused;
   }, []);
   const router = useRouter();
+  const pathname = usePathname() || "/";
+  const currentScreenRef = useRef<string>(pathname);
+  const lastReportedScreenRef = useRef<string>("");
+  const sendPresenceRef = useRef<
+    ((event: "open" | "ping" | "navigate" | "focus" | "blur" | "leave", keepalive?: boolean) => void) | null
+  >(null);
+  const resetPresenceIdleRef = useRef<(() => void) | null>(null);
 
   // ── Fetch assignable agents and full team list (cached on backend, invalidated on team_updated SSE) ──
   const fetchAgents = useCallback(async () => {
@@ -851,7 +862,6 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       const mergedMap = new Map<string, AssignableAgent>();
       const addMember = (m: any) => {
         if (!m || !m.name) return;
-        if (m.active === false) return;
         const cleanName = String(m.name).trim();
         if (!cleanName) return;
         const key = cleanName.toLowerCase();
@@ -864,10 +874,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         });
       };
 
-      // 1. Fetch active staff list
-      let res = await authFetch(`${API}/messages/agents?all=1`, { cache: "no-store" }).catch(() => null);
+      // 1. Fetch active + deactivated staff list configured in Settings
+      let res = await authFetch(`${API}/messages/agents?all=1&includeInactive=1`, { cache: "no-store" }).catch(() => null);
       if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
-        res = await authFetch(`${DIRECT_API}/messages/agents?all=1`, { cache: "no-store" }).catch(() => null);
+        res = await authFetch(`${DIRECT_API}/messages/agents?all=1&includeInactive=1`, { cache: "no-store" }).catch(() => null);
       }
       if (res && res.status === 401) return;
       if (res && res.ok) {
@@ -877,7 +887,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         }
       }
 
-      // 2. If authenticated with team management rights (Chairman/Director), fetch full users list so all roles are included
+      // 2. If authenticated with team management rights (Chairman/Director), fetch full users list so all roles and deactivated accounts are included
       if (token && canManageTeam) {
         try {
           const usersRes = await authFetch(`${API}/auth/users`, {
@@ -893,11 +903,13 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (mergedMap.size > 0) {
-        const allMembers = Array.from(mergedMap.values());
+        const allMembers = Array.from(mergedMap.values()).sort((a, b) =>
+          (a.active !== false) === (b.active !== false) ? 0 : a.active !== false ? -1 : 1
+        );
         setTeamMembers(allMembers);
 
-        const filtered = allMembers.filter((a: AssignableAgent) =>
-          isAssignableRole(a.role)
+        const filtered = allMembers.filter(
+          (a: AssignableAgent) => a.active !== false && isAssignableRole(a.role)
         );
         setAssignableAgents(filtered);
       }
@@ -1770,6 +1782,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             }
 
             if (payload.type === "message" && payload.data) {
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("crm:metrics-dirty"));
+              }
               const { conversationId, conversation: remoteConv, message } = payload.data;
               if (!conversationId) return;
 
@@ -2294,6 +2309,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             } else if (payload.type === "labels_updated") {
               // Lead label catalog modified — refresh labels immediately
               fetchLabels();
+            } else if (payload.type === "presence_updated" && payload.data) {
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(
+                  new CustomEvent("crm:presence-updated", { detail: payload.data })
+                );
+              }
             }
           } catch (e) {
             console.warn("CRMContext: SSE message parse error", e);
@@ -2340,6 +2361,122 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     fetchLabels,
     isMetaReviewer,
   ]);
+
+  // ── Presence heartbeat: tracks CRM online, active & per-screen time across tabs ──
+  useEffect(() => {
+    if (typeof window === "undefined" || !token) return;
+    resetPresenceClientSupportState();
+
+    const IDLE_THRESHOLD_MS = 5 * 60 * 1000;
+    const HEARTBEAT_MS = 30 * 1000;
+    let lastInteractionAt = Date.now();
+    let lastTouchWriteAt = 0;
+
+    const resetIdleClock = () => {
+      const now = Date.now();
+      lastTouchWriteAt = now;
+      lastInteractionAt = now;
+    };
+
+    const markInteraction = () => {
+      const now = Date.now();
+      if (now - lastTouchWriteAt < 2000) return;
+      lastTouchWriteAt = now;
+      lastInteractionAt = now;
+    };
+
+    const sendState = (
+      event: "open" | "ping" | "navigate" | "focus" | "blur" | "leave",
+      keepalive = false
+    ) => {
+      const now = Date.now();
+      const isVisible =
+        typeof document !== "undefined" ? document.visibilityState === "visible" : true;
+      const idleMs = Math.max(0, now - lastInteractionAt);
+      const isActive = event !== "leave" && isVisible && idleMs < IDLE_THRESHOLD_MS;
+      void postPresenceHeartbeat({
+        token,
+        event,
+        screen: currentScreenRef.current,
+        isVisible,
+        isActive,
+        idleMs,
+        keepalive,
+      });
+    };
+
+    sendPresenceRef.current = sendState;
+    resetPresenceIdleRef.current = resetIdleClock;
+
+    const handleVisibilityChange = () => {
+      const visible = document.visibilityState === "visible";
+      if (visible) {
+        resetIdleClock();
+        sendState("focus");
+      } else {
+        sendState("blur", true);
+      }
+    };
+
+    const handleWindowFocus = () => {
+      resetIdleClock();
+      sendState("focus");
+    };
+
+    const handlePageHide = () => {
+      sendState("leave", true);
+    };
+
+    const activityEvents: ReadonlyArray<keyof WindowEventMap> = [
+      "pointerdown",
+      "keydown",
+      "mousemove",
+      "touchstart",
+      "scroll",
+    ];
+    for (let i = 0; i < activityEvents.length; i++) {
+      const evt = activityEvents[i];
+      window.addEventListener(evt, markInteraction, { passive: true, capture: evt === "scroll" });
+    }
+    window.addEventListener("focus", handleWindowFocus);
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("beforeunload", handlePageHide);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    lastReportedScreenRef.current = currentScreenRef.current;
+    sendState("open");
+    const timer = setInterval(() => {
+      sendState("ping");
+    }, HEARTBEAT_MS);
+
+    return () => {
+      clearInterval(timer);
+      if (sendPresenceRef.current === sendState) sendPresenceRef.current = null;
+      if (resetPresenceIdleRef.current === resetIdleClock) resetPresenceIdleRef.current = null;
+      for (let i = 0; i < activityEvents.length; i++) {
+        const evt = activityEvents[i];
+        window.removeEventListener(evt, markInteraction, evt === "scroll");
+      }
+      window.removeEventListener("focus", handleWindowFocus);
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("beforeunload", handlePageHide);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [token]);
+
+  // Report CRM screen navigation transitions immediately
+  useEffect(() => {
+    const nextPath = pathname || "/";
+    const prevPath = currentScreenRef.current;
+    currentScreenRef.current = nextPath;
+
+    if (!token || !sendPresenceRef.current) return;
+    if (lastReportedScreenRef.current === nextPath && prevPath === nextPath) return;
+
+    lastReportedScreenRef.current = nextPath;
+    resetPresenceIdleRef.current?.();
+    sendPresenceRef.current("navigate");
+  }, [pathname, token]);
 
   // ── Non-overlapping background polling (3s delay after completion) ──
   useEffect(() => {

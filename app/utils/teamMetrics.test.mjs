@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildAssignedLeadsAgentPool,
   buildFunnelAuditReport,
+  buildSettingsStaffLookup,
   clampRatePct,
   collectLoggedMessageKeys,
   getAttendedTime,
@@ -337,6 +338,27 @@ describe("teamMetrics", () => {
     assert.equal(matchesAssignedLeadAgentFilter("Mariam", "all"), true);
     assert.equal(matchesAssignedLeadAgentFilter(" mariam ", "Mariam"), true);
     assert.equal(matchesAssignedLeadAgentFilter("Youssef", "Mariam"), false);
+
+    const settingsLookup = buildSettingsStaffLookup([
+      { name: " Mariam ", role: "admission_officer" },
+      { name: "Inactive", role: "admission_officer", active: false },
+      { name: "Staff", role: "admission_officer" },
+    ]);
+    assert.equal(settingsLookup.has("mariam"), true);
+    assert.equal(settingsLookup.get("mariam")?.name, "Mariam");
+    assert.equal(settingsLookup.has("sara"), false);
+    assert.equal(settingsLookup.has("inactive"), false);
+
+    const withDeactivated = buildSettingsStaffLookup(
+      [
+        { name: " Mariam ", role: "admission_officer" },
+        { name: "Old Agent", role: "admission_officer", active: false },
+      ],
+      { includeInactive: true }
+    );
+    assert.equal(withDeactivated.has("old agent"), true);
+    assert.equal(withDeactivated.get("old agent")?.active, false);
+    assert.equal(withDeactivated.has("sara"), false);
   });
 });
 

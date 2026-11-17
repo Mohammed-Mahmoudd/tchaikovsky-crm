@@ -46,6 +46,8 @@ export interface FunnelAuditModalSnapshot {
   mobileOuterScrollTop: number;
 }
 
+export type TeamActivitiesTab = "timeline" | "funnel" | "leads" | "response";
+
 export interface TeamActivitiesSnapshot {
   restoreActive: boolean;
   cameInSameSpaSession: boolean;
@@ -56,7 +58,7 @@ export interface TeamActivitiesSnapshot {
   customStartDate: string;
   customEndDate: string;
   userPickedAgent: { agent: string; urlAtPick: string } | null;
-  mainTab: "timeline" | "funnel" | "leads";
+  mainTab: TeamActivitiesTab;
   feedViewStyle: "timeline" | "compact";
   activitySearch: string;
   agentSearch: string;

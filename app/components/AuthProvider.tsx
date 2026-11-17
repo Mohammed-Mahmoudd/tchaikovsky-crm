@@ -4,6 +4,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { useRouter } from "next/navigation";
 import { clearAllCrmClientCaches } from "../utils/crmCache";
 import { cleanupPushOnLogout } from "../utils/pushNotifications";
+import { postPresenceHeartbeat, resetPresenceClientSupportState } from "../utils/presenceClient";
 import {
   type LogoutReason,
   mapAuthCodeToLogoutReason,
@@ -110,6 +111,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       verifyInFlightRef.current = null;
 
       void cleanupPushOnLogout(activeToken);
+      if (activeToken) {
+        void postPresenceHeartbeat({
+          token: activeToken,
+          event: "leave",
+          screen: typeof window !== "undefined" ? window.location.pathname : undefined,
+          isVisible: false,
+          isActive: false,
+          idleMs: 0,
+          keepalive: true,
+        });
+      }
 
       try {
         localStorage.removeItem(TOKEN_KEY);
@@ -313,6 +325,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return data.error || "Invalid email or password";
       }
       loggingOutRef.current = false;
+      resetPresenceClientSupportState();
       tokenRef.current = data.token;
       lastVerifyAtRef.current = Date.now();
       localStorage.setItem(TOKEN_KEY, data.token);

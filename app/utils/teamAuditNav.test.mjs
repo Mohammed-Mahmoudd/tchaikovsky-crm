@@ -164,6 +164,31 @@ describe("teamAuditNav", () => {
     assert.equal(restored.auditTarget?.metric, "cash");
     assert.equal(restored.leadsDrawerChatId, "conv-99");
     assert.equal(restored.leadsShowChatDetails, true);
+
+    updateTeamActivitiesDraft({
+      returnLabel: "Back to Team Activities",
+      urlAgentAtSave: "",
+      filterMode: "all",
+      currentDateIso: "2026-11-17",
+      customStartDate: "2026-11-14",
+      customEndDate: "2026-11-17",
+      userPickedAgent: null,
+      mainTab: "response",
+      feedViewStyle: "timeline",
+      activitySearch: "",
+      agentSearch: "",
+      agentRoleFilter: "all",
+      leadsAgentFilter: "all",
+      visibleTimelineCount: 50,
+      visibleLeadsCount: 50,
+      scrollTop: 0,
+      auditTarget: null,
+      auditModal: null,
+      leadsDrawerChatId: null,
+      leadsShowChatDetails: false,
+    });
+    activateTeamAuditRestoreFromDraft();
+    assert.equal(getMemoryTeamSnapshot("")?.mainTab, "response");
   });
 });
 

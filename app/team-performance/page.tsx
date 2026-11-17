@@ -7,6 +7,7 @@ import { isAutomatedTemplateMsg } from '../utils/conversationMessages';
 import { formatRoleLabel, isAdmissionRole } from '../utils/roles';
 import {
   buildAssignedLeadsAgentPool,
+  buildSettingsStaffLookup,
   clampRatePct,
   collectLoggedMessageKeys,
   FunnelAuditTarget,
@@ -24,7 +25,21 @@ import {
   parseValidTs,
 } from '../utils/teamMetrics';
 import { FunnelAuditModal } from '../components/FunnelAuditModal';
+import { ResponseAuditModal, type ResponseAuditTarget } from '../components/ResponseAuditModal';
+import { ScreenTimeAuditModal } from '../components/ScreenTimeAuditModal';
+import { ScreenTimeBreakdownCard } from '../components/ScreenTimeBreakdownCard';
 import { SlideOverChatDrawer, useSlideOverChatDrawer } from '../components/SlideOverChatDrawer';
+import { useTeamPerformanceMetrics } from '../hooks/useTeamPerformanceMetrics';
+import {
+  buildAgentMetricsLookup,
+  formatOnlineDuration,
+  formatPresenceWithScreen,
+  formatResponseDuration,
+  getPresenceStatusMeta,
+  getResponseSpeedTone,
+  pickHeadlineDurationMs,
+  type AgentPerformanceStats,
+} from '../utils/agentMetrics';
 import {
   activateTeamAuditRestoreFromDraft,
   formatAuditReturnLabel,
@@ -34,6 +49,7 @@ import {
   resolveLeadSourceRoute,
   saveTeamActivitiesSnapshot,
   TeamActivitiesSnapshot,
+  type TeamActivitiesTab,
   updateTeamActivitiesDraft,
   wasTeamSidebarNavigation,
 } from '../utils/teamAuditNav';
@@ -56,6 +72,8 @@ import {
   TrendingUp,
   ChevronLeft,
   ChevronRight,
+  Timer,
+  Zap,
 } from 'lucide-react';
 
 /* ── Date Helpers (Saudi / Cairo week: Sat–Fri) ── */
@@ -286,6 +304,7 @@ export type EnrichedActivity = {
 export type StaffSummary = {
   name: string;
   role: string;
+  active: boolean;
   email?: string;
   avatar?: string;
   periodActivitiesCount: number;
@@ -1142,6 +1161,7 @@ const CompactEventRow = memo(function CompactEventRow({
 
 const StaffSidebarRow = memo(function StaffSidebarRow({
   st,
+  perfStats,
   isSelected,
   isAllTime,
   periodDescription,
@@ -1149,36 +1169,57 @@ const StaffSidebarRow = memo(function StaffSidebarRow({
   onSelect,
 }: {
   st: StaffSummary;
+  perfStats?: AgentPerformanceStats;
   isSelected: boolean;
   isAllTime: boolean;
   periodDescription: string;
   todayStartMs: number;
   onSelect: (name: string) => void;
 }) {
-  const lastTimeStr = formatCompactRelativeTime(st.lastActiveAt, todayStartMs);
+  const lastTimeStr = formatCompactRelativeTime(
+    Math.max(st.lastActiveAt, perfStats?.lastSeenAt || 0),
+    todayStartMs
+  );
+  const statusMeta = getPresenceStatusMeta(perfStats?.status);
+  const leadCount = isAllTime ? st.totalLeadsAssigned : st.periodLeadsAssigned;
 
   return (
     <button
       type="button"
       onClick={() => onSelect(st.name)}
-      className="w-full text-left flex items-start justify-between px-3 py-2.5 cursor-pointer transition-colors"
+      className={`w-full text-left flex items-center justify-between px-3 py-2.5 cursor-pointer transition-colors ${
+        st.active ? '' : 'opacity-70'
+      }`}
       style={{
         borderBottom: '1px solid var(--border-main)',
         background: isSelected ? 'var(--bg-selected)' : undefined,
       }}
     >
-      <div className="flex items-start gap-2.5 min-w-0 pr-2 flex-1">
-        <img
-          src={st.avatar || '/logo.png'}
-          alt={st.name}
-          loading="lazy"
-          decoding="async"
-          onError={(e) => {
-            (e.currentTarget as HTMLImageElement).src = '/logo.png';
-          }}
-          className="w-9 h-9 rounded-xl object-cover shrink-0 mt-0.5 shadow-xs"
-          style={{ border: '1px solid var(--border-input)' }}
-        />
+      <div className="flex items-center gap-2.5 min-w-0 pr-2 flex-1">
+        <div className="relative shrink-0">
+          <img
+            src={st.avatar || '/logo.png'}
+            alt={st.name}
+            loading="lazy"
+            decoding="async"
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).src = '/logo.png';
+            }}
+            className="w-9 h-9 rounded-xl object-cover shadow-xs"
+            style={{ border: '1px solid var(--border-input)' }}
+          />
+          {st.active && perfStats && perfStats.status !== 'offline' && (
+            <span
+              className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full"
+              style={{
+                background: statusMeta.dotVar,
+                border: '2px solid var(--bg-panel)',
+              }}
+              title={formatPresenceWithScreen(perfStats.status, perfStats.currentScreenLabel)}
+              aria-label={formatPresenceWithScreen(perfStats.status, perfStats.currentScreenLabel)}
+            />
+          )}
+        </div>
         <div className="min-w-0 flex-1">
           <span
             className="block text-[12px] font-semibold leading-tight truncate"
@@ -1190,17 +1231,8 @@ const StaffSidebarRow = memo(function StaffSidebarRow({
             className="block text-[10px] truncate mt-0.5"
             style={{ color: 'var(--text-secondary)' }}
           >
-            {formatRoleLabel(st.role)}
+            {!st.active ? `Deactivated · ${formatRoleLabel(st.role)}` : `${formatRoleLabel(st.role)} · ${leadCount} leads`}
           </span>
-          <div className="flex items-center gap-1.5 text-[9px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
-            <span>{isAllTime ? st.totalLeadsAssigned : st.periodLeadsAssigned} leads</span>
-            {(isAllTime ? st.allTimeBooked : st.bookedInPeriod) > 0 && (
-              <span>· {isAllTime ? st.allTimeBooked : st.bookedInPeriod} booked</span>
-            )}
-            {(isAllTime ? st.allTimeEnrolled : st.enrolledInPeriod) > 0 && (
-              <span>· {isAllTime ? st.allTimeEnrolled : st.enrolledInPeriod} enrolled</span>
-            )}
-          </div>
         </div>
       </div>
 
@@ -1215,7 +1247,7 @@ const StaffSidebarRow = memo(function StaffSidebarRow({
         >
           {st.periodActivitiesCount} act
         </span>
-        {st.lastActiveAt > 0 && (
+        {(st.lastActiveAt > 0 || (perfStats?.lastSeenAt || 0) > 0) && (
           <span
             className="text-[9px] font-medium mt-auto"
             style={{ color: 'var(--text-muted)' }}
@@ -1231,10 +1263,8 @@ const StaffSidebarRow = memo(function StaffSidebarRow({
 const AllAgentsSidebarRow = memo(function AllAgentsSidebarRow({
   staffCount,
   activeStaffCount,
+  onlineCount,
   totalActivitiesCount,
-  totalLeadsAssigned,
-  bookedCount,
-  enrolledCount,
   lastActiveAt,
   isSelected,
   periodDescription,
@@ -1243,10 +1273,8 @@ const AllAgentsSidebarRow = memo(function AllAgentsSidebarRow({
 }: {
   staffCount: number;
   activeStaffCount: number;
+  onlineCount?: number;
   totalActivitiesCount: number;
-  totalLeadsAssigned: number;
-  bookedCount: number;
-  enrolledCount: number;
   lastActiveAt: number;
   isSelected: boolean;
   periodDescription: string;
@@ -1259,15 +1287,15 @@ const AllAgentsSidebarRow = memo(function AllAgentsSidebarRow({
     <button
       type="button"
       onClick={() => onSelect(ALL_AGENTS_ID)}
-      className="w-full text-left flex items-start justify-between px-3 py-2.5 cursor-pointer transition-colors"
+      className="w-full text-left flex items-center justify-between px-3 py-2.5 cursor-pointer transition-colors"
       style={{
         borderBottom: '1px solid var(--border-main)',
         background: isSelected ? 'var(--bg-selected)' : undefined,
       }}
     >
-      <div className="flex items-start gap-2.5 min-w-0 pr-2 flex-1">
+      <div className="flex items-center gap-2.5 min-w-0 pr-2 flex-1">
         <div
-          className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 mt-0.5 shadow-xs"
+          className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 shadow-xs"
           style={{
             background: 'var(--bg-pill)',
             border: '1px solid var(--border-input)',
@@ -1287,13 +1315,8 @@ const AllAgentsSidebarRow = memo(function AllAgentsSidebarRow({
             className="block text-[10px] truncate mt-0.5"
             style={{ color: 'var(--text-secondary)' }}
           >
-            {staffCount} staff · {activeStaffCount} active
+            {staffCount} staff · {onlineCount !== undefined && onlineCount > 0 ? `${onlineCount} online` : `${activeStaffCount} active`}
           </span>
-          <div className="flex items-center gap-1.5 text-[9px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
-            <span>{totalLeadsAssigned} leads</span>
-            {bookedCount > 0 && <span>· {bookedCount} booked</span>}
-            {enrolledCount > 0 && <span>· {enrolledCount} enrolled</span>}
-          </div>
         </div>
       </div>
 
@@ -1377,13 +1400,15 @@ function TeamActivitiesPageInner() {
       ? userPickedAgent.agent
       : cleanUrlAgent;
 
-  // Main view mode: 'timeline' | 'funnel' | 'leads'
-  const [mainTab, setMainTab] = useState<'timeline' | 'funnel' | 'leads'>(
+  // Main view mode: 'timeline' | 'funnel' | 'leads' | 'response'
+  const [mainTab, setMainTab] = useState<TeamActivitiesTab>(
     () => initialMemorySnap?.mainTab ?? 'timeline'
   );
   const [auditTarget, setAuditTarget] = useState<FunnelAuditTarget | null>(
     () => initialMemorySnap?.auditTarget ?? null
   );
+  const [responseAuditTarget, setResponseAuditTarget] = useState<ResponseAuditTarget | null>(null);
+  const [screenAuditTarget, setScreenAuditTarget] = useState<{ agentName?: string } | null>(null);
   const [restoredAuditModal, setRestoredAuditModal] = useState<FunnelAuditModalSnapshot | null>(
     () => initialMemorySnap?.auditModal ?? null
   );
@@ -1490,6 +1515,20 @@ function TeamActivitiesPageInner() {
     return 0;
   }, [filterMode, dayEnd, weekEnd, rangeEnd]);
 
+  const {
+    metrics: perfMetrics,
+    loading: perfLoading,
+    unsupported: perfUnsupported,
+  } = useTeamPerformanceMetrics({
+    startMs: periodStartMs,
+    endMs: periodEndMs,
+  });
+
+  const { byNameLower: perfByNameLower } = useMemo(
+    () => buildAgentMetricsLookup(perfMetrics?.agents),
+    [perfMetrics]
+  );
+
   const isToday = filterMode === 'day' && dayStart.getTime() === todayStart.getTime();
   const isYesterday = filterMode === 'day' && dayStart.getTime() === yesterdayStart.getTime();
   const isThisWeek = filterMode === 'week' && weekStart.getTime() === thisWeekStart.getTime();
@@ -1571,7 +1610,7 @@ function TeamActivitiesPageInner() {
     return map;
   }, [teamMembers, assignableAgents]);
 
-  /* ── Step 1: Fast Staff Summary + Team Aggregate (O(conversations), WeakMap Cached) ── */
+  /* ── Step 1: Fast Staff Summary + Team Aggregate (Settings staff only, WeakMap Cached) ── */
   const { staffList, staffByLower, teamAggregate } = useMemo(() => {
     const isAllTime = filterMode === 'all';
     const inPeriod = (ts: number | null | undefined): boolean => {
@@ -1580,69 +1619,66 @@ function TeamActivitiesPageInner() {
       return ts >= periodStartMs && ts <= periodEndMs;
     };
 
-    const staffMap = new Map<string, StaffSummary>();
-    const canonicalNameMap = new Map<string, string>();
     const seedMembers = teamMembers && teamMembers.length > 0 ? teamMembers : assignableAgents;
-    const memberMetaByLower = new Map<string, (typeof seedMembers)[number]>();
-    for (let i = 0; i < seedMembers.length; i++) {
-      const m = seedMembers[i];
-      if (m.name) {
-        const lower = m.name.trim().toLowerCase();
-        if (!memberMetaByLower.has(lower)) memberMetaByLower.set(lower, m);
-      }
-    }
+    const settingsMemberMap = buildSettingsStaffLookup(seedMembers, { includeInactive: true });
 
-    const ensureStaff = (rawName?: string, fallbackRole?: string): StaffSummary | null => {
-      const clean = (rawName || '').trim();
-      if (!clean || clean === 'Unassigned' || clean === 'Staff' || clean === 'System') {
-        return null;
-      }
-      const lower = clean.toLowerCase();
-      let canonical = canonicalNameMap.get(lower);
-      if (!canonical) {
-        canonical = clean;
-        canonicalNameMap.set(lower, canonical);
-      }
-      let existing = staffMap.get(canonical);
-      if (!existing) {
-        const knownRole = roleMap.get(lower) || fallbackRole || 'admission_officer';
-        const memberMeta = memberMetaByLower.get(lower);
-        existing = {
-          name: canonical,
-          role: knownRole,
-          email: memberMeta?.email,
-          avatar: memberMeta?.avatar,
-          periodActivitiesCount: 0,
-          totalLeadsAssigned: 0,
-          periodLeadsAssigned: 0,
-          waitingReplyCount: 0,
-          bookedInPeriod: 0,
-          attendedInPeriod: 0,
-          enrolledInPeriod: 0,
-          cashInPeriod: 0,
-          messagesInPeriod: 0,
-          lastActiveAt: 0,
-          allTimeLeads: 0,
-          allTimeBooked: 0,
-          allTimeAttended: 0,
-          allTimeEnrolled: 0,
-          allTimeCash: 0,
-        };
-        staffMap.set(canonical, existing);
-      }
-      return existing;
+    const emptyAggregate: TeamAggregateSummary = {
+      totalActivitiesCount: 0,
+      totalLeadsAssigned: 0,
+      periodLeadsAssigned: 0,
+      waitingReplyCount: 0,
+      booked: 0,
+      attended: 0,
+      enrolled: 0,
+      cash: 0,
+      lastActiveAt: 0,
+      activeStaffCount: 0,
     };
 
-    for (let i = 0; i < seedMembers.length; i++) {
-      const m = seedMembers[i];
-      if (m.name) {
-        const st = ensureStaff(m.name, m.role);
-        if (st) {
-          if (m.email) st.email = m.email;
-          if (m.avatar) st.avatar = m.avatar;
-        }
-      }
+    if (settingsMemberMap.size === 0) {
+      return {
+        staffList: [] as StaffSummary[],
+        staffByLower: new Map<string, StaffSummary>(),
+        teamAggregate: emptyAggregate,
+      };
     }
+
+    const staffMap = new Map<string, StaffSummary>();
+    const canonicalNameMap = new Map<string, string>();
+
+    settingsMemberMap.forEach((m, lower) => {
+      canonicalNameMap.set(lower, m.name);
+      staffMap.set(m.name, {
+        name: m.name,
+        role: roleMap.get(lower) || m.role || 'admission_officer',
+        active: m.active !== false,
+        email: m.email,
+        avatar: m.avatar,
+        periodActivitiesCount: 0,
+        totalLeadsAssigned: 0,
+        periodLeadsAssigned: 0,
+        waitingReplyCount: 0,
+        bookedInPeriod: 0,
+        attendedInPeriod: 0,
+        enrolledInPeriod: 0,
+        cashInPeriod: 0,
+        messagesInPeriod: 0,
+        lastActiveAt: 0,
+        allTimeLeads: 0,
+        allTimeBooked: 0,
+        allTimeAttended: 0,
+        allTimeEnrolled: 0,
+        allTimeCash: 0,
+      });
+    });
+
+    const ensureStaff = (rawName?: string): StaffSummary | null => {
+      const clean = (rawName || '').trim();
+      if (!clean || !isRealAssignedAgent(clean)) return null;
+      const canonical = canonicalNameMap.get(clean.toLowerCase());
+      if (!canonical) return null;
+      return staffMap.get(canonical) || null;
+    };
 
     for (let i = 0; i < conversations.length; i++) {
       const p = getParsedConversationData(conversations[i]);
@@ -1694,7 +1730,7 @@ function TeamActivitiesPageInner() {
       if (isAllTime) {
         for (let j = 0; j < p.actorStats.length; j++) {
           const stat = p.actorStats[j];
-          const st = ensureStaff(stat.sampleActor, stat.sampleRole);
+          const st = ensureStaff(stat.sampleActor);
           if (!st) continue;
           if (stat.maxTimestamp > st.lastActiveAt) {
             st.lastActiveAt = stat.maxTimestamp;
@@ -1705,7 +1741,7 @@ function TeamActivitiesPageInner() {
       } else {
         for (let j = 0; j < p.events.length; j++) {
           const ev = p.events[j];
-          const st = ensureStaff(ev.rawActor, ev.rawRole);
+          const st = ensureStaff(ev.rawActor);
           if (!st) continue;
           if (ev.timestamp > st.lastActiveAt) {
             st.lastActiveAt = ev.timestamp;
@@ -1719,6 +1755,9 @@ function TeamActivitiesPageInner() {
     }
 
     const sortedStaff = Array.from(staffMap.values()).sort((a, b) => {
+      if (a.active !== b.active) {
+        return a.active ? -1 : 1;
+      }
       if (b.periodActivitiesCount !== a.periodActivitiesCount) {
         return b.periodActivitiesCount - a.periodActivitiesCount;
       }
@@ -1792,6 +1831,7 @@ function TeamActivitiesPageInner() {
       return sName.includes(clean) || clean.includes(sName);
     });
     if (partial) return partial.name;
+    if (staffList.length > 0) return ALL_AGENTS_ID;
     return selectedAgent;
   }, [selectedAgent, staffList]);
 
@@ -1917,6 +1957,10 @@ function TeamActivitiesPageInner() {
 
   /* ── Step 2: Lightweight Event-Ref Index (Single Staff OR All Agents; Hydrated Only for Visible Slice) ── */
   const effectiveAgentLower = isAllAgents ? '' : effectiveAgent.trim().toLowerCase();
+  const selectedPerfStats = useMemo(
+    () => (isAllAgents || !effectiveAgentLower ? null : perfByNameLower.get(effectiveAgentLower) || null),
+    [isAllAgents, effectiveAgentLower, perfByNameLower]
+  );
   const matchedActorName =
     selectedStaffObj && selectedStaffObj.name.toLowerCase() === effectiveAgentLower
       ? selectedStaffObj.name
@@ -2238,6 +2282,7 @@ function TeamActivitiesPageInner() {
     setLeadsAgentFilter('all');
     setMobileAgentsOpen(false);
     setAuditTarget(null);
+    setResponseAuditTarget(null);
     setRestoredAuditModal(null);
     funnelModalDraftRef.current = null;
     resetLeadsDrawer();
@@ -2246,7 +2291,7 @@ function TeamActivitiesPageInner() {
     scrollContainerRef.current?.scrollTo({ top: 0 });
   }, [cleanUrlAgent, resetLeadsDrawer]);
 
-  const handleMainTabChange = useCallback((tab: 'timeline' | 'funnel' | 'leads') => {
+  const handleMainTabChange = useCallback((tab: TeamActivitiesTab) => {
     setMainTab(tab);
     if (tab !== 'funnel') {
       setAuditTarget(null);
@@ -2534,16 +2579,57 @@ function TeamActivitiesPageInner() {
 
                 {/* Identity & Contact/Activity Summary */}
                 <div className="min-w-0 flex-1 flex flex-col justify-center gap-1 sm:gap-1.5">
-                  <h1 className="text-[22px] sm:text-[24px] font-bold tracking-tight text-[var(--text-primary)] leading-tight">
-                    {isAllAgents ? 'All Agents' : selectedStaffObj?.name || effectiveAgent}
-                  </h1>
+                  <div className="flex items-center gap-2.5 flex-wrap">
+                    <h1 className="text-[22px] sm:text-[24px] font-bold tracking-tight text-[var(--text-primary)] leading-tight">
+                      {isAllAgents ? 'All Agents' : selectedStaffObj?.name || effectiveAgent}
+                    </h1>
+                    {!isAllAgents && selectedStaffObj && !selectedStaffObj.active && (
+                      <span
+                        className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full"
+                        style={{
+                          background: 'var(--bg-pill)',
+                          color: 'var(--text-secondary)',
+                          border: '1px solid var(--border-input)',
+                        }}
+                      >
+                        Deactivated
+                      </span>
+                    )}
+                    {!isAllAgents && selectedStaffObj?.active !== false && selectedPerfStats && (() => {
+                      const statusMeta = getPresenceStatusMeta(selectedPerfStats.status);
+                      return (
+                        <span
+                          className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-0.5 rounded-full"
+                          style={{
+                            background: statusMeta.bgVar,
+                            color: statusMeta.textVar,
+                            border: `1px solid ${statusMeta.borderVar}`,
+                          }}
+                        >
+                          {selectedPerfStats.status !== 'offline' && (
+                            <span
+                              className="w-1.5 h-1.5 rounded-full"
+                              style={{ background: statusMeta.dotVar }}
+                            />
+                          )}
+                          {formatPresenceWithScreen(
+                            selectedPerfStats.status,
+                            selectedPerfStats.currentScreenLabel
+                          )}
+                        </span>
+                      );
+                    })()}
+                  </div>
 
                   {isAllAgents ? (
                     <p
                       className="text-[13px] font-medium leading-none"
                       style={{ color: 'var(--text-secondary)' }}
                     >
-                      Team Operations · {staffList.length} staff members
+                      Team Operations · {staffList.length} staff
+                      {perfMetrics && perfMetrics.team.onlineCount > 0 && (
+                        <span> · {perfMetrics.team.onlineCount} online</span>
+                      )}
                     </p>
                   ) : (
                     selectedStaffObj && (
@@ -2593,8 +2679,11 @@ function TeamActivitiesPageInner() {
                         <span className="inline-flex items-center gap-1.5">
                           <Clock className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
                           <span>
-                            {selectedStaffObj?.lastActiveAt && selectedStaffObj.lastActiveAt > 0
-                              ? `Last active ${formatCompactRelativeTime(selectedStaffObj.lastActiveAt, todayStartMs)}`
+                            {Math.max(selectedStaffObj?.lastActiveAt || 0, selectedPerfStats?.lastSeenAt || 0) > 0
+                              ? `Last seen ${formatCompactRelativeTime(
+                                  Math.max(selectedStaffObj?.lastActiveAt || 0, selectedPerfStats?.lastSeenAt || 0),
+                                  todayStartMs
+                                )}`
                               : 'No recent activity'}
                           </span>
                         </span>
@@ -2866,6 +2955,46 @@ function TeamActivitiesPageInner() {
                 {agentAssignedLeads.length}
               </span>
             </button>
+
+            {(() => {
+              const scopePerf = isAllAgents ? perfMetrics?.team : selectedPerfStats;
+              const badgeReplyMs = pickHeadlineDurationMs(
+                scopePerf?.medianReplyMs,
+                scopePerf?.avgReplyMs
+              );
+              const badgeText = !perfUnsupported && badgeReplyMs !== null
+                ? formatResponseDuration(badgeReplyMs)
+                : !perfUnsupported && scopePerf && scopePerf.activeMs > 0
+                  ? formatOnlineDuration(scopePerf.activeMs)
+                  : null;
+              return (
+                <button
+                  type="button"
+                  onClick={() => handleMainTabChange('response')}
+                  className="h-[30px] px-3.5 text-[12px] font-semibold rounded-lg flex items-center gap-2 cursor-pointer transition-all shrink-0 whitespace-nowrap"
+                  style={
+                    mainTab === 'response'
+                      ? { background: 'var(--bg-card)', color: 'var(--text-primary)', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }
+                      : { background: 'transparent', color: 'var(--text-secondary)' }
+                  }
+                >
+                  <Activity className="w-3.5 h-3.5" />
+                  <span>Response Time</span>
+                  {badgeText && (
+                    <span
+                      className="text-[10px] font-bold px-1.5 py-0.5 rounded-full tabular-nums"
+                      style={{
+                        background: mainTab === 'response' ? 'var(--bg-pill)' : 'transparent',
+                        color: mainTab === 'response' ? 'var(--text-primary)' : 'var(--text-secondary)',
+                        border: mainTab === 'response' ? '1px solid var(--border-input)' : 'none',
+                      }}
+                    >
+                      {badgeText}
+                    </span>
+                  )}
+                </button>
+              );
+            })()}
           </div>
 
           {/* Right: Active Date Pill + Presentation Toggle + Agent Filter + Search */}
@@ -3712,8 +3841,107 @@ function TeamActivitiesPageInner() {
                             Select a name to inspect · click a number to audit
                           </span>
                         </div>
-                        <div className="overflow-x-auto w-full" style={{ WebkitOverflowScrolling: 'touch' }}>
-                          <table className="w-full text-left border-collapse min-w-[740px]">
+                        {/* Mobile Stacked Comparison Cards */}
+                        <div className="sm:hidden divide-y" style={{ borderColor: 'var(--border-main)' }}>
+                          {staffList.map((st) => {
+                            const stCounts = funnelCohort.byAgent.get(st.name.toLowerCase());
+                            const stPerf = perfByNameLower.get(st.name.toLowerCase());
+                            const statusMeta = getPresenceStatusMeta(stPerf?.status);
+                            const stLeads = stCounts?.leads || 0;
+                            const stBooked = stCounts?.booked || 0;
+                            const stEnrolled = stCounts?.enrolled || 0;
+                            const stCash = stCounts?.cash || 0;
+
+                            return (
+                              <div key={`${st.name}_card`} className="p-4 space-y-2.5">
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSelectAgent(st.name)}
+                                      className="text-sm font-semibold truncate hover:underline text-left"
+                                      style={{ color: 'var(--text-primary)' }}
+                                    >
+                                      {st.name}
+                                    </button>
+                                    {!st.active ? (
+                                      <span
+                                        className="text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0"
+                                        style={{ background: 'var(--bg-pill)', color: 'var(--text-muted)' }}
+                                      >
+                                        Deactivated
+                                      </span>
+                                    ) : stPerf && stPerf.status !== 'offline' ? (
+                                      <span
+                                        className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0"
+                                        style={{
+                                          background: statusMeta.bgVar,
+                                          color: statusMeta.textVar,
+                                          border: `1px solid ${statusMeta.borderVar}`,
+                                        }}
+                                      >
+                                        <span className="w-1.5 h-1.5 rounded-full" style={{ background: statusMeta.dotVar }} />
+                                        {formatPresenceWithScreen(stPerf.status, stPerf.currentScreenLabel)}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <span
+                                    className="text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0"
+                                    style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}
+                                  >
+                                    {formatRoleLabel(st.role)}
+                                  </span>
+                                </div>
+
+                                <div className="grid grid-cols-3 gap-2 text-xs">
+                                  <button
+                                    type="button"
+                                    onClick={() => setResponseAuditTarget({ kind: 'first', agentName: st.name })}
+                                    className="p-2 rounded-lg text-left"
+                                    style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-main)' }}
+                                  >
+                                    <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>First Reply</div>
+                                    <div className="font-bold tabular-nums mt-0.5" style={{ color: 'var(--text-primary)' }}>
+                                      {formatResponseDuration(pickHeadlineDurationMs(stPerf?.firstResponseMedianMs, stPerf?.firstResponseAvgMs))}
+                                    </div>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setResponseAuditTarget({ kind: 'all', agentName: st.name })}
+                                    className="p-2 rounded-lg text-left"
+                                    style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-main)' }}
+                                  >
+                                    <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Median Reply</div>
+                                    <div className="font-bold tabular-nums mt-0.5" style={{ color: 'var(--text-primary)' }}>
+                                      {formatResponseDuration(pickHeadlineDurationMs(stPerf?.medianReplyMs, stPerf?.avgReplyMs))}
+                                    </div>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setScreenAuditTarget({ agentName: st.name })}
+                                    className="p-2 rounded-lg text-left"
+                                    style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-main)' }}
+                                  >
+                                    <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>CRM Online</div>
+                                    <div className="font-bold tabular-nums mt-0.5" style={{ color: 'var(--text-primary)' }}>
+                                      {stPerf ? formatOnlineDuration(stPerf.activeMs) : '—'}
+                                    </div>
+                                  </button>
+                                </div>
+
+                                <div className="flex items-center justify-between text-[11px] pt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                                  <span>{stLeads} leads · {stBooked} booked · {stEnrolled} enrolled</span>
+                                  <span className="font-semibold tabular-nums" style={{ color: 'var(--text-primary)' }}>
+                                    {stCash.toLocaleString()} EGP
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        <div className="hidden sm:block overflow-x-auto w-full" style={{ WebkitOverflowScrolling: 'touch' }}>
+                          <table className="w-full text-left border-collapse min-w-[980px]">
                             <thead
                               className="text-[10px] uppercase tracking-widest font-bold"
                               style={{ background: 'var(--bg-table-header)', color: 'var(--text-secondary)' }}
@@ -3721,6 +3949,9 @@ function TeamActivitiesPageInner() {
                               <tr>
                                 <th className="py-2.5 px-4">Staff Member</th>
                                 <th className="py-2.5 px-3">Role</th>
+                                <th className="py-2.5 px-3 text-right">CRM Online</th>
+                                <th className="py-2.5 px-3 text-right">First Response</th>
+                                <th className="py-2.5 px-3 text-right">Median Reply</th>
                                 <th className="py-2.5 px-3 text-right">Actions</th>
                                 <th className="py-2.5 px-3 text-right">Leads</th>
                                 <th className="py-2.5 px-3 text-right">Booked</th>
@@ -3737,6 +3968,8 @@ function TeamActivitiesPageInner() {
                                 // Same lead cohort as the funnel above (leads assigned to this staff member in the period),
                                 // so the rows add up exactly to the Team Total row.
                                 const stCounts = funnelCohort.byAgent.get(st.name.toLowerCase());
+                                const stPerf = perfByNameLower.get(st.name.toLowerCase());
+                                const statusMeta = getPresenceStatusMeta(stPerf?.status);
                                 const stLeads = stCounts?.leads || 0;
                                 const stBooked = stCounts?.booked || 0;
                                 const stAttended = stCounts?.attended || 0;
@@ -3752,15 +3985,40 @@ function TeamActivitiesPageInner() {
                                     style={{ background: idx % 2 === 0 ? 'transparent' : 'var(--bg-table-alt)' }}
                                   >
                                     <td className="py-2.5 px-4">
-                                      <button
-                                        type="button"
-                                        onClick={() => handleSelectAgent(st.name)}
-                                        className="font-semibold text-left hover:underline cursor-pointer"
-                                        style={{ color: 'var(--text-primary)' }}
-                                        title={`Inspect ${st.name}`}
-                                      >
-                                        {st.name}
-                                      </button>
+                                      <div className="flex items-center gap-2">
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSelectAgent(st.name)}
+                                          className="font-semibold text-left hover:underline cursor-pointer"
+                                          style={{ color: 'var(--text-primary)' }}
+                                          title={`Inspect ${st.name}`}
+                                        >
+                                          {st.name}
+                                        </button>
+                                        {!st.active ? (
+                                          <span
+                                            className="text-[9px] font-semibold px-1.5 py-0.2 rounded-full shrink-0"
+                                            style={{ background: 'var(--bg-pill)', color: 'var(--text-muted)' }}
+                                          >
+                                            Deactivated
+                                          </span>
+                                        ) : stPerf && stPerf.status !== 'offline' ? (
+                                          <span
+                                            className="inline-flex items-center gap-1 text-[9px] font-semibold px-1.5 py-0.2 rounded-full shrink-0"
+                                            style={{
+                                              background: statusMeta.bgVar,
+                                              color: statusMeta.textVar,
+                                              border: `1px solid ${statusMeta.borderVar}`,
+                                            }}
+                                          >
+                                            <span
+                                              className="w-1.5 h-1.5 rounded-full"
+                                              style={{ background: statusMeta.dotVar }}
+                                            />
+                                            {formatPresenceWithScreen(stPerf.status, stPerf.currentScreenLabel)}
+                                          </span>
+                                        ) : null}
+                                      </div>
                                     </td>
                                     <td className="py-2.5 px-3">
                                       <span
@@ -3769,6 +4027,62 @@ function TeamActivitiesPageInner() {
                                       >
                                         {formatRoleLabel(st.role)}
                                       </span>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums">
+                                      <button
+                                        type="button"
+                                        disabled={!stPerf || perfUnsupported}
+                                        onClick={() => setScreenAuditTarget({ agentName: st.name })}
+                                        className="inline-flex flex-col items-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] disabled:hover:bg-transparent disabled:cursor-default cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--bg-banner)]"
+                                        title={`Inspect ${st.name}'s screen time breakdown`}
+                                      >
+                                        <span className="font-semibold underline decoration-dotted underline-offset-2" style={{ color: 'var(--text-primary)' }}>
+                                          {stPerf ? formatOnlineDuration(stPerf.activeMs) : '—'}
+                                        </span>
+                                        {stPerf && (stPerf.screens?.[0]?.label || stPerf.connectedMs > 0) && (
+                                          <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                            {stPerf.screens?.[0]?.label
+                                              ? `${stPerf.screens[0].label} (${stPerf.screens[0].activeMs > 0 ? formatOnlineDuration(stPerf.screens[0].activeMs) : 'Visited'})`
+                                              : `${formatOnlineDuration(stPerf.connectedMs)} open`}
+                                          </span>
+                                        )}
+                                      </button>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums">
+                                      <button
+                                        type="button"
+                                        disabled={!stPerf || stPerf.firstResponseCount === 0}
+                                        onClick={() => setResponseAuditTarget({ kind: 'first', agentName: st.name })}
+                                        className="inline-flex flex-col items-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] disabled:hover:bg-transparent disabled:cursor-default cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--bg-banner)]"
+                                        title={`Audit ${st.name}'s first response times`}
+                                      >
+                                        <span className="font-semibold underline decoration-dotted underline-offset-2">
+                                          {formatResponseDuration(pickHeadlineDurationMs(stPerf?.firstResponseMedianMs, stPerf?.firstResponseAvgMs))}
+                                        </span>
+                                        {stPerf && stPerf.firstResponseCount > 0 && (
+                                          <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                            avg {formatResponseDuration(stPerf.firstResponseAvgMs)}
+                                          </span>
+                                        )}
+                                      </button>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums">
+                                      <button
+                                        type="button"
+                                        disabled={!stPerf || stPerf.replyTurnsCount === 0}
+                                        onClick={() => setResponseAuditTarget({ kind: 'all', agentName: st.name })}
+                                        className="inline-flex flex-col items-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] disabled:hover:bg-transparent disabled:cursor-default cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--bg-banner)]"
+                                        title={`Audit ${st.name}'s reply speed across all turns`}
+                                      >
+                                        <span className="font-semibold underline decoration-dotted underline-offset-2">
+                                          {formatResponseDuration(pickHeadlineDurationMs(stPerf?.medianReplyMs, stPerf?.avgReplyMs))}
+                                        </span>
+                                        {stPerf && stPerf.replyTurnsCount > 0 && (
+                                          <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                            {stPerf.replyTurnsCount} replies
+                                          </span>
+                                        )}
+                                      </button>
                                     </td>
                                     <td className="py-2.5 px-3 text-right font-semibold tabular-nums">
                                       {st.periodActivitiesCount.toLocaleString()}
@@ -3846,6 +4160,37 @@ function TeamActivitiesPageInner() {
                                   Team Total ({staffList.length} staff)
                                 </td>
                                 <td className="py-2.5 px-3 text-right tabular-nums">
+                                  <button
+                                    type="button"
+                                    disabled={!perfMetrics || perfUnsupported}
+                                    onClick={() => setScreenAuditTarget({})}
+                                    className="inline-flex items-center justify-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] underline decoration-dotted underline-offset-2 cursor-pointer disabled:cursor-default"
+                                    title="Inspect Team Screen Time Breakdown"
+                                  >
+                                    {perfMetrics ? formatOnlineDuration(perfMetrics.team.activeMs) : '—'}
+                                  </button>
+                                </td>
+                                <td className="py-2.5 px-3 text-right tabular-nums">
+                                  <button
+                                    type="button"
+                                    onClick={() => setResponseAuditTarget({ kind: 'first' })}
+                                    className="inline-flex items-center justify-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] underline decoration-dotted underline-offset-2 cursor-pointer"
+                                    title="Audit Team First Response Time"
+                                  >
+                                    {formatResponseDuration(pickHeadlineDurationMs(perfMetrics?.team.firstResponseMedianMs, perfMetrics?.team.firstResponseAvgMs))}
+                                  </button>
+                                </td>
+                                <td className="py-2.5 px-3 text-right tabular-nums">
+                                  <button
+                                    type="button"
+                                    onClick={() => setResponseAuditTarget({ kind: 'all' })}
+                                    className="inline-flex items-center justify-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] underline decoration-dotted underline-offset-2 cursor-pointer"
+                                    title="Audit Team Median Reply Time"
+                                  >
+                                    {formatResponseDuration(pickHeadlineDurationMs(perfMetrics?.team.medianReplyMs, perfMetrics?.team.avgReplyMs))}
+                                  </button>
+                                </td>
+                                <td className="py-2.5 px-3 text-right tabular-nums">
                                   {teamAggregate.totalActivitiesCount.toLocaleString()}
                                 </td>
                                 <td className="py-2.5 px-3 text-right tabular-nums">
@@ -3906,6 +4251,483 @@ function TeamActivitiesPageInner() {
                                 </td>
                               </tr>
                             </tfoot>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+          ) : mainTab === 'response' ? (
+            /* ── RESPONSE & SCREEN ACTIVITY VIEW ── */
+            <div className="w-full space-y-5">
+              {(() => {
+                const respSummary = isAllAgents ? perfMetrics?.team : selectedPerfStats;
+                const scopedAgentArg = isAllAgents ? undefined : selectedStaffObj?.name || effectiveAgent;
+                const firstHeadlineMs = pickHeadlineDurationMs(
+                  respSummary?.firstResponseMedianMs,
+                  respSummary?.firstResponseAvgMs
+                );
+                const replyHeadlineMs = pickHeadlineDurationMs(
+                  respSummary?.medianReplyMs,
+                  respSummary?.avgReplyMs
+                );
+                const firstTone = getResponseSpeedTone(firstHeadlineMs);
+                const replyTone = getResponseSpeedTone(replyHeadlineMs);
+                const activeMs = isAllAgents
+                  ? perfMetrics?.team.activeMs ?? 0
+                  : selectedPerfStats?.activeMs ?? 0;
+                const connectedMs = isAllAgents
+                  ? perfMetrics?.team.connectedMs ?? 0
+                  : selectedPerfStats?.connectedMs ?? 0;
+
+                return (
+                  <>
+                    {/* Responsiveness & CRM Online Time Strip */}
+                    {perfLoading && !perfMetrics ? (
+                      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-3.5" aria-busy="true">
+                        {[0, 1, 2, 3].map((idx) => (
+                          <div
+                            key={idx}
+                            className="p-4 rounded-xl h-28 animate-pulse"
+                            style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-3.5">
+                        {/* First Response Time */}
+                        <button
+                          type="button"
+                          disabled={perfUnsupported}
+                          onClick={() => setResponseAuditTarget({ kind: 'first', agentName: scopedAgentArg })}
+                          className="p-4 rounded-xl text-left w-full cursor-pointer disabled:cursor-default transition-all hover:border-[var(--border-input)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--bg-banner)] shadow-xs flex flex-col justify-between"
+                          style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+                          title="Inspect lead-by-lead first response times"
+                        >
+                          <div>
+                            <div className="flex items-center justify-between gap-2 text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
+                              <span className="uppercase tracking-wider truncate">First Response</span>
+                              <Timer className="w-3.5 h-3.5 shrink-0" />
+                            </div>
+                            <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                              <span className="text-[24px] font-bold tracking-tight tabular-nums" style={{ color: 'var(--text-primary)' }}>
+                                {formatResponseDuration(firstHeadlineMs)}
+                              </span>
+                              {respSummary && respSummary.firstResponseCount > 0 && (
+                                <span
+                                  className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                                  style={{
+                                    background: firstTone.bgVar,
+                                    color: firstTone.textVar,
+                                    border: `1px solid ${firstTone.borderVar}`,
+                                  }}
+                                >
+                                  {firstTone.label}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between gap-2 mt-2">
+                            <p className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                              Avg {formatResponseDuration(respSummary?.firstResponseAvgMs)} · {respSummary?.firstResponseCount || 0} leads
+                            </p>
+                            {!perfUnsupported && (
+                              <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold shrink-0" style={{ color: 'var(--text-muted)' }}>
+                                Audit
+                                <ChevronRight className="w-3 h-3" />
+                              </span>
+                            )}
+                          </div>
+                        </button>
+
+                        {/* Median Reply Time (All Turns) */}
+                        <button
+                          type="button"
+                          disabled={perfUnsupported}
+                          onClick={() => setResponseAuditTarget({ kind: 'all', agentName: scopedAgentArg })}
+                          className="p-4 rounded-xl text-left w-full cursor-pointer disabled:cursor-default transition-all hover:border-[var(--border-input)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--bg-banner)] shadow-xs flex flex-col justify-between"
+                          style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+                          title="Inspect all incoming-to-reply turn times"
+                        >
+                          <div>
+                            <div className="flex items-center justify-between gap-2 text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
+                              <span className="uppercase tracking-wider truncate">Median Reply Time</span>
+                              <Clock className="w-3.5 h-3.5 shrink-0" />
+                            </div>
+                            <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                              <span className="text-[24px] font-bold tracking-tight tabular-nums" style={{ color: 'var(--text-primary)' }}>
+                                {formatResponseDuration(replyHeadlineMs)}
+                              </span>
+                              {respSummary && respSummary.replyTurnsCount > 0 && (
+                                <span
+                                  className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                                  style={{
+                                    background: replyTone.bgVar,
+                                    color: replyTone.textVar,
+                                    border: `1px solid ${replyTone.borderVar}`,
+                                  }}
+                                >
+                                  {replyTone.label}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between gap-2 mt-2">
+                            <p className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                              Avg {formatResponseDuration(respSummary?.avgReplyMs)} · {respSummary?.replyTurnsCount || 0} replies
+                            </p>
+                            {!perfUnsupported && (
+                              <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold shrink-0" style={{ color: 'var(--text-muted)' }}>
+                                Audit
+                                <ChevronRight className="w-3 h-3" />
+                              </span>
+                            )}
+                          </div>
+                        </button>
+
+                        {/* Replies Under 15 Minutes */}
+                        <button
+                          type="button"
+                          disabled={perfUnsupported}
+                          onClick={() => setResponseAuditTarget({ kind: 'all', agentName: scopedAgentArg })}
+                          className="p-4 rounded-xl text-left w-full cursor-pointer disabled:cursor-default transition-all hover:border-[var(--border-input)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--bg-banner)] shadow-xs flex flex-col justify-between"
+                          style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+                          title="Percentage of lead messages answered within 15 minutes"
+                        >
+                          <div>
+                            <div className="flex items-center justify-between gap-2 text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
+                              <span className="uppercase tracking-wider truncate">Replies Within 15m</span>
+                              <Zap className="w-3.5 h-3.5 shrink-0" />
+                            </div>
+                            <div className="text-[24px] font-bold mt-1.5 tracking-tight tabular-nums" style={{ color: 'var(--text-primary)' }}>
+                              {respSummary && respSummary.replyTurnsCount > 0 ? `${respSummary.fastReply15mPct}%` : '—'}
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between gap-2 mt-2">
+                            <p className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                              {respSummary?.fastReply15mCount || 0} of {respSummary?.replyTurnsCount || 0} replies
+                              {(respSummary?.currentlyWaitingCount || 0) > 0
+                                ? ` · ${respSummary?.currentlyWaitingCount} waiting`
+                                : ''}
+                            </p>
+                          </div>
+                        </button>
+
+                        {/* CRM Online Time */}
+                        <button
+                          type="button"
+                          disabled={perfUnsupported}
+                          onClick={() => setScreenAuditTarget({ agentName: scopedAgentArg })}
+                          className="p-4 rounded-xl text-left w-full cursor-pointer disabled:cursor-default transition-all hover:border-[var(--border-input)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--bg-banner)] shadow-xs flex flex-col justify-between"
+                          style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+                          title="Inspect live CRM locations and time spent per screen"
+                        >
+                          <div>
+                            <div className="flex items-center justify-between gap-2 text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
+                              <span className="uppercase tracking-wider truncate">CRM Online Time</span>
+                              <Activity className="w-3.5 h-3.5 shrink-0" />
+                            </div>
+                            <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                              <span className="text-[24px] font-bold tracking-tight tabular-nums" style={{ color: 'var(--text-primary)' }}>
+                                {perfUnsupported ? '—' : formatOnlineDuration(activeMs)}
+                              </span>
+                              <span className="text-[11px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                                active
+                              </span>
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between gap-2 mt-2">
+                            <p className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>
+                              {perfUnsupported
+                                ? 'Backend update pending'
+                                : isAllAgents
+                                  ? `${formatOnlineDuration(connectedMs)} open · ${perfMetrics?.team.onlineCount || 0} online`
+                                  : `${formatOnlineDuration(connectedMs)} open${selectedPerfStats?.daysActiveCount ? ` · ${selectedPerfStats.daysActiveCount}d` : ''}`}
+                            </p>
+                            {!perfUnsupported && (
+                              <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold shrink-0" style={{ color: 'var(--text-muted)' }}>
+                                Screens
+                                <ChevronRight className="w-3 h-3" />
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Screen Activity Breakdown */}
+                    {!(perfLoading && !perfMetrics) && (
+                      <ScreenTimeBreakdownCard
+                        title={isAllAgents ? 'Team Screen Activity' : 'Screen Activity'}
+                        activeMs={activeMs}
+                        connectedMs={connectedMs}
+                        screens={isAllAgents ? perfMetrics?.team.screens : selectedPerfStats?.screens}
+                        unsupported={perfUnsupported}
+                        onOpenAudit={() => setScreenAuditTarget({ agentName: scopedAgentArg })}
+                      />
+                    )}
+
+                    {/* Focused Staff Response & Screen Comparison (All Agents) */}
+                    {isAllAgents && staffList.length > 0 && (
+                      <div
+                        className="rounded-xl overflow-hidden shadow-xs"
+                        style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)' }}
+                      >
+                        <div
+                          className="px-5 py-4 flex flex-wrap items-center justify-between gap-2"
+                          style={{ borderBottom: '1px solid var(--border-main)' }}
+                        >
+                          <div>
+                            <h3 className="text-[13px] font-bold" style={{ color: 'var(--text-primary)' }}>
+                              Staff Response &amp; Screen Time
+                            </h3>
+                            <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                              Verified CRM response speed and active screen time ({periodDescription})
+                            </p>
+                          </div>
+                          <span
+                            className="text-[10px] font-semibold px-2.5 py-0.5 rounded-full"
+                            style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)' }}
+                          >
+                            Click a metric to audit
+                          </span>
+                        </div>
+
+                        {/* Mobile Stacked Cards */}
+                        <div className="sm:hidden divide-y" style={{ borderColor: 'var(--border-main)' }}>
+                          {staffList.map((st) => {
+                            const stPerf = perfByNameLower.get(st.name.toLowerCase());
+                            const statusMeta = getPresenceStatusMeta(stPerf?.status);
+                            const stFirstMs = pickHeadlineDurationMs(
+                              stPerf?.firstResponseMedianMs,
+                              stPerf?.firstResponseAvgMs
+                            );
+                            const stReplyMs = pickHeadlineDurationMs(
+                              stPerf?.medianReplyMs,
+                              stPerf?.avgReplyMs
+                            );
+                            return (
+                              <div key={`${st.name}_resp_m`} className="p-4 space-y-2.5">
+                                <div className="flex items-center justify-between gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSelectAgent(st.name)}
+                                    className="text-sm font-semibold truncate hover:underline text-left cursor-pointer"
+                                    style={{ color: 'var(--text-primary)' }}
+                                  >
+                                    {st.name}
+                                  </button>
+                                  {!st.active ? (
+                                    <span
+                                      className="text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0"
+                                      style={{ background: 'var(--bg-pill)', color: 'var(--text-muted)' }}
+                                    >
+                                      Deactivated
+                                    </span>
+                                  ) : stPerf && (
+                                    <span
+                                      className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0"
+                                      style={{
+                                        background: statusMeta.bgVar,
+                                        color: statusMeta.textVar,
+                                        border: `1px solid ${statusMeta.borderVar}`,
+                                      }}
+                                    >
+                                      {stPerf.status !== 'offline' && (
+                                        <span className="w-1.5 h-1.5 rounded-full" style={{ background: statusMeta.dotVar }} />
+                                      )}
+                                      {formatPresenceWithScreen(stPerf.status, stPerf.currentScreenLabel)}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="grid grid-cols-3 gap-2 text-xs">
+                                  <button
+                                    type="button"
+                                    onClick={() => setResponseAuditTarget({ kind: 'first', agentName: st.name })}
+                                    className="p-2 rounded-lg text-left"
+                                    style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-main)' }}
+                                  >
+                                    <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>First Reply</div>
+                                    <div className="font-bold tabular-nums mt-0.5" style={{ color: 'var(--text-primary)' }}>
+                                      {formatResponseDuration(stFirstMs)}
+                                    </div>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setResponseAuditTarget({ kind: 'all', agentName: st.name })}
+                                    className="p-2 rounded-lg text-left"
+                                    style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-main)' }}
+                                  >
+                                    <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>Median Reply</div>
+                                    <div className="font-bold tabular-nums mt-0.5" style={{ color: 'var(--text-primary)' }}>
+                                      {formatResponseDuration(stReplyMs)}
+                                    </div>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setScreenAuditTarget({ agentName: st.name })}
+                                    className="p-2 rounded-lg text-left"
+                                    style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-main)' }}
+                                  >
+                                    <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>CRM Online</div>
+                                    <div className="font-bold tabular-nums mt-0.5" style={{ color: 'var(--text-primary)' }}>
+                                      {stPerf ? formatOnlineDuration(stPerf.activeMs) : '—'}
+                                    </div>
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        {/* Desktop Table */}
+                        <div className="hidden sm:block overflow-x-auto w-full" style={{ WebkitOverflowScrolling: 'touch' }}>
+                          <table className="w-full text-left border-collapse min-w-[720px]">
+                            <thead
+                              className="text-[10px] uppercase tracking-widest font-bold"
+                              style={{ background: 'var(--bg-table-header)', color: 'var(--text-secondary)' }}
+                            >
+                              <tr>
+                                <th className="py-2.5 px-4">Staff Member</th>
+                                <th className="py-2.5 px-3">Status</th>
+                                <th className="py-2.5 px-3 text-right">CRM Online</th>
+                                <th className="py-2.5 px-3 text-right">First Response</th>
+                                <th className="py-2.5 px-3 text-right">Median Reply</th>
+                                <th className="py-2.5 px-3 text-right">Within 15m</th>
+                                <th className="py-2.5 px-4 text-right">Top Screen</th>
+                              </tr>
+                            </thead>
+                            <tbody className="text-[12px] divide-y" style={{ borderColor: 'var(--border-main)' }}>
+                              {staffList.map((st, idx) => {
+                                const stPerf = perfByNameLower.get(st.name.toLowerCase());
+                                const statusMeta = getPresenceStatusMeta(stPerf?.status);
+                                const stFirstMs = pickHeadlineDurationMs(
+                                  stPerf?.firstResponseMedianMs,
+                                  stPerf?.firstResponseAvgMs
+                                );
+                                const stReplyMs = pickHeadlineDurationMs(
+                                  stPerf?.medianReplyMs,
+                                  stPerf?.avgReplyMs
+                                );
+                                const topScreen = stPerf?.screens?.[0];
+                                return (
+                                  <tr
+                                    key={`${st.name}_resp`}
+                                    className="hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                    style={{ background: idx % 2 === 0 ? 'transparent' : 'var(--bg-table-alt)' }}
+                                  >
+                                    <td className="py-2.5 px-4">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSelectAgent(st.name)}
+                                        className="font-semibold text-left hover:underline cursor-pointer"
+                                        style={{ color: 'var(--text-primary)' }}
+                                      >
+                                        {st.name}
+                                      </button>
+                                    </td>
+                                    <td className="py-2.5 px-3">
+                                      {!st.active ? (
+                                        <span
+                                          className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                                          style={{ background: 'var(--bg-pill)', color: 'var(--text-muted)' }}
+                                        >
+                                          Deactivated
+                                        </span>
+                                      ) : stPerf ? (
+                                        <span
+                                          className="inline-flex items-center gap-1.5 text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                                          style={{
+                                            background: statusMeta.bgVar,
+                                            color: statusMeta.textVar,
+                                            border: `1px solid ${statusMeta.borderVar}`,
+                                          }}
+                                        >
+                                          {stPerf.status !== 'offline' && (
+                                            <span className="w-1.5 h-1.5 rounded-full" style={{ background: statusMeta.dotVar }} />
+                                          )}
+                                          {formatPresenceWithScreen(stPerf.status, stPerf.currentScreenLabel)}
+                                        </span>
+                                      ) : (
+                                        <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>—</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums">
+                                      <button
+                                        type="button"
+                                        disabled={!stPerf || perfUnsupported}
+                                        onClick={() => setScreenAuditTarget({ agentName: st.name })}
+                                        className="inline-flex flex-col items-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] disabled:hover:bg-transparent disabled:cursor-default cursor-pointer"
+                                      >
+                                        <span className="font-semibold underline decoration-dotted underline-offset-2">
+                                          {stPerf ? formatOnlineDuration(stPerf.activeMs) : '—'}
+                                        </span>
+                                        {stPerf && stPerf.connectedMs > 0 && (
+                                          <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                            {formatOnlineDuration(stPerf.connectedMs)} open
+                                          </span>
+                                        )}
+                                      </button>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums">
+                                      <button
+                                        type="button"
+                                        disabled={!stPerf || stPerf.firstResponseCount === 0}
+                                        onClick={() => setResponseAuditTarget({ kind: 'first', agentName: st.name })}
+                                        className="inline-flex flex-col items-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] disabled:hover:bg-transparent disabled:cursor-default cursor-pointer"
+                                      >
+                                        <span className="font-semibold underline decoration-dotted underline-offset-2">
+                                          {formatResponseDuration(stFirstMs)}
+                                        </span>
+                                        {stPerf && stPerf.firstResponseCount > 0 && (
+                                          <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                            avg {formatResponseDuration(stPerf.firstResponseAvgMs)}
+                                          </span>
+                                        )}
+                                      </button>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right tabular-nums">
+                                      <button
+                                        type="button"
+                                        disabled={!stPerf || stPerf.replyTurnsCount === 0}
+                                        onClick={() => setResponseAuditTarget({ kind: 'all', agentName: st.name })}
+                                        className="inline-flex flex-col items-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] disabled:hover:bg-transparent disabled:cursor-default cursor-pointer"
+                                      >
+                                        <span className="font-semibold underline decoration-dotted underline-offset-2">
+                                          {formatResponseDuration(stReplyMs)}
+                                        </span>
+                                        {stPerf && stPerf.replyTurnsCount > 0 && (
+                                          <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                            {stPerf.replyTurnsCount} replies
+                                          </span>
+                                        )}
+                                      </button>
+                                    </td>
+                                    <td className="py-2.5 px-3 text-right font-semibold tabular-nums">
+                                      {stPerf && stPerf.replyTurnsCount > 0 ? `${stPerf.fastReply15mPct}%` : '—'}
+                                    </td>
+                                    <td className="py-2.5 px-4 text-right tabular-nums">
+                                      {topScreen ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => setScreenAuditTarget({ agentName: st.name })}
+                                          className="inline-flex flex-col items-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] cursor-pointer"
+                                        >
+                                          <span className="font-medium">{topScreen.label}</span>
+                                          <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                            {topScreen.activeMs > 0 ? formatOnlineDuration(topScreen.activeMs) : 'Visited'}
+                                          </span>
+                                        </button>
+                                      ) : (
+                                        <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>—</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
                           </table>
                         </div>
                       </div>
@@ -4232,10 +5054,8 @@ function TeamActivitiesPageInner() {
           <AllAgentsSidebarRow
             staffCount={staffList.length}
             activeStaffCount={teamAggregate.activeStaffCount}
+            onlineCount={perfMetrics?.team.onlineCount}
             totalActivitiesCount={teamAggregate.totalActivitiesCount}
-            totalLeadsAssigned={filterMode === 'all' ? teamAggregate.totalLeadsAssigned : teamAggregate.periodLeadsAssigned}
-            bookedCount={teamAggregate.booked}
-            enrolledCount={teamAggregate.enrolled}
             lastActiveAt={teamAggregate.lastActiveAt}
             isSelected={isAllAgents}
             periodDescription={periodDescription}
@@ -4250,19 +5070,52 @@ function TeamActivitiesPageInner() {
                 No staff match filter
               </p>
             </div>
-          ) : (
-            filteredStaff.map((st) => (
-              <StaffSidebarRow
-                key={st.name}
-                st={st}
-                isSelected={!isAllAgents && effectiveAgentLower === st.name.toLowerCase()}
-                isAllTime={filterMode === 'all'}
-                periodDescription={periodDescription}
-                todayStartMs={todayStartMs}
-                onSelect={handleSelectAgent}
-              />
-            ))
-          )}
+          ) : (() => {
+            const activeFiltered = filteredStaff.filter((s) => s.active);
+            const deactivatedFiltered = filteredStaff.filter((s) => !s.active);
+            return (
+              <>
+                {activeFiltered.map((st) => (
+                  <StaffSidebarRow
+                    key={st.name}
+                    st={st}
+                    perfStats={perfByNameLower.get(st.name.toLowerCase())}
+                    isSelected={!isAllAgents && effectiveAgentLower === st.name.toLowerCase()}
+                    isAllTime={filterMode === 'all'}
+                    periodDescription={periodDescription}
+                    todayStartMs={todayStartMs}
+                    onSelect={handleSelectAgent}
+                  />
+                ))}
+                {deactivatedFiltered.length > 0 && (
+                  <>
+                    <div
+                      className="px-3 py-1.5 text-[9px] font-bold uppercase tracking-widest"
+                      style={{
+                        background: 'var(--bg-table-header)',
+                        color: 'var(--text-muted)',
+                        borderBottom: '1px solid var(--border-main)',
+                      }}
+                    >
+                      Deactivated Accounts ({deactivatedFiltered.length})
+                    </div>
+                    {deactivatedFiltered.map((st) => (
+                      <StaffSidebarRow
+                        key={st.name}
+                        st={st}
+                        perfStats={perfByNameLower.get(st.name.toLowerCase())}
+                        isSelected={!isAllAgents && effectiveAgentLower === st.name.toLowerCase()}
+                        isAllTime={filterMode === 'all'}
+                        periodDescription={periodDescription}
+                        todayStartMs={todayStartMs}
+                        onSelect={handleSelectAgent}
+                      />
+                    ))}
+                  </>
+                )}
+              </>
+            );
+          })()}
         </div>
       </aside>
 
@@ -4275,8 +5128,29 @@ function TeamActivitiesPageInner() {
         onCloseDetails={() => setLeadsShowChatDetails(false)}
         onClose={closeLeadsDrawer}
         onAnimationEnd={handleLeadsDrawerAnimationEnd}
-        enableEscapeClose={!auditTarget && !mobileAgentsOpen}
+        enableEscapeClose={!auditTarget && !responseAuditTarget && !screenAuditTarget && !mobileAgentsOpen}
       />
+
+      {screenAuditTarget && perfMetrics && (
+        <ScreenTimeAuditModal
+          agents={perfMetrics.agents}
+          teamSummary={perfMetrics.team}
+          initialAgentName={screenAuditTarget.agentName}
+          periodDescription={periodDescription}
+          onClose={() => setScreenAuditTarget(null)}
+        />
+      )}
+
+      {responseAuditTarget && (
+        <ResponseAuditModal
+          target={responseAuditTarget}
+          startMs={periodStartMs}
+          endMs={periodEndMs}
+          periodDescription={periodDescription}
+          onChangeTarget={setResponseAuditTarget}
+          onClose={() => setResponseAuditTarget(null)}
+        />
+      )}
 
       {auditTarget && (
         <FunnelAuditModal
