@@ -20,9 +20,7 @@ import {
   type ResponseAuditRow,
   type ResponseAuditSort,
 } from "../utils/agentMetrics";
-
-const API_BASE = "/api";
-const DIRECT_API_BASE = "https://api.tchaikovskyschool.com/crm-api";
+import { fetchTeamMetricsEndpoint } from "../utils/teamMetricsClient";
 
 export interface ResponseAuditTarget {
   kind: "first" | "all";
@@ -179,18 +177,10 @@ export function ResponseAuditModal({
 
     (async () => {
       try {
-        let res = await authFetch(`${API_BASE}/team-metrics/response-audit?${qs}`, {
-          cache: "no-store",
+        const res = await fetchTeamMetricsEndpoint(`/team-metrics/response-audit?${qs}`, {
+          authFetch,
           signal: controller.signal,
-        }).catch(() => null);
-        if (cancelled) return;
-
-        if (!res || (!res.ok && res.status !== 401 && res.status !== 403 && res.status !== 404)) {
-          res = await authFetch(`${DIRECT_API_BASE}/team-metrics/response-audit?${qs}`, {
-            cache: "no-store",
-            signal: controller.signal,
-          }).catch(() => null);
-        }
+        });
         if (cancelled) return;
 
         if (!res || !res.ok) {

@@ -30,6 +30,7 @@ import { FunnelAuditModal } from '../components/FunnelAuditModal';
 import { ResponseAuditModal, type ResponseAuditTarget } from '../components/ResponseAuditModal';
 import { ScreenTimeAuditModal } from '../components/ScreenTimeAuditModal';
 import { ScreenTimeBreakdownCard } from '../components/ScreenTimeBreakdownCard';
+import { MetricsErrorBanner } from '../components/MetricsErrorBanner';
 import { SlideOverChatDrawer, useSlideOverChatDrawer } from '../components/SlideOverChatDrawer';
 import { useTeamPerformanceMetrics } from '../hooks/useTeamPerformanceMetrics';
 import {
@@ -1518,7 +1519,9 @@ function TeamActivitiesPageInner() {
   const {
     metrics: perfMetrics,
     loading: perfLoading,
+    error: perfError,
     unsupported: perfUnsupported,
+    refresh: refreshPerfMetrics,
   } = useTeamPerformanceMetrics({
     startMs: periodStartMs,
     endMs: periodEndMs,
@@ -4257,6 +4260,14 @@ function TeamActivitiesPageInner() {
 
                 return (
                   <>
+                    {/* Error state with Retry */}
+                    {perfError && !perfMetrics && !perfLoading && (
+                      <MetricsErrorBanner
+                        message={perfError}
+                        onRetry={() => { void refreshPerfMetrics(); }}
+                      />
+                    )}
+
                     {/* Responsiveness & CRM Online Time Strip */}
                     {perfLoading && !perfMetrics ? (
                       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-3.5" aria-busy="true">
@@ -4634,7 +4645,7 @@ function TeamActivitiesPageInner() {
                                         onClick={() => setScreenAuditTarget({ agentName: st.name })}
                                         className="inline-flex flex-col items-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] disabled:hover:bg-transparent disabled:cursor-default cursor-pointer"
                                       >
-                                        <span className="font-semibold underline decoration-dotted underline-offset-2">
+                                        <span className={stPerf && !perfUnsupported ? 'font-semibold underline decoration-dotted underline-offset-2' : 'font-semibold'}>
                                           {stPerf ? formatOnlineDuration(stPerf.activeMs) : '—'}
                                         </span>
                                         {stPerf && stPerf.connectedMs > 0 && (
@@ -4651,7 +4662,7 @@ function TeamActivitiesPageInner() {
                                         onClick={() => setResponseAuditTarget({ kind: 'first', agentName: st.name })}
                                         className="inline-flex flex-col items-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] disabled:hover:bg-transparent disabled:cursor-default cursor-pointer"
                                       >
-                                        <span className="font-semibold underline decoration-dotted underline-offset-2">
+                                        <span className={stPerf && stPerf.firstResponseCount > 0 ? 'font-semibold underline decoration-dotted underline-offset-2' : 'font-semibold'}>
                                           {formatResponseDuration(stFirstMs)}
                                         </span>
                                         {stPerf && stPerf.firstResponseCount > 0 && (
@@ -4668,7 +4679,7 @@ function TeamActivitiesPageInner() {
                                         onClick={() => setResponseAuditTarget({ kind: 'all', agentName: st.name })}
                                         className="inline-flex flex-col items-end px-2 py-1 rounded-md hover:bg-[var(--bg-pill)] disabled:hover:bg-transparent disabled:cursor-default cursor-pointer"
                                       >
-                                        <span className="font-semibold underline decoration-dotted underline-offset-2">
+                                        <span className={stPerf && stPerf.replyTurnsCount > 0 ? 'font-semibold underline decoration-dotted underline-offset-2' : 'font-semibold'}>
                                           {formatResponseDuration(stReplyMs)}
                                         </span>
                                         {stPerf && stPerf.replyTurnsCount > 0 && (

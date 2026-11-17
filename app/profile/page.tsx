@@ -43,6 +43,7 @@ import { useTeamPerformanceMetrics } from "../hooks/useTeamPerformanceMetrics";
 import { ResponseAuditModal, type ResponseAuditTarget } from "../components/ResponseAuditModal";
 import { ScreenTimeAuditModal } from "../components/ScreenTimeAuditModal";
 import { ScreenTimeBreakdownCard } from "../components/ScreenTimeBreakdownCard";
+import { MetricsErrorBanner } from "../components/MetricsErrorBanner";
 import {
   formatOnlineDuration,
   formatPresenceWithScreen,
@@ -210,7 +211,9 @@ export default function ProfilePage() {
   const {
     metrics: perfMetrics,
     loading: perfLoading,
+    error: perfError,
     unsupported: perfUnsupported,
+    refresh: refreshPerfMetrics,
   } = useTeamPerformanceMetrics({
     startMs: perfStartMs,
     endMs: perfEndMs,
@@ -946,6 +949,14 @@ export default function ProfilePage() {
           </div>
 
           {/* Responsiveness & CRM Presence Cards */}
+          {perfError && !perfMetrics && !perfLoading && (
+            <MetricsErrorBanner
+              message={perfError}
+              onRetry={() => { void refreshPerfMetrics(); }}
+              className="rounded-2xl"
+            />
+          )}
+
           {perfLoading && !perfMetrics ? (
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5" aria-busy="true">
               {[0, 1, 2, 3].map((idx) => (

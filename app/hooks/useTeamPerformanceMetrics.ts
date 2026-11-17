@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useAuth } from "../components/AuthProvider";
+import { normalizeRole, useAuth } from "../components/AuthProvider";
 import {
   applyLivePresenceToMetrics,
   type LivePresenceEntry,
@@ -9,9 +9,12 @@ import {
   type ScreenRef,
   type TeamMetricsPayload,
 } from "../utils/agentMetrics";
-
-const API_BASE = "/api";
-const DIRECT_API_BASE = "https://api.tchaikovskyschool.com/crm-api";
+import {
+  clearTeamMetricsMemoryCache,
+  fetchTeamMetricsEndpoint,
+  readCachedTeamMetrics,
+  writeCachedTeamMetrics,
+} from "../utils/teamMetricsClient";
 
 export interface UseTeamPerformanceMetricsOptions {
   startMs: number;
@@ -34,15 +37,21 @@ export function useTeamPerformanceMetrics({
   agent = null,
   enabled = true,
 }: UseTeamPerformanceMetricsOptions): UseTeamPerformanceMetricsResult {
-  const { token, authFetch } = useAuth();
+  const { token, user, authFetch } = useAuth();
   const [metrics, setMetrics] = useState<TeamMetricsPayload | null>(null);
   const [resolvedKey, setResolvedKey] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [unsupported, setUnsupported] = useState<boolean>(false);
 
+  const userRef = useRef(user);
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
+
   const liveUpdatesRef = useRef<Map<string, LivePresenceEntry>>(new Map());
   const abortRef = useRef<AbortController | null>(null);
   const dirtyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dirtyWhileHiddenRef = useRef<boolean>(false);
 
   const cleanAgent =
     agent && agent.trim() && agent.trim() !== "__all__" && agent.trim().toLowerCase() !== "all"
@@ -50,6 +59,12 @@ export function useTeamPerformanceMetrics({
       : "";
   const requestKey =
     enabled && token ? `${Math.floor(startMs)}:${Math.floor(endMs)}:${cleanAgent}` : "";
+
+  const getScopedCacheKey = useCallback((reqKey: string): string => {
+    const activeUser = userRef.current;
+    if (!reqKey || !activeUser?.id) return "";
+    return `${activeUser.id}:${normalizeRole(activeUser.role)}:${reqKey}`;
+  }, []);
 
   const runFetch = useCallback(
     async ({
@@ -70,19 +85,10 @@ export function useTeamPerformanceMetrics({
       const qs = params.toString() ? `?${params.toString()}` : "";
 
       try {
-        let res = await authFetch(`${API_BASE}/team-metrics${qs}`, {
-          cache: "no-store",
+        const res = await fetchTeamMetricsEndpoint(`/team-metrics${qs}`, {
+          authFetch,
           signal,
-        }).catch(() => null);
-
-        if (signal?.aborted) return;
-
-        if (!res || (!res.ok && res.status !== 401 && res.status !== 403 && res.status !== 404)) {
-          res = await authFetch(`${DIRECT_API_BASE}/team-metrics${qs}`, {
-            cache: "no-store",
-            signal,
-          }).catch(() => null);
-        }
+        });
 
         if (signal?.aborted) return;
 
@@ -110,12 +116,15 @@ export function useTeamPerformanceMetrics({
           return;
         }
 
+        const payload = json.data as TeamMetricsPayload;
+        const cacheKey = getScopedCacheKey(keyForRun);
+        if (cacheKey) {
+          writeCachedTeamMetrics(cacheKey, payload);
+        }
+
         setUnsupported(false);
         setError(null);
-        const merged = applyLivePresenceToMetrics(
-          json.data as TeamMetricsPayload,
-          liveUpdatesRef.current
-        );
+        const merged = applyLivePresenceToMetrics(payload, liveUpdatesRef.current);
         setMetrics(merged);
         setResolvedKey(keyForRun);
       } catch (err) {
@@ -126,10 +135,19 @@ export function useTeamPerformanceMetrics({
         }
       }
     },
-    [token, startMs, endMs, cleanAgent, authFetch]
+    [token, startMs, endMs, cleanAgent, authFetch, getScopedCacheKey]
   );
 
   useEffect(() => {
+    if (!token) {
+      clearTeamMetricsMemoryCache();
+      queueMicrotask(() => {
+        setMetrics(null);
+        setResolvedKey("");
+        setError(null);
+      });
+      return;
+    }
     if (!requestKey) return;
     if (abortRef.current) {
       abortRef.current.abort();
@@ -137,16 +155,28 @@ export function useTeamPerformanceMetrics({
     const controller = new AbortController();
     abortRef.current = controller;
 
+    const cacheKey = getScopedCacheKey(requestKey);
+    const cached = cacheKey ? readCachedTeamMetrics(cacheKey) : null;
+
     queueMicrotask(() => {
-      if (!controller.signal.aborted) {
-        void runFetch({ keyForRun: requestKey, silent: false, signal: controller.signal });
+      if (controller.signal.aborted) return;
+      if (cached) {
+        setUnsupported(false);
+        setError(null);
+        setMetrics(applyLivePresenceToMetrics(cached, liveUpdatesRef.current));
+        setResolvedKey(requestKey);
       }
+      void runFetch({
+        keyForRun: requestKey,
+        silent: Boolean(cached),
+        signal: controller.signal,
+      });
     });
 
     return () => {
       controller.abort();
     };
-  }, [requestKey, runFetch]);
+  }, [token, requestKey, runFetch, getScopedCacheKey]);
 
   // Real-time SSE live presence patching + background refresh on message activity
   useEffect(() => {
@@ -181,15 +211,36 @@ export function useTeamPerformanceMetrics({
       setMetrics((prev) => applyLivePresenceToMetrics(prev, liveUpdatesRef.current));
     };
 
-    const handleMetricsDirty = () => {
+    const scheduleSilentRefresh = (delayMs: number) => {
       if (dirtyTimerRef.current) clearTimeout(dirtyTimerRef.current);
       dirtyTimerRef.current = setTimeout(() => {
+        dirtyTimerRef.current = null;
+        if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+          dirtyWhileHiddenRef.current = true;
+          return;
+        }
         void runFetch({ keyForRun: requestKey, silent: true });
-      }, 1500);
+      }, delayMs);
+    };
+
+    const handleMetricsDirty = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        dirtyWhileHiddenRef.current = true;
+        return;
+      }
+      scheduleSilentRefresh(1500);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible" && dirtyWhileHiddenRef.current) {
+        dirtyWhileHiddenRef.current = false;
+        scheduleSilentRefresh(150);
+      }
     };
 
     window.addEventListener("crm:presence-updated", handlePresenceEvent);
     window.addEventListener("crm:metrics-dirty", handleMetricsDirty);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     const interval = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState === "visible") {
@@ -200,6 +251,7 @@ export function useTeamPerformanceMetrics({
     return () => {
       window.removeEventListener("crm:presence-updated", handlePresenceEvent);
       window.removeEventListener("crm:metrics-dirty", handleMetricsDirty);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       clearInterval(interval);
       if (dirtyTimerRef.current) {
         clearTimeout(dirtyTimerRef.current);
@@ -210,6 +262,7 @@ export function useTeamPerformanceMetrics({
 
   const refresh = useCallback(async () => {
     if (!requestKey) return;
+    setError(null);
     setResolvedKey("");
     await runFetch({ keyForRun: requestKey, silent: false });
   }, [requestKey, runFetch]);
