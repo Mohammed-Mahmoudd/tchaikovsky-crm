@@ -185,6 +185,11 @@ export function getBookedTime(c: TeamConversationLike): number | null {
     return upd;
   }
 
+  if (!c.auditionDate) {
+    if (isConvertedLead(c)) return getConvertedTime(c);
+    if (isAttendedLead(c)) return getAttendedTime(c);
+  }
+
   return getCreatedTime(c);
 }
 
@@ -209,6 +214,10 @@ export function getAttendedTime(c: TeamConversationLike): number | null {
       (e.type === "stage_changed" && ATTENDED_PIPELINES.has((e.toValue || "").toLowerCase().trim()))
   );
   if (logTs !== null) return logTs;
+
+  if (!c.auditionDate && isConvertedLead(c)) {
+    return getConvertedTime(c);
+  }
 
   return getUpdatedTime(c);
 }
@@ -325,6 +334,25 @@ export interface BuildFunnelAuditOptions {
   periodDescription: string;
 }
 
+export interface FunnelCounts {
+  leads: number;
+  booked: number;
+  attended: number;
+  enrolled: number;
+  cash: number;
+}
+
+export interface TeamFunnelSummary {
+  team: FunnelCounts;
+  byAgent: Map<string, FunnelCounts>;
+}
+
+export interface ComputeTeamFunnelOptions {
+  filterMode: "all" | "day" | "week" | "range";
+  periodStartMs: number;
+  periodEndMs: number;
+}
+
 export interface FunnelAuditLeadRow {
   id: string;
   leadName: string;
@@ -332,6 +360,7 @@ export interface FunnelAuditLeadRow {
   channelLabel: string;
   branch: string;
   assignedAgent: string;
+  attributedAgent: string;
   bookedBy?: string;
   attendedBy?: string;
   enrolledBy?: string;
@@ -723,53 +752,174 @@ function getBucketOrdering(metric: FunnelAuditMetric): ReadonlyArray<string> {
   }
 }
 
+interface ResolvedLeadMilestones {
+  assignedAgent: string;
+  assignedLower: string;
+  realAssigned: boolean;
+  bookedBy: string;
+  attendedBy: string;
+  enrolledBy: string;
+  explicitBookedBy?: string;
+  explicitAttendedBy?: string;
+  explicitEnrolledBy?: string;
+  directAttended: boolean;
+  booked: boolean;
+  attended: boolean;
+  enrolled: boolean;
+  cashIn: number;
+  createdTs: number;
+  bookedTs: number | null;
+  attendedTs: number | null;
+  convertedTs: number | null;
+}
+
+function resolveMilestoneActor(
+  explicitActor: string | undefined,
+  sourceActor: string | undefined,
+  assignedAgent: string
+): { actor: string; explicit?: string } {
+  const first = (explicitActor || "").trim();
+  if (isRealAssignedAgent(first)) return { actor: first, explicit: first };
+  const second = (sourceActor || "").trim();
+  if (isRealAssignedAgent(second)) return { actor: second, explicit: second };
+  return { actor: assignedAgent, explicit: first || second || undefined };
+}
+
+function resolveConversationMilestones(c: AuditConversationInput): ResolvedLeadMilestones {
+  const src = getSourceObject(c);
+  const assignedAgent = (c.agent || "Unassigned").trim();
+  const assignedLower = assignedAgent.toLowerCase();
+  const realAssigned = isRealAssignedAgent(assignedAgent);
+  const createdTs = getCreatedTime(c);
+
+  const directEnrolled = isConvertedLead(c);
+  const directAttended = isAttendedLead(c);
+  const directBooked = isBookedLead(c);
+
+  const enrolled = directEnrolled;
+  const attended = enrolled || directAttended;
+  const booked = attended || directBooked;
+  const cashIn = enrolled ? Number(c.cashIn) || 0 : 0;
+
+  const convertedTs = enrolled ? getConvertedTime(c) : null;
+  const attendedTs = attended ? getAttendedTime(c) ?? convertedTs : null;
+  const bookedTs = booked
+    ? getBookedTime(c) ?? (directAttended ? getAttendedTime(c) : null) ?? convertedTs
+    : null;
+
+  const bookResolved = resolveMilestoneActor(c.bookedBy, src?.bookedBy, assignedAgent);
+  const attResolved = resolveMilestoneActor(c.attendedBy, src?.attendedBy, assignedAgent);
+  const convResolved = resolveMilestoneActor(c.enrolledBy, src?.enrolledBy, assignedAgent);
+
+  return {
+    assignedAgent,
+    assignedLower,
+    realAssigned,
+    bookedBy: bookResolved.actor,
+    attendedBy: attResolved.actor,
+    enrolledBy: convResolved.actor,
+    explicitBookedBy: bookResolved.explicit,
+    explicitAttendedBy: attResolved.explicit,
+    explicitEnrolledBy: convResolved.explicit,
+    directAttended,
+    booked,
+    attended,
+    enrolled,
+    cashIn,
+    createdTs,
+    bookedTs,
+    attendedTs,
+    convertedTs,
+  };
+}
+
+/**
+ * Computes Conversion Funnel totals and per-staff counts where each stage is filtered
+ * by its own milestone date and attributed to the acting staff member (falling back to owner).
+ */
+export function computeTeamFunnelSummary(
+  conversations: ReadonlyArray<AuditConversationInput>,
+  options: ComputeTeamFunnelOptions
+): TeamFunnelSummary {
+  const isAllTime = options.filterMode === "all";
+  const inPeriod = (ts: number | null | undefined): boolean => {
+    if (!ts || ts <= 0) return false;
+    if (isAllTime) return true;
+    return ts >= options.periodStartMs && ts <= options.periodEndMs;
+  };
+
+  const emptyCounts = (): FunnelCounts => ({
+    leads: 0,
+    booked: 0,
+    attended: 0,
+    enrolled: 0,
+    cash: 0,
+  });
+  const team = emptyCounts();
+  const byAgent = new Map<string, FunnelCounts>();
+
+  const ensureAgent = (agentName: string): FunnelCounts => {
+    const lower = agentName.toLowerCase();
+    let counts = byAgent.get(lower);
+    if (!counts) {
+      counts = emptyCounts();
+      byAgent.set(lower, counts);
+    }
+    return counts;
+  };
+
+  for (let i = 0; i < conversations.length; i++) {
+    const m = resolveConversationMilestones(conversations[i]);
+
+    if (m.realAssigned && inPeriod(m.createdTs)) {
+      team.leads += 1;
+      ensureAgent(m.assignedAgent).leads += 1;
+    }
+
+    if (m.booked && isRealAssignedAgent(m.bookedBy) && inPeriod(m.bookedTs)) {
+      team.booked += 1;
+      ensureAgent(m.bookedBy).booked += 1;
+    }
+
+    if (m.attended && isRealAssignedAgent(m.attendedBy) && inPeriod(m.attendedTs)) {
+      team.attended += 1;
+      ensureAgent(m.attendedBy).attended += 1;
+    }
+
+    if (m.enrolled && isRealAssignedAgent(m.enrolledBy) && inPeriod(m.convertedTs)) {
+      team.enrolled += 1;
+      team.cash += m.cashIn;
+      const agentCounts = ensureAgent(m.enrolledBy);
+      agentCounts.enrolled += 1;
+      agentCounts.cash += m.cashIn;
+    }
+  }
+
+  return { team, byAgent };
+}
+
 function checkExcludedMilestone(
   metric: FunnelAuditMetric,
   c: AuditConversationInput,
-  flags: { booked: boolean; attended: boolean; enrolled: boolean; cashIn: number },
-  createdTs: number,
+  m: ResolvedLeadMilestones,
+  metricTarget: {
+    qualified: boolean;
+    qualifiesForExclusion: boolean;
+    ts: number | null;
+    actor: string;
+    word: string;
+  },
   options: {
     isAllTime: boolean;
-    realAssigned: boolean;
-    matchesAgent: boolean;
     agentFilterLower: string | null;
     inPeriod: (ts: number | null | undefined) => boolean;
-    assignedAgent: string;
   }
 ): FunnelAuditExcludedRow | null {
-  const src = getSourceObject(c);
+  if (!metricTarget.qualifiesForExclusion) return null;
+  if (!options.isAllTime && !options.inPeriod(metricTarget.ts)) return null;
+
   const pipeline = (c.pipeline || "New").trim();
   const auditionDate = (c.auditionDate || "").trim();
-
-  let milestoneReached = false;
-  let milestoneTs: number | null = null;
-  let actorName = options.assignedAgent;
-  let milestoneWord = "lead";
-
-  if (metric === "leads") {
-    milestoneReached = true;
-    milestoneTs = createdTs;
-    milestoneWord = "created";
-  } else if (metric === "booked") {
-    milestoneReached = flags.booked;
-    milestoneTs = getBookedTime(c) ?? (flags.enrolled ? getConvertedTime(c) : null);
-    actorName = (c.bookedBy || src?.bookedBy || options.assignedAgent).trim();
-    milestoneWord = "booked";
-  } else if (metric === "attended") {
-    milestoneReached = flags.attended;
-    milestoneTs = getAttendedTime(c) ?? (flags.enrolled ? getConvertedTime(c) : null);
-    actorName = (c.attendedBy || src?.attendedBy || options.assignedAgent).trim();
-    milestoneWord = "attended";
-  } else if (metric === "enrolled" || metric === "cash") {
-    milestoneReached = metric === "cash" ? flags.enrolled && flags.cashIn > 0 : flags.enrolled;
-    milestoneTs = getConvertedTime(c);
-    actorName = (c.enrolledBy || src?.enrolledBy || options.assignedAgent).trim();
-    milestoneWord = metric === "cash" ? "paid" : "enrolled";
-  } else {
-    return null;
-  }
-
-  if (!milestoneReached) return null;
 
   const makeRow = (
     excludedReason: FunnelAuditExcludedReason,
@@ -778,53 +928,37 @@ function checkExcludedMilestone(
     id: c.id,
     leadName: getAuditDisplayName(c),
     leadPhone: c.phone || "",
-    assignedAgent: options.assignedAgent,
-    actorName,
+    assignedAgent: m.assignedAgent,
+    actorName: metricTarget.actor,
     pipeline,
     auditionDate,
-    cashIn: flags.cashIn,
-    createdTs,
-    milestoneTs,
+    cashIn: m.cashIn,
+    createdTs: m.createdTs,
+    milestoneTs: metricTarget.ts,
     excludedReason,
     excludedDetail,
   });
 
-  if (options.agentFilterLower === null && !options.realAssigned) {
-    const relevantTs = metric === "leads" ? createdTs : milestoneTs || createdTs;
-    if (options.isAllTime || options.inPeriod(relevantTs)) {
-      return makeRow(
-        "unassigned",
-        `Lead is ${options.assignedAgent} (not assigned to a staff member), so it is excluded from agent cohort metrics.`
-      );
-    }
-    return null;
-  }
-
-  if (
-    metric !== "leads" &&
-    !options.isAllTime &&
-    options.realAssigned &&
-    options.matchesAgent &&
-    !options.inPeriod(createdTs) &&
-    options.inPeriod(milestoneTs)
-  ) {
+  if (options.agentFilterLower === null && !isRealAssignedAgent(metricTarget.actor)) {
     return makeRow(
-      "outside_period_created",
-      `Milestone (${milestoneWord}) occurred in this period, but lead was created outside the selected date range.`
+      "unassigned",
+      metric === "leads"
+        ? `Lead is ${m.assignedAgent} (not assigned to a staff member), so it is excluded from team metrics.`
+        : `Milestone (${metricTarget.word}) has no assigned staff member (${metricTarget.actor}), so it is excluded from team metrics.`
     );
   }
 
   if (
     metric !== "leads" &&
     options.agentFilterLower !== null &&
-    options.realAssigned &&
-    !options.matchesAgent &&
-    (options.isAllTime || options.inPeriod(createdTs)) &&
-    actorName.toLowerCase() === options.agentFilterLower
+    isRealAssignedAgent(metricTarget.actor) &&
+    metricTarget.actor.toLowerCase() !== options.agentFilterLower &&
+    m.realAssigned &&
+    m.assignedLower === options.agentFilterLower
   ) {
     return makeRow(
       "reassigned_actor",
-      `Action logged by ${actorName}, but lead is currently assigned to ${options.assignedAgent} (attributed to current owner).`
+      `Lead is currently assigned to ${m.assignedAgent}, but ${metricTarget.word} by ${metricTarget.actor} (credited to ${metricTarget.actor}).`
     );
   }
 
@@ -860,30 +994,31 @@ function buildAuditCopy(
     counts.cohortLeadsCount > 0
       ? clampRatePct(counts.cohortEnrolledCount, counts.cohortLeadsCount).toFixed(1)
       : "0";
+  const scopeActorClause = scopeLabel === "All Agents" ? "" : ` by ${scopeLabel}`;
 
   switch (target.metric) {
     case "leads":
       return {
         title: `Assigned Leads Audit — ${counts.totalCount.toLocaleString("en-US")}`,
         ruleSummary: `All conversations currently assigned to ${scopeLabel} whose creation timestamp falls inside ${periodLabel}. Unassigned, Staff, and System threads are excluded.`,
-        formulaText: `${counts.cohortLeadsCount} assigned leads -> ${counts.cohortBookedCount} booked (${bookingRateStr}%) -> ${counts.cohortAttendedCount} attended -> ${counts.cohortEnrolledCount} enrolled (${winRateStr}% win)`,
+        formulaText: `${counts.cohortLeadsCount} assigned leads · ${counts.cohortBookedCount} booked (${bookingRateStr}%) · ${counts.cohortAttendedCount} attended · ${counts.cohortEnrolledCount} enrolled (${winRateStr}% win)`,
       };
     case "booked":
       return {
         title: `Booked Audit — ${counts.totalCount.toLocaleString("en-US")}`,
-        ruleSummary: `From the ${counts.cohortLeadsCount} assigned leads in ${scopeLabel} (${periodLabel}), ${counts.totalCount} reached Audition Booked or a later cumulative stage (Attended / Enrolled), or have an audition date recorded.`,
-        formulaText: `${counts.cohortBookedCount} booked / ${counts.cohortLeadsCount} assigned leads = ${bookingRateStr}% booking rate (${Math.max(0, counts.cohortLeadsCount - counts.cohortBookedCount)} not booked)`,
+        ruleSummary: `${counts.totalCount} lead${counts.totalCount === 1 ? "" : "s"} whose audition booking occurred inside ${periodLabel}${scopeActorClause} (anchored on booking date, including leads that progressed to Attended or Enrolled).`,
+        formulaText: `${counts.cohortBookedCount} booked in period / ${counts.cohortLeadsCount} assigned leads = ${bookingRateStr}% booking rate`,
       };
     case "attended":
       return {
         title: `Attended Audit — ${counts.totalCount.toLocaleString("en-US")}`,
-        ruleSummary: `From the ${counts.cohortBookedCount} booked leads in ${scopeLabel} (${periodLabel}), ${counts.totalCount} attended an audition or enrolled/paid directly. No-Show and Joining Later are excluded unless later enrolled.`,
-        formulaText: `${counts.cohortAttendedCount} attended / ${counts.cohortBookedCount} booked = ${showRateStr}% show-up rate (${Math.max(0, counts.cohortBookedCount - counts.cohortAttendedCount)} booked not attended)`,
+        ruleSummary: `${counts.totalCount} lead${counts.totalCount === 1 ? "" : "s"} who attended an audition or enrolled/paid directly inside ${periodLabel}${scopeActorClause}. No-Show and Joining Later are excluded unless later enrolled.`,
+        formulaText: `${counts.cohortAttendedCount} attended / ${counts.cohortBookedCount} booked = ${showRateStr}% show-up rate`,
       };
     case "enrolled":
       return {
         title: `Enrolled Audit — ${counts.totalCount.toLocaleString("en-US")}`,
-        ruleSummary: `From ${scopeLabel}'s cohort (${periodLabel}), ${counts.totalCount} leads have pipeline Enrolled/Registered, outcome Registered, or recorded tuition cash (> 0 EGP).`,
+        ruleSummary: `${counts.totalCount} lead${counts.totalCount === 1 ? "" : "s"} enrolled or with recorded tuition cash (> 0 EGP) inside ${periodLabel}${scopeActorClause}.`,
         formulaText: `${counts.cohortEnrolledCount} enrolled / ${counts.cohortAttendedCount} attended = ${closeRateStr}% close rate (${winRateStr}% of ${counts.cohortLeadsCount} leads)`,
       };
     case "cash": {
@@ -893,7 +1028,7 @@ function buildAuditCopy(
           : 0;
       return {
         title: `Revenue Audit — ${formatEgp(counts.cohortCashTotal)}`,
-        ruleSummary: `Sum of cashIn across the ${counts.cohortEnrolledCount} enrolled/converted leads in ${scopeLabel}'s cohort (${periodLabel}).`,
+        ruleSummary: `Sum of cashIn across the ${counts.cohortEnrolledCount} enrolled/converted leads inside ${periodLabel}${scopeActorClause}.`,
         formulaText: `${formatEgp(counts.cohortCashTotal)} from ${counts.paidCount} paid record${counts.paidCount === 1 ? "" : "s"}${counts.unpaidEnrolledCount > 0 ? ` + ${counts.unpaidEnrolledCount} enrolled with 0 EGP` : ""} · avg ${formatEgp(avgPerStudent)} / enrolled`,
       };
     }
@@ -901,23 +1036,23 @@ function buildAuditCopy(
       const pct = Math.round(clampRatePct(counts.totalCount, counts.cohortLeadsCount));
       return {
         title: `Stage Audit: ${target.stage} — ${counts.totalCount.toLocaleString("en-US")}`,
-        ruleSummary: `Leads in ${scopeLabel}'s cohort (${periodLabel}) whose current pipeline stage is "${target.stage}".`,
-        formulaText: `${counts.totalCount} of ${counts.cohortLeadsCount} cohort leads (${pct}%)`,
+        ruleSummary: `Leads assigned to ${scopeLabel} created in ${periodLabel} whose current pipeline stage is "${target.stage}".`,
+        formulaText: `${counts.totalCount} of ${counts.cohortLeadsCount} assigned leads (${pct}%)`,
       };
     }
     case "channel": {
       const pct = Math.round(clampRatePct(counts.totalCount, counts.cohortLeadsCount));
       return {
         title: `Channel Audit: ${target.channel} — ${counts.totalCount.toLocaleString("en-US")}`,
-        ruleSummary: `Leads in ${scopeLabel}'s cohort (${periodLabel}) originating from ${target.channel}.`,
-        formulaText: `${counts.totalCount} of ${counts.cohortLeadsCount} cohort leads (${pct}%)`,
+        ruleSummary: `Leads assigned to ${scopeLabel} created in ${periodLabel} originating from ${target.channel}.`,
+        formulaText: `${counts.totalCount} of ${counts.cohortLeadsCount} assigned leads (${pct}%)`,
       };
     }
     case "awaiting_reply":
       return {
         title: `Awaiting Reply Audit — ${counts.totalCount.toLocaleString("en-US")}`,
-        ruleSummary: `Leads in ${scopeLabel}'s cohort (${periodLabel}) that have unread incoming messages or remain in the New stage.`,
-        formulaText: `${counts.totalCount} of ${counts.cohortLeadsCount} cohort leads awaiting reply`,
+        ruleSummary: `Leads assigned to ${scopeLabel} created in ${periodLabel} that have unread incoming messages or remain in the New stage.`,
+        formulaText: `${counts.totalCount} of ${counts.cohortLeadsCount} assigned leads awaiting reply`,
       };
   }
 }
@@ -944,6 +1079,10 @@ export function buildFunnelAuditReport(
     return ts >= periodStartMs && ts <= periodEndMs;
   };
 
+  const matchesScope = (actorName: string): boolean =>
+    isRealAssignedAgent(actorName) &&
+    (agentFilterLower === null || actorName.toLowerCase() === agentFilterLower);
+
   let cohortLeadsCount = 0;
   let cohortBookedCount = 0;
   let cohortAttendedCount = 0;
@@ -959,68 +1098,99 @@ export function buildFunnelAuditReport(
 
   for (let i = 0; i < conversations.length; i++) {
     const c = conversations[i];
-    const src = getSourceObject(c);
-    const assignedAgent = (c.agent || "Unassigned").trim();
-    const assignedLower = assignedAgent.toLowerCase();
-    const realAssigned = isRealAssignedAgent(assignedAgent);
-    const createdTs = getCreatedTime(c);
+    const m = resolveConversationMilestones(c);
 
-    const directEnrolled = isConvertedLead(c);
-    const directAttended = isAttendedLead(c);
-    const directBooked = isBookedLead(c);
+    if (matchesScope(m.assignedAgent) && inPeriod(m.createdTs)) {
+      cohortLeadsCount += 1;
+    }
+    if (m.booked && matchesScope(m.bookedBy) && inPeriod(m.bookedTs)) {
+      cohortBookedCount += 1;
+    }
+    if (m.attended && matchesScope(m.attendedBy) && inPeriod(m.attendedTs)) {
+      cohortAttendedCount += 1;
+    }
+    if (m.enrolled && matchesScope(m.enrolledBy) && inPeriod(m.convertedTs)) {
+      cohortEnrolledCount += 1;
+      cohortCashTotal += m.cashIn;
+    }
 
-    const enrolled = directEnrolled;
-    const attended = enrolled || directAttended;
-    const booked = attended || directBooked;
-    const cashIn = enrolled ? Number(c.cashIn) || 0 : 0;
+    let metricTarget: {
+      qualified: boolean;
+      qualifiesForExclusion: boolean;
+      ts: number | null;
+      actor: string;
+      word: string;
+    };
+    if (target.metric === "booked") {
+      metricTarget = {
+        qualified: m.booked,
+        qualifiesForExclusion: m.booked,
+        ts: m.bookedTs,
+        actor: m.bookedBy,
+        word: "booked",
+      };
+    } else if (target.metric === "attended") {
+      metricTarget = {
+        qualified: m.attended,
+        qualifiesForExclusion: m.attended,
+        ts: m.attendedTs,
+        actor: m.attendedBy,
+        word: "attended",
+      };
+    } else if (target.metric === "enrolled" || target.metric === "cash") {
+      metricTarget = {
+        qualified: m.enrolled,
+        qualifiesForExclusion: target.metric === "cash" ? m.enrolled && m.cashIn > 0 : m.enrolled,
+        ts: m.convertedTs,
+        actor: m.enrolledBy,
+        word: target.metric === "cash" ? "paid" : "enrolled",
+      };
+    } else {
+      metricTarget = {
+        qualified: true,
+        qualifiesForExclusion: target.metric === "leads",
+        ts: m.createdTs,
+        actor: m.assignedAgent,
+        word: "created",
+      };
+    }
 
-    const matchesAgent = agentFilterLower === null ? realAssigned : assignedLower === agentFilterLower;
-    const inCohort = realAssigned && matchesAgent && inPeriod(createdTs);
+    const inMetricScope =
+      metricTarget.qualified &&
+      matchesScope(metricTarget.actor) &&
+      inPeriod(metricTarget.ts);
 
-    if (!inCohort) {
-      const excluded = checkExcludedMilestone(
-        target.metric,
-        c,
-        { booked, attended, enrolled, cashIn },
-        createdTs,
-        {
+    if (!inMetricScope) {
+      if (
+        target.metric === "leads" ||
+        target.metric === "booked" ||
+        target.metric === "attended" ||
+        target.metric === "enrolled" ||
+        target.metric === "cash"
+      ) {
+        const excluded = checkExcludedMilestone(target.metric, c, m, metricTarget, {
           isAllTime,
-          realAssigned,
-          matchesAgent,
           agentFilterLower,
           inPeriod,
-          assignedAgent,
-        }
-      );
-      if (excluded) excludedRows.push(excluded);
+        });
+        if (excluded) excludedRows.push(excluded);
+      }
       continue;
     }
 
-    cohortLeadsCount += 1;
-    if (booked) cohortBookedCount += 1;
-    if (attended) cohortAttendedCount += 1;
-    if (enrolled) {
-      cohortEnrolledCount += 1;
-      cohortCashTotal += cashIn;
-    }
-
     const reason = classifyMetricReason(target, c, {
-      booked,
-      attended,
-      enrolled,
-      directAttended,
-      cashIn,
+      booked: m.booked,
+      attended: m.attended,
+      enrolled: m.enrolled,
+      directAttended: m.directAttended,
+      cashIn: m.cashIn,
     });
     if (!reason) continue;
 
-    if (enrolled) {
-      if (cashIn > 0) paidCount += 1;
+    if (m.enrolled) {
+      if (m.cashIn > 0) paidCount += 1;
       else unpaidEnrolledCount += 1;
     }
-
-    const bookedTs = booked ? getBookedTime(c) : null;
-    const attendedTs = attended ? getAttendedTime(c) : null;
-    const convertedTs = enrolled ? getConvertedTime(c) : null;
 
     rows.push({
       id: c.id,
@@ -1028,51 +1198,53 @@ export function buildFunnelAuditReport(
       leadPhone: c.phone || "",
       channelLabel: getAuditChannelLabel(c),
       branch: (c.branch || "").trim(),
-      assignedAgent,
-      bookedBy: (c.bookedBy || src?.bookedBy || "").trim() || undefined,
-      attendedBy: (c.attendedBy || src?.attendedBy || "").trim() || undefined,
-      enrolledBy: (c.enrolledBy || src?.enrolledBy || "").trim() || undefined,
+      assignedAgent: m.assignedAgent,
+      attributedAgent: metricTarget.actor,
+      bookedBy: m.explicitBookedBy,
+      attendedBy: m.explicitAttendedBy,
+      enrolledBy: m.explicitEnrolledBy,
       pipeline: (c.pipeline || "New").trim(),
       auditionDate: (c.auditionDate || "").trim(),
       auditionOutcome: (c.auditionOutcome || "").trim(),
       followUpDate: (c.followUpDate || "").trim(),
-      cashIn,
-      createdTs,
+      cashIn: m.cashIn,
+      createdTs: m.createdTs,
       createdSource: getCreatedTimeSource(c),
-      bookedTs,
-      attendedTs,
-      convertedTs,
+      bookedTs: m.bookedTs,
+      attendedTs: m.attendedTs,
+      convertedTs: m.convertedTs,
       reasonKey: reason.key,
       reasonLabel: reason.label,
       reasonDetail: reason.detail,
-      isBooked: booked,
-      isAttended: attended,
-      isEnrolled: enrolled,
+      isBooked: m.booked,
+      isAttended: m.attended,
+      isEnrolled: m.enrolled,
     });
 
     const existingBucket = bucketMap.get(reason.key);
     if (existingBucket) {
       existingBucket.count += 1;
-      existingBucket.cashTotal += cashIn;
+      existingBucket.cashTotal += m.cashIn;
     } else {
       bucketMap.set(reason.key, {
         key: reason.key,
         label: reason.label,
         description: reason.description,
         count: 1,
-        cashTotal: cashIn,
+        cashTotal: m.cashIn,
       });
     }
 
-    const existingAgent = agentMap.get(assignedLower);
+    const actorLower = metricTarget.actor.toLowerCase();
+    const existingAgent = agentMap.get(actorLower);
     if (existingAgent) {
       existingAgent.count += 1;
-      existingAgent.cashTotal += cashIn;
+      existingAgent.cashTotal += m.cashIn;
     } else {
-      agentMap.set(assignedLower, {
-        agent: assignedAgent,
+      agentMap.set(actorLower, {
+        agent: metricTarget.actor,
         count: 1,
-        cashTotal: cashIn,
+        cashTotal: m.cashIn,
       });
     }
   }

@@ -3004,7 +3004,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               patchPayload.enrolledBy = actorName;
             }
           }
-          if (isBooking && current?.pipeline !== "Audition Booked") {
+          const currentSourceObj =
+            typeof current?.source === "object" && current.source !== null ? current.source : undefined;
+          const hasBookedAt = Boolean(
+            current?.auditionBookedAt || currentSourceObj?.auditionBookedAt
+          );
+          if (isBooking && (current?.pipeline !== "Audition Booked" || !hasBookedAt)) {
             baseSource.auditionBookedAt = nowIso;
             baseSource.bookedBy = actorName;
             enrichedUpdates.auditionBookedAt = nowIso;

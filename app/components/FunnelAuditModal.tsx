@@ -178,16 +178,50 @@ function getExcludedReasonBadge(reason: FunnelAuditExcludedReason): string {
     case "outside_period_created":
       return "Created before period";
     case "reassigned_actor":
-      return "Reassigned owner";
+      return "Credited to actor";
     default:
       return "Excluded";
   }
+}
+
+function isMilestoneAnchoredMetric(metric: FunnelAuditMetric): boolean {
+  return (
+    metric === "booked" ||
+    metric === "attended" ||
+    metric === "enrolled" ||
+    metric === "cash"
+  );
+}
+
+function getMetricAnchorSubtitle(metric: FunnelAuditMetric): string {
+  if (metric === "booked") return "Anchored on actual booking date";
+  if (metric === "attended") return "Anchored on attendance date";
+  if (metric === "enrolled" || metric === "cash") {
+    return "Anchored on enrollment / payment date";
+  }
+  return "Anchored on lead creation date";
+}
+
+function getRowSortTimestamp(
+  row: FunnelAuditLeadRow,
+  metric: FunnelAuditMetric
+): number {
+  if (metric === "booked") return row.bookedTs || row.convertedTs || row.createdTs;
+  if (metric === "attended") return row.attendedTs || row.convertedTs || row.createdTs;
+  if (metric === "enrolled" || metric === "cash") return row.convertedTs || row.createdTs;
+  return row.createdTs;
 }
 
 function getActorAttributionNote(
   row: FunnelAuditLeadRow,
   metric: FunnelAuditMetric
 ): string | null {
+  if (
+    isMilestoneAnchoredMetric(metric) &&
+    row.attributedAgent.toLowerCase() !== row.assignedAgent.toLowerCase()
+  ) {
+    return `Owner: ${row.assignedAgent}`;
+  }
   const ownerLower = row.assignedAgent.toLowerCase();
   if (metric === "booked" && row.bookedBy && row.bookedBy.toLowerCase() !== ownerLower) {
     return `Booked by ${row.bookedBy}`;
@@ -576,7 +610,12 @@ export function FunnelAuditModal({
 
     const matched = report.rows.filter((row) => {
       if (reasonFilter !== "all" && row.reasonKey !== reasonFilter) return false;
-      if (agentLower && row.assignedAgent.toLowerCase() !== agentLower) return false;
+      if (
+        agentLower &&
+        (row.attributedAgent || row.assignedAgent).toLowerCase() !== agentLower
+      ) {
+        return false;
+      }
       if (!q) return true;
       return (
         row.leadName.toLowerCase().includes(q) ||
@@ -584,6 +623,7 @@ export function FunnelAuditModal({
         row.branch.toLowerCase().includes(q) ||
         row.pipeline.toLowerCase().includes(q) ||
         row.assignedAgent.toLowerCase().includes(q) ||
+        row.attributedAgent.toLowerCase().includes(q) ||
         row.reasonLabel.toLowerCase().includes(q) ||
         row.reasonDetail.toLowerCase().includes(q) ||
         row.auditionDate.toLowerCase().includes(q)
@@ -594,22 +634,38 @@ export function FunnelAuditModal({
 
     const sorted = [...matched];
     sorted.sort((a, b) => {
-      if (sortBy === "newest") return b.createdTs - a.createdTs;
-      if (sortBy === "oldest") return a.createdTs - b.createdTs;
+      if (sortBy === "newest") {
+        return (
+          getRowSortTimestamp(b, target.metric) -
+          getRowSortTimestamp(a, target.metric)
+        );
+      }
+      if (sortBy === "oldest") {
+        return (
+          getRowSortTimestamp(a, target.metric) -
+          getRowSortTimestamp(b, target.metric)
+        );
+      }
       if (sortBy === "name") return a.leadName.localeCompare(b.leadName);
       if (sortBy === "name_desc") return b.leadName.localeCompare(a.leadName);
       if (sortBy === "cash_desc") {
         if (b.cashIn !== a.cashIn) return b.cashIn - a.cashIn;
-        return b.createdTs - a.createdTs;
+        return (
+          getRowSortTimestamp(b, target.metric) -
+          getRowSortTimestamp(a, target.metric)
+        );
       }
       if (sortBy === "cash_asc") {
         if (a.cashIn !== b.cashIn) return a.cashIn - b.cashIn;
-        return b.createdTs - a.createdTs;
+        return (
+          getRowSortTimestamp(a, target.metric) -
+          getRowSortTimestamp(b, target.metric)
+        );
       }
       return 0;
     });
     return sorted;
-  }, [report.rows, reasonFilter, agentFilter, searchQuery, sortBy]);
+  }, [report.rows, reasonFilter, agentFilter, searchQuery, sortBy, target.metric]);
 
   const filteredExcludedRows = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
@@ -786,8 +842,8 @@ export function FunnelAuditModal({
         "Phone",
         "Channel",
         "Branch",
+        "Credited Staff",
         "Assigned Owner",
-        "Actor Note",
         "Pipeline Stage",
         "Audition Date",
         "Audition Outcome",
@@ -806,8 +862,8 @@ export function FunnelAuditModal({
           row.leadPhone,
           row.channelLabel,
           row.branch,
+          row.attributedAgent,
           row.assignedAgent,
-          getActorAttributionNote(row, target.metric) || "",
           row.pipeline,
           row.auditionDate,
           formatAuditOutcome(row.auditionOutcome),
@@ -850,8 +906,20 @@ export function FunnelAuditModal({
                       : ""
                   }`
                 : target.metric === "leads"
-                  ? `100% of ${report.scopeLabel} cohort`
-                  : `${report.totalCount} of ${report.cohortLeadsCount} cohort leads (${cohortSharePct}%)`}
+                  ? `Assigned to ${report.scopeLabel} in period`
+                  : target.metric === "booked"
+                    ? `${report.cohortLeadsCount} new leads in period · ${Math.round(
+                        clampRatePct(report.totalCount, report.cohortLeadsCount)
+                      )}% rate`
+                    : target.metric === "attended"
+                      ? `vs. ${report.cohortBookedCount} booked in period (${Math.round(
+                          clampRatePct(report.totalCount, report.cohortBookedCount)
+                        )}% show-up)`
+                      : target.metric === "enrolled"
+                        ? `vs. ${report.cohortAttendedCount} attended in period (${Math.round(
+                            clampRatePct(report.totalCount, report.cohortAttendedCount)
+                          )}% close)`
+                        : `${report.totalCount} of ${report.cohortLeadsCount} assigned leads (${cohortSharePct}%)`}
             </p>
           </div>
           {canSwitchToAllAgents && (
@@ -1029,7 +1097,9 @@ export function FunnelAuditModal({
         <div className="p-4 rounded-xl bg-[var(--bg-card)] border border-[var(--border-main)] shadow-xs space-y-2.5">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--text-muted)]">
-              By Assigned Agent ({report.agentBreakdown.length})
+              {isMilestoneAnchoredMetric(target.metric)
+                ? `By Staff Member (${report.agentBreakdown.length})`
+                : `By Assigned Agent (${report.agentBreakdown.length})`}
             </h3>
             {agentFilter !== "all" && (
               <button
@@ -1134,7 +1204,8 @@ export function FunnelAuditModal({
                 )}
               </div>
               <p className="text-xs mt-0.5 text-[var(--text-secondary)]">
-                Period: <strong className="text-[var(--text-primary)]">{periodDescription}</strong> · Cohort anchored on lead creation date
+                Period: <strong className="text-[var(--text-primary)]">{periodDescription}</strong> ·{" "}
+                {getMetricAnchorSubtitle(target.metric)}
               </p>
             </div>
           </div>
@@ -1245,10 +1316,16 @@ export function FunnelAuditModal({
                 </span>
                 <span className="ml-2 text-xs text-[var(--text-secondary)]">
                   {target.metric === "leads"
-                    ? "total cohort"
-                    : target.metric === "cash"
-                      ? `${report.paidCount} paid`
-                      : `of ${report.cohortLeadsCount} leads (${cohortSharePct}%)`}
+                    ? "total assigned"
+                    : target.metric === "booked"
+                      ? `${report.cohortLeadsCount} new leads`
+                      : target.metric === "attended"
+                        ? `${report.cohortBookedCount} booked`
+                        : target.metric === "enrolled"
+                          ? `${report.cohortAttendedCount} attended`
+                          : target.metric === "cash"
+                            ? `${report.paidCount} paid`
+                            : `of ${report.cohortLeadsCount} leads (${cohortSharePct}%)`}
                 </span>
               </div>
 
@@ -1495,7 +1572,7 @@ export function FunnelAuditModal({
                         : "bg-[var(--bg-panel)] text-[var(--text-primary)] border-[var(--border-input)]"
                     }`}
                   >
-                    Reassigned owner ({excludedCountsByReason.reassigned})
+                    Credited to actor ({excludedCountsByReason.reassigned})
                   </button>
                 )}
               </div>
@@ -1684,7 +1761,7 @@ export function FunnelAuditModal({
                           <div className="flex items-center justify-between gap-2 text-xs text-[var(--text-secondary)] flex-wrap">
                             <div>
                               <span className="font-medium text-[var(--text-primary)]">
-                                {row.assignedAgent}
+                                {row.attributedAgent}
                               </span>
                               {actorNote && (
                                 <span className="ml-1 text-[var(--text-muted)]">
@@ -1692,14 +1769,23 @@ export function FunnelAuditModal({
                                 </span>
                               )}
                               <div className="mt-0.5">
-                                Created {formatAuditDate(row.createdTs)}
-                                {row.createdSource !== "createdAt" &&
-                                row.createdSource !== "unknown"
-                                  ? ` (via ${row.createdSource})`
-                                  : ""}
-                                {milestone.ts && milestone.label !== "Created"
-                                  ? ` · ${milestone.label} ${formatAuditDate(milestone.ts)}`
-                                  : ""}
+                                {milestone.ts && milestone.label !== "Created" ? (
+                                  <>
+                                    <span className="font-medium text-[var(--text-primary)]">
+                                      {milestone.label} {formatAuditDate(milestone.ts)}
+                                    </span>
+                                    {" · "}
+                                    <span>Created {formatAuditDate(row.createdTs)}</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    Created {formatAuditDate(row.createdTs)}
+                                    {row.createdSource !== "createdAt" &&
+                                    row.createdSource !== "unknown"
+                                      ? ` (via ${row.createdSource})`
+                                      : ""}
+                                  </>
+                                )}
                               </div>
                             </div>
 
@@ -1743,7 +1829,7 @@ export function FunnelAuditModal({
                           </button>
                         </th>
                         <th className="py-3 px-3 border-b border-[var(--border-main)] bg-[var(--bg-table-header)]">
-                          Owner
+                          {isMilestoneAnchoredMetric(target.metric) ? "Staff / Owner" : "Owner"}
                         </th>
                         <th className="py-3 px-3 border-b border-[var(--border-main)] bg-[var(--bg-table-header)]">
                           Stage &amp; Audition
@@ -1831,19 +1917,19 @@ export function FunnelAuditModal({
                                   type="button"
                                   onClick={() =>
                                     handleSelectAgentFilter(
-                                      agentFilter.toLowerCase() === row.assignedAgent.toLowerCase()
+                                      agentFilter.toLowerCase() === row.attributedAgent.toLowerCase()
                                         ? "all"
-                                        : row.assignedAgent
+                                        : row.attributedAgent
                                     )
                                   }
                                   className="font-medium text-[var(--text-primary)] hover:underline cursor-pointer text-left"
-                                  title={`Filter table by ${row.assignedAgent}`}
+                                  title={`Filter table by ${row.attributedAgent}`}
                                 >
-                                  {row.assignedAgent}
+                                  {row.attributedAgent}
                                 </button>
                               ) : (
                                 <div className="font-medium text-[var(--text-primary)]">
-                                  {row.assignedAgent}
+                                  {row.attributedAgent}
                                 </div>
                               )}
                               {actorNote && (
@@ -1915,27 +2001,38 @@ export function FunnelAuditModal({
                                   {row.cashIn.toLocaleString("en-US")} EGP
                                 </div>
                               )}
-                              <div
-                                className="text-xs text-[var(--text-secondary)]"
-                                title={`Created timestamp: ${formatAuditDateTime(row.createdTs)}`}
-                              >
-                                Created {formatAuditDate(row.createdTs)}
-                              </div>
-                              {row.createdSource !== "createdAt" &&
-                                row.createdSource !== "unknown" && (
-                                  <div className="text-xs text-[var(--text-muted)]">
-                                    via {row.createdSource}
+                              {milestone.ts && milestone.label !== "Created" ? (
+                                <>
+                                  <div
+                                    className="text-xs font-medium text-[var(--text-primary)]"
+                                    title={`${milestone.label} timestamp: ${formatAuditDateTime(
+                                      milestone.ts
+                                    )}`}
+                                  >
+                                    {milestone.label} {formatAuditDate(milestone.ts)}
                                   </div>
-                                )}
-                              {milestone.ts && milestone.label !== "Created" && (
-                                <div
-                                  className="text-xs text-[var(--text-muted)]"
-                                  title={`${milestone.label} timestamp: ${formatAuditDateTime(
-                                    milestone.ts
-                                  )}`}
-                                >
-                                  {milestone.label} {formatAuditDate(milestone.ts)}
-                                </div>
+                                  <div
+                                    className="text-xs text-[var(--text-muted)]"
+                                    title={`Created timestamp: ${formatAuditDateTime(row.createdTs)}`}
+                                  >
+                                    Created {formatAuditDate(row.createdTs)}
+                                  </div>
+                                </>
+                              ) : (
+                                <>
+                                  <div
+                                    className="text-xs text-[var(--text-secondary)]"
+                                    title={`Created timestamp: ${formatAuditDateTime(row.createdTs)}`}
+                                  >
+                                    Created {formatAuditDate(row.createdTs)}
+                                  </div>
+                                  {row.createdSource !== "createdAt" &&
+                                    row.createdSource !== "unknown" && (
+                                      <div className="text-xs text-[var(--text-muted)]">
+                                        via {row.createdSource}
+                                      </div>
+                                    )}
+                                </>
                               )}
                             </td>
 

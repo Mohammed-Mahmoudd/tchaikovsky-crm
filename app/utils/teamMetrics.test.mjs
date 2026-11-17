@@ -6,6 +6,7 @@ import {
   buildSettingsStaffLookup,
   clampRatePct,
   collectLoggedMessageKeys,
+  computeTeamFunnelSummary,
   getAttendedTime,
   getBookedTime,
   getConvertedTime,
@@ -186,7 +187,7 @@ describe("teamMetrics", () => {
         createdAt: "2026-11-10T10:00:00Z",
         auditionBookedAt: "2026-11-10T11:00:00Z",
       },
-      // 8. Excluded: Created before period, booked during period (Mariam)
+      // 8. Created before period, booked during period by Youssef (assigned to Mariam)
       {
         id: "c8",
         name: "Older Lead Booked Now",
@@ -198,7 +199,25 @@ describe("teamMetrics", () => {
         createdAt: "2026-10-20T10:00:00Z",
         auditionBookedAt: "2026-11-11T10:00:00Z",
       },
+      // 9. Unassigned lead booked by Mariam during period -> credited to Mariam
+      {
+        id: "c9",
+        name: "Unassigned Owner Booked By Staff",
+        agent: "Unassigned",
+        bookedBy: "Mariam",
+        channel: "WA",
+        pipeline: "Audition Booked",
+        auditionDate: "2026-11-12",
+        createdAt: "2026-10-25T10:00:00Z",
+        auditionBookedAt: "2026-11-11T12:00:00Z",
+      },
     ];
+
+    const summary = computeTeamFunnelSummary(sampleConversations, {
+      filterMode: "week",
+      periodStartMs: startMs,
+      periodEndMs: endMs,
+    });
 
     const bookedReport = buildFunnelAuditReport(sampleConversations, {
       target: { metric: "booked" },
@@ -209,9 +228,12 @@ describe("teamMetrics", () => {
       periodDescription: "Nov 7 – Nov 13, 2026",
     });
 
-    // Cohort: c1..c6 = 6 assigned leads in period; c1..c5 = 5 booked
+    // Leads: c1..c6 = 6 assigned leads created in period
+    // Booked: c1..c5 + c8 (older lead booked in period) + c9 (booked by Mariam) = 7 booked
     assert.equal(bookedReport.cohortLeadsCount, 6);
-    assert.equal(bookedReport.totalCount, 5);
+    assert.equal(bookedReport.totalCount, 7);
+    assert.equal(summary.team.leads, bookedReport.cohortLeadsCount);
+    assert.equal(summary.team.booked, bookedReport.totalCount);
     assert.equal(
       bookedReport.reasonBuckets.reduce((sum, b) => sum + b.count, 0),
       bookedReport.totalCount
@@ -222,17 +244,19 @@ describe("teamMetrics", () => {
     );
 
     const bucketByKey = Object.fromEntries(bookedReport.reasonBuckets.map((b) => [b.key, b]));
-    assert.equal(bucketByKey.stage_booked.count, 1); // c1
+    assert.equal(bucketByKey.stage_booked.count, 3); // c1, c8, c9
     assert.equal(bucketByKey.progressed_attended.count, 1); // c2
     assert.equal(bucketByKey.progressed_enrolled.count, 2); // c3, c5
     assert.equal(bucketByKey.audition_date_other.count, 1); // c4
 
-    // Excluded cross-checks: c7 (unassigned) + c8 (created before period, booked in period)
-    assert.equal(bookedReport.excludedRows.length, 2);
-    assert.deepEqual(
-      bookedReport.excludedRows.map((r) => r.excludedReason).sort(),
-      ["outside_period_created", "unassigned"]
-    );
+    // Excluded cross-checks: c7 (unassigned lead with no bookedBy actor)
+    assert.equal(bookedReport.excludedRows.length, 1);
+    assert.equal(bookedReport.excludedRows[0].id, "c7");
+    assert.equal(bookedReport.excludedRows[0].excludedReason, "unassigned");
+
+    // Youssef booked c3, c4, and c8 (which is assigned to Mariam) -> 3 booked for Youssef
+    assert.equal(summary.byAgent.get("youssef")?.booked, 3);
+    assert.equal(summary.byAgent.get("mariam")?.booked, 4); // c1, c2, c5, c9
 
     // Attended audit catches direct payment roll-up on c3
     const attendedReport = buildFunnelAuditReport(sampleConversations, {
@@ -244,6 +268,7 @@ describe("teamMetrics", () => {
       periodDescription: "Nov 7 – Nov 13, 2026",
     });
     assert.equal(attendedReport.totalCount, 3); // c2, c3, c5
+    assert.equal(summary.team.attended, attendedReport.totalCount);
     const attBuckets = Object.fromEntries(attendedReport.reasonBuckets.map((b) => [b.key, b]));
     assert.equal(attBuckets.outcome_attended.count, 1); // c2
     assert.equal(attBuckets.enrolled_rollup.count, 1); // c3 direct payment in Contacted
@@ -259,6 +284,8 @@ describe("teamMetrics", () => {
       periodDescription: "Nov 7 – Nov 13, 2026",
     });
     assert.equal(cashReport.totalCash, 2500);
+    assert.equal(summary.team.cash, cashReport.totalCash);
+    assert.equal(summary.team.enrolled, cashReport.totalCount);
     assert.equal(cashReport.paidCount, 1);
     assert.equal(cashReport.unpaidEnrolledCount, 1);
     assert.equal(
@@ -288,34 +315,72 @@ describe("teamMetrics", () => {
     assert.equal(waitingReport.totalCount, 1); // c6
   });
 
-  it("surfaces reassigned_actor cross-checks when auditing a single agent", () => {
-    const report = buildFunnelAuditReport(
-      [
-        {
-          id: "r1",
-          name: "Reassigned Lead",
-          agent: "Youssef",
-          bookedBy: "Mariam",
-          pipeline: "Audition Booked",
-          auditionDate: "2026-11-12",
-          createdAt: "2026-11-10T10:00:00Z",
-        },
-      ],
+  it("credits acting staff member and surfaces reassigned_actor cross-check on assigned owner", () => {
+    const convs = [
       {
-        target: { metric: "booked" },
-        selectedAgent: "Mariam",
-        filterMode: "all",
-        periodStartMs: 0,
-        periodEndMs: 0,
-        periodDescription: "All Time",
-      }
-    );
+        id: "r1",
+        name: "Reassigned Lead",
+        agent: "Youssef",
+        bookedBy: "Mariam",
+        pipeline: "Audition Booked",
+        auditionDate: "2026-11-12",
+        createdAt: "2026-11-10T10:00:00Z",
+        auditionBookedAt: "2026-11-11T10:00:00Z",
+      },
+    ];
 
-    assert.equal(report.totalCount, 0);
-    assert.equal(report.excludedRows.length, 1);
-    assert.equal(report.excludedRows[0].excludedReason, "reassigned_actor");
-    assert.equal(report.excludedRows[0].assignedAgent, "Youssef");
-    assert.equal(report.excludedRows[0].actorName, "Mariam");
+    const mariamReport = buildFunnelAuditReport(convs, {
+      target: { metric: "booked" },
+      selectedAgent: "Mariam",
+      filterMode: "all",
+      periodStartMs: 0,
+      periodEndMs: 0,
+      periodDescription: "All Time",
+    });
+    assert.equal(mariamReport.totalCount, 1);
+    assert.equal(mariamReport.rows[0].attributedAgent, "Mariam");
+    assert.equal(mariamReport.rows[0].assignedAgent, "Youssef");
+
+    const youssefReport = buildFunnelAuditReport(convs, {
+      target: { metric: "booked" },
+      selectedAgent: "Youssef",
+      filterMode: "all",
+      periodStartMs: 0,
+      periodEndMs: 0,
+      periodDescription: "All Time",
+    });
+    assert.equal(youssefReport.totalCount, 0);
+    assert.equal(youssefReport.excludedRows.length, 1);
+    assert.equal(youssefReport.excludedRows[0].excludedReason, "reassigned_actor");
+    assert.equal(youssefReport.excludedRows[0].assignedAgent, "Youssef");
+    assert.equal(youssefReport.excludedRows[0].actorName, "Mariam");
+  });
+
+  it("uses milestone timestamps for walk-in conversions without audition dates", () => {
+    const enrolledAt = "2026-11-17T12:00:00Z";
+    const walkIn = {
+      id: "w1",
+      name: "Walk-in Enrolled",
+      agent: "Nourhan",
+      pipeline: "Enrolled",
+      cashIn: 3000,
+      createdAt: "2026-11-01T10:00:00Z",
+      enrolledAt,
+    };
+    assert.equal(getBookedTime(walkIn), new Date(enrolledAt).getTime());
+
+    const startToday = new Date("2026-11-17T00:00:00Z").getTime();
+    const endToday = new Date("2026-11-17T23:59:59Z").getTime();
+    const summary = computeTeamFunnelSummary([walkIn], {
+      filterMode: "day",
+      periodStartMs: startToday,
+      periodEndMs: endToday,
+    });
+    assert.equal(summary.team.leads, 0);
+    assert.equal(summary.team.booked, 1);
+    assert.equal(summary.team.attended, 1);
+    assert.equal(summary.team.enrolled, 1);
+    assert.equal(summary.team.cash, 3000);
   });
 
   it("builds sorted Assigned Leads agent dropdown options from Settings agents only and filters by agent", () => {

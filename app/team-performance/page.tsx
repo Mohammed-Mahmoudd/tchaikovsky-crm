@@ -10,7 +10,9 @@ import {
   buildSettingsStaffLookup,
   clampRatePct,
   collectLoggedMessageKeys,
-  FunnelAuditTarget,
+  computeTeamFunnelSummary,
+  type FunnelAuditTarget,
+  type FunnelCounts,
   getAttendedTime,
   getBookedTime,
   getConvertedTime,
@@ -750,8 +752,6 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
   conversationParseCache.set(c, parsed);
   return parsed;
 }
-
-type FunnelCounts = { leads: number; booked: number; attended: number; enrolled: number; cash: number };
 
 const ALL_AGENTS_ID = '__all__';
 const TIMELINE_BATCH_SIZE = 50;
@@ -1850,47 +1850,20 @@ function TeamActivitiesPageInner() {
     );
   }, [isAllAgents, effectiveAgent, staffByLower, staffList]);
 
-  /* ── Conversion Funnel: Lead-Cohort Based ──
-   * The funnel follows ONE cohort of leads: those assigned to an agent (or to the selected agent)
-   * and created inside the selected period (all assigned leads for "All Time").
-   * Every later stage is counted from that same cohort, and stages are cumulative
-   * (an enrolled lead has necessarily passed attendance and booking), so:
-   *   leads >= booked >= attended >= enrolled, and every rate is a true 0–100% conversion.
+  /* ── Conversion Funnel: Milestone-Date & Actor-Attributed ──
+   * Assigned Leads are filtered by lead creation date and credited to the assigned owner;
+   * Booked, Attended, and Enrolled/Revenue are filtered by their own action timestamps
+   * (e.g. auditionBookedAt for Booked) and credited to the acting staff member (falling back to owner).
    */
-  const funnelCohort = useMemo(() => {
-    const isAllTime = filterMode === 'all';
-    const emptyCounts = (): FunnelCounts => ({ leads: 0, booked: 0, attended: 0, enrolled: 0, cash: 0 });
-    const team = emptyCounts();
-    const byAgent = new Map<string, FunnelCounts>();
-
-    for (let i = 0; i < conversations.length; i++) {
-      const p = getParsedConversationData(conversations[i]);
-      if (!isRealAssignedAgent(p.assignedAgent)) continue;
-      if (!isAllTime && (!p.createdTs || p.createdTs < periodStartMs || p.createdTs > periodEndMs)) continue;
-
-      const enrolled = p.convertedLead;
-      const attended = enrolled || p.attendedLead;
-      const booked = attended || p.bookedLead;
-      const cash = enrolled ? p.cashInNum : 0;
-
-      let agentCounts = byAgent.get(p.assignedAgentLower);
-      if (!agentCounts) {
-        agentCounts = emptyCounts();
-        byAgent.set(p.assignedAgentLower, agentCounts);
-      }
-      const targets = [team, agentCounts];
-      for (let t = 0; t < targets.length; t++) {
-        const target = targets[t];
-        target.leads += 1;
-        if (booked) target.booked += 1;
-        if (attended) target.attended += 1;
-        if (enrolled) target.enrolled += 1;
-        target.cash += cash;
-      }
-    }
-
-    return { team, byAgent };
-  }, [conversations, filterMode, periodStartMs, periodEndMs]);
+  const funnelCohort = useMemo(
+    () =>
+      computeTeamFunnelSummary(conversations, {
+        filterMode,
+        periodStartMs,
+        periodEndMs,
+      }),
+    [conversations, filterMode, periodStartMs, periodEndMs]
+  );
 
   const selectedMetrics = useMemo(() => {
     const counts: FunnelCounts = isAllAgents
@@ -3565,7 +3538,7 @@ function TeamActivitiesPageInner() {
                               />
                             </div>
                             <div className="flex items-center justify-between gap-2 text-[10px] mt-1.5" style={{ color: 'var(--text-muted)' }}>
-                              <span className="truncate">{leads > 0 ? `${bookingRateStr}% of assigned leads` : '0 booked'}</span>
+                              <span className="truncate">{leads > 0 ? `${bookingRateStr}% of assigned leads` : `${booked} booked`}</span>
                               <span className="inline-flex items-center gap-0.5 font-semibold text-blue-500 shrink-0">
                                 Audit
                                 <ChevronRight className="w-3 h-3" />
@@ -3599,7 +3572,7 @@ function TeamActivitiesPageInner() {
                               />
                             </div>
                             <div className="flex items-center justify-between gap-2 text-[10px] mt-1.5" style={{ color: 'var(--text-muted)' }}>
-                              <span className="truncate">{booked > 0 ? `${showRateStr}% show-up rate` : '0 attended'}</span>
+                              <span className="truncate">{booked > 0 ? `${showRateStr}% show-up rate` : `${attended} attended`}</span>
                               <span className="inline-flex items-center gap-0.5 font-semibold text-teal-500 shrink-0">
                                 Audit
                                 <ChevronRight className="w-3 h-3" />
@@ -3633,7 +3606,7 @@ function TeamActivitiesPageInner() {
                               />
                             </div>
                             <div className="flex items-center justify-between gap-2 text-[10px] mt-1.5" style={{ color: 'var(--text-muted)' }}>
-                              <span className="truncate">{attended > 0 ? `${closeRateStr}% closing conversion` : '0 enrolled'}</span>
+                              <span className="truncate">{attended > 0 ? `${closeRateStr}% closing conversion` : `${enrolled} enrolled`}</span>
                               <span className="inline-flex items-center gap-0.5 font-semibold text-emerald-500 shrink-0">
                                 Audit
                                 <ChevronRight className="w-3 h-3" />
@@ -3965,8 +3938,8 @@ function TeamActivitiesPageInner() {
                               style={{ color: 'var(--text-primary)', borderColor: 'var(--border-main)' }}
                             >
                               {staffList.map((st, idx) => {
-                                // Same lead cohort as the funnel above (leads assigned to this staff member in the period),
-                                // so the rows add up exactly to the Team Total row.
+                                // Same milestone-date & actor-attributed summary as the funnel above,
+                                // so the rows add up to the Team Total row.
                                 const stCounts = funnelCohort.byAgent.get(st.name.toLowerCase());
                                 const stPerf = perfByNameLower.get(st.name.toLowerCase());
                                 const statusMeta = getPresenceStatusMeta(stPerf?.status);
