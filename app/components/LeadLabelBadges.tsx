@@ -38,7 +38,7 @@ export const LeadLabelBadges = React.memo(function LeadLabelBadges({
           <span
             key={label.id}
             title={label.name}
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium leading-tight max-w-full min-w-0 border"
+            className="inline-flex items-center gap-1 px-1.5 py-px rounded-full text-[9px] font-medium leading-tight max-w-full min-w-0 border"
             style={{
               background: vars.background,
               borderColor: vars.borderColor,
@@ -47,7 +47,7 @@ export const LeadLabelBadges = React.memo(function LeadLabelBadges({
           >
             <span
               aria-hidden="true"
-              className="w-1.5 h-1.5 rounded-full shrink-0"
+              className="w-1 h-1 rounded-full shrink-0"
               style={{ backgroundColor: vars.dotColor }}
             />
             <span className="truncate max-w-[120px]">{label.name}</span>
@@ -58,7 +58,7 @@ export const LeadLabelBadges = React.memo(function LeadLabelBadges({
         <span
           title={overflowSummary}
           aria-label={`${overflow.length} more labels: ${overflowSummary}`}
-          className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold leading-tight border shrink-0"
+          className="inline-flex items-center px-1.5 py-px rounded-full text-[9px] font-semibold leading-tight border shrink-0"
           style={{
             background: "var(--bg-pill)",
             borderColor: "var(--border-main)",
