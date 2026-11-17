@@ -103,6 +103,10 @@ export function canAccessRoute(role: string | undefined, pathname: string): bool
   if (pathname === "/profile") return true;
   const norm = normalizeRole(role);
 
+  if (pathname === "/claude-leads" || pathname.startsWith("/claude-leads/")) {
+    return norm === "chairman";
+  }
+
   if (norm === "chairman" || norm === "marketing") {
     return true;
   }

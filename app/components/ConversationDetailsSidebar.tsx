@@ -7,6 +7,7 @@ import { useCRM, Conversation } from "../context/CRMContext";
 import { useAuth, canAccessRoute, isDirectorOrChairmanRole, isAdmissionRole } from "./AuthProvider";
 import EditableLeadName from "./EditableLeadName";
 import LeadLabelsSection from "./LeadLabelsSection";
+import LeadClaudeToggleSection from "./LeadClaudeToggleSection";
 import {
   buildLeadNamePatchUpdates,
   getEditableLeadDisplayName,
@@ -235,6 +236,15 @@ export function ConversationDetailsSidebar({
         labelIds={conversation.labels}
         isReadOnly={isReadOnly}
         onUpdateLabels={(nextIds) => patchConversation(conversation.id, { labels: nextIds })}
+      />
+
+      <LeadClaudeToggleSection
+        conversationId={conversation.id}
+        claudeEnabled={conversation.claudeEnabled}
+        claudePaused={conversation.claudePaused}
+        claudePausedReason={conversation.claudePausedReason}
+        claudeLastRepliedAt={conversation.claudeLastRepliedAt}
+        claudeLastError={conversation.claudeLastError}
       />
 
       {/* Optional Open Conversation button (e.g. In standalone details view) */}

@@ -40,6 +40,7 @@ import EditableLeadName from "./components/EditableLeadName";
 import { InboxBucketActions, type InboxBucketAction } from "./components/InboxBucketActions";
 import { LeadLabelBadges } from "./components/LeadLabelBadges";
 import LeadLabelsSection from "./components/LeadLabelsSection";
+import LeadClaudeToggleSection from "./components/LeadClaudeToggleSection";
 import {
   buildLeadNamePatchUpdates,
   getEditableLeadDisplayName,
@@ -2980,6 +2981,15 @@ export default function InboxPage() {
               labelIds={activeConv.labels}
               isReadOnly={isReadOnly}
               onUpdateLabels={(nextIds) => patchConversation(activeConv.id, { labels: nextIds })}
+            />
+
+            <LeadClaudeToggleSection
+              conversationId={activeConv.id}
+              claudeEnabled={activeConv.claudeEnabled}
+              claudePaused={activeConv.claudePaused}
+              claudePausedReason={activeConv.claudePausedReason}
+              claudeLastRepliedAt={activeConv.claudeLastRepliedAt}
+              claudeLastError={activeConv.claudeLastError}
             />
 
             <div className="mb-5">

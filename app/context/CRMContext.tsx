@@ -153,6 +153,12 @@ export type Conversation = {
   followUpTags?: string[];
   labels?: string[];
   activityLog?: ActivityLogEntry[];
+  claudeEnabled?: boolean;
+  claudePaused?: boolean;
+  claudePausedReason?: string;
+  claudePausedAt?: string | null;
+  claudeLastRepliedAt?: string | null;
+  claudeLastError?: string;
   messages: Message[];
   createdAt?: string;
   updatedAt?: string;
@@ -269,6 +275,15 @@ type CRMContextType = {
   patchConversation: (
     id: string,
     updates: Partial<Record<string, any>>
+  ) => Promise<{ ok: boolean; error?: string }>;
+  updateConversationClaude: (
+    id: string,
+    payload: {
+      claudeEnabled?: boolean;
+      claudePaused?: boolean;
+      reason?: string;
+      resetSession?: boolean;
+    }
   ) => Promise<{ ok: boolean; error?: string }>;
   createManualLead: (input: CreateManualLeadInput) => Promise<CreateManualLeadResult>;
   markConversationAsRead: (id: string) => Promise<void>;
@@ -1215,6 +1230,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       lastMessageDirection: c.lastMessageDirection === "outgoing" ? "outgoing" : c.lastMessageDirection === "incoming" ? "incoming" : undefined,
       lastOutgoingAt: c.lastOutgoingAt ? Number(c.lastOutgoingAt) : undefined,
       lastSeenAt: c.lastSeenAt,
+      claudeEnabled: Boolean(c.claudeEnabled),
+      claudePaused: Boolean(c.claudePaused),
+      claudePausedReason: typeof c.claudePausedReason === "string" ? c.claudePausedReason : "",
+      claudePausedAt: c.claudePausedAt ? String(c.claudePausedAt) : null,
+      claudeLastRepliedAt: c.claudeLastRepliedAt ? String(c.claudeLastRepliedAt) : null,
+      claudeLastError: typeof c.claudeLastError === "string" ? c.claudeLastError : "",
     };
   }, []);
 
@@ -1637,6 +1658,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     hasActivePending && pending?.updates.labels !== undefined
                       ? normalizeConversationLabelIds(pending.updates.labels)
                       : normActive.labels ?? c.labels,
+                  claudeEnabled: normActive.claudeEnabled,
+                  claudePaused: normActive.claudePaused,
+                  claudePausedReason: normActive.claudePausedReason,
+                  claudePausedAt: normActive.claudePausedAt,
+                  claudeLastRepliedAt: normActive.claudeLastRepliedAt,
+                  claudeLastError: normActive.claudeLastError,
                 }
               : c
           )
@@ -1978,6 +2005,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                             (hasActivePendingPatch && activePendingUpdates?.source) ||
                             normRemote.source ||
                             existing.source,
+                          claudeEnabled: normRemote.claudeEnabled,
+                          claudePaused: normRemote.claudePaused,
+                          claudePausedReason: normRemote.claudePausedReason,
+                          claudePausedAt: normRemote.claudePausedAt,
+                          claudeLastRepliedAt: normRemote.claudeLastRepliedAt,
+                          claudeLastError: normRemote.claudeLastError,
                         }
                       : {}),
                     lastMessageAt: Math.max(
@@ -3223,6 +3256,66 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     // preserves the blue unread message count until a reply is sent.
   }, []);
 
+  const updateConversationClaude = useCallback(
+    async (
+      id: string,
+      payload: {
+        claudeEnabled?: boolean;
+        claudePaused?: boolean;
+        reason?: string;
+        resetSession?: boolean;
+      }
+    ): Promise<{ ok: boolean; error?: string }> => {
+      if (isReadOnly) {
+        return { ok: false, error: "View-only account: modifications are disabled." };
+      }
+      try {
+        const res = await authFetch(
+          `${API}/claude/conversations/${encodeURIComponent(id)}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          }
+        );
+        const json = await res.json().catch(() => null);
+        if (!res.ok || !json?.success) {
+          return {
+            ok: false,
+            error:
+              (typeof json?.error === "string" && json.error) ||
+              `Could not update Claude status (HTTP ${res.status}).`,
+          };
+        }
+
+        if (json.data) {
+          const norm = normalizeConversationMeta(json.data);
+          setConversations((prev) => {
+            const next = prev.map((c) =>
+              c.id === id || c.id === norm.id
+                ? {
+                    ...c,
+                    claudeEnabled: norm.claudeEnabled,
+                    claudePaused: norm.claudePaused,
+                    claudePausedReason: norm.claudePausedReason,
+                    claudePausedAt: norm.claudePausedAt,
+                    claudeLastRepliedAt: norm.claudeLastRepliedAt,
+                    claudeLastError: norm.claudeLastError,
+                  }
+                : c
+            );
+            persistConversationsCache(next);
+            return next;
+          });
+        }
+        return { ok: true };
+      } catch {
+        return { ok: false, error: "Network error while updating Claude status." };
+      }
+    },
+    [isReadOnly, authFetch, normalizeConversationMeta]
+  );
+
   // 1-Click navigation from any page to open that user's chat in Inbox
   const openChat = useCallback(
     (id: string) => {
@@ -4021,6 +4114,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         setActiveChatId,
         openChat,
         patchConversation,
+        updateConversationClaude,
         createManualLead,
         markConversationAsRead,
         refresh: forceRefresh,

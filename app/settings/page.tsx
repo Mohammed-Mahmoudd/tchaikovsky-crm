@@ -5,6 +5,8 @@ import { useAuth, Role, ROLE_OPTIONS, getRoleDisplayName, normalizeRole, canMana
 import { organizeTeamMembersByRole } from "../utils/roles";
 import { useCRM } from "../context/CRMContext";
 import { useBranches } from "../lib/branches";
+import { ClaudeSettingsTab } from "../components/ClaudeSettingsTab";
+import { SlideOverChatDrawer, useSlideOverChatDrawer } from "../components/SlideOverChatDrawer";
 import { ChevronDown, Check, Trash2, Search, X, AlertTriangle, Bell, BellOff } from "lucide-react";
 
 interface TeamMember {
@@ -94,6 +96,17 @@ export default function SettingsPage() {
 
   // Avatar state (Chairman only)
   const isChairman = normalizeRole(user?.role) === "chairman";
+  const {
+    chatId: claudeDrawerChatId,
+    showDetails: claudeShowChatDetails,
+    setShowDetails: setClaudeShowChatDetails,
+    isClosing: isClaudeDrawerClosing,
+    panelRef: claudeDrawerPanelRef,
+    open: openClaudeDrawer,
+    close: closeClaudeDrawer,
+    resetImmediate: resetClaudeDrawerImmediate,
+    handleAnimationEnd: handleClaudeDrawerAnimationEnd,
+  } = useSlideOverChatDrawer();
   const [avatarSaving, setAvatarSaving] = useState(false);
   const [avatarStatus, setAvatarStatus] = useState<{ ok: boolean; msg: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -298,8 +311,8 @@ export default function SettingsPage() {
     return () => { cancelled = true; };
   }, [branchToDelete, authFetch]);
 
-  // Settings tab: "general" vs "branches"
-  const [activeTab, setActiveTab] = useState<"general" | "branches">("general");
+  // Settings tab: "general", "branches", or Chairman-only "claude"
+  const [activeTab, setActiveTab] = useState<"general" | "branches" | "claude">("general");
 
   // Region dropdown state in add branch container
   const [isRegionOpen, setIsRegionOpen] = useState(false);
@@ -331,22 +344,38 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      if (window.location.hash.toLowerCase() === "#branches") {
-        setActiveTab("branches");
-      }
+      let cancelled = false;
+      const resolveHashTab = (): "general" | "branches" | "claude" => {
+        const h = window.location.hash.toLowerCase();
+        if (h === "#branches") return "branches";
+        if ((h === "#claude" || h.startsWith("#claude-")) && isChairman) return "claude";
+        return "general";
+      };
+      queueMicrotask(() => {
+        if (!cancelled) {
+          setActiveTab(resolveHashTab());
+        }
+      });
       const onHashChange = () => {
-        setActiveTab(window.location.hash.toLowerCase() === "#branches" ? "branches" : "general");
+        setActiveTab(resolveHashTab());
       };
       window.addEventListener("hashchange", onHashChange);
-      return () => window.removeEventListener("hashchange", onHashChange);
+      return () => {
+        cancelled = true;
+        window.removeEventListener("hashchange", onHashChange);
+      };
     }
-  }, []);
+  }, [isChairman]);
 
-  const handleTabChange = (tab: "general" | "branches") => {
+  const handleTabChange = (tab: "general" | "branches" | "claude") => {
+    if (tab === "claude" && !isChairman) return;
+    if (tab !== "claude") resetClaudeDrawerImmediate();
     setActiveTab(tab);
     if (typeof window !== "undefined") {
       if (tab === "branches") {
         window.location.hash = "branches";
+      } else if (tab === "claude") {
+        window.location.hash = "claude";
       } else {
         history.replaceState(null, "", window.location.pathname);
       }
@@ -905,7 +934,8 @@ export default function SettingsPage() {
   const roleLabel = roleDisplayName || getRoleDisplayName(user?.role);
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto p-4 md:p-6 pb-12 w-full" style={{ background: "var(--bg-page)", color: "var(--text-primary)", WebkitOverflowScrolling: "touch" }}>
+    <div className="flex-1 min-h-0 flex flex-col overflow-hidden relative">
+      <div className="flex-1 min-h-0 overflow-y-auto p-4 md:p-6 pb-12 w-full" style={{ background: "var(--bg-page)", color: "var(--text-primary)", WebkitOverflowScrolling: "touch" }}>
       <div className="max-w-4xl mx-auto">
         {/* Header & Simple Formal Tabs */}
         <div className="flex items-center justify-between mb-5">
@@ -936,6 +966,19 @@ export default function SettingsPage() {
             >
               Branches
             </button>
+            {isChairman && (
+              <button
+                type="button"
+                onClick={() => handleTabChange("claude")}
+                className="h-[24px] px-3 text-[11px] font-semibold rounded-[6px] transition-colors cursor-pointer"
+                style={activeTab === "claude"
+                  ? { background: "var(--bg-banner)", color: "#fff" }
+                  : { background: "transparent", color: "var(--text-secondary)" }
+                }
+              >
+                Claude
+              </button>
+            )}
           </div>
         </div>
 
@@ -2006,6 +2049,11 @@ export default function SettingsPage() {
           </div>
         </>
       )}
+
+      {/* ── CLAUDE TAB CONTENT (Chairman only) ─────────────────────────── */}
+      {activeTab === "claude" && isChairman && (
+        <ClaudeSettingsTab onOpenLeadChat={openClaudeDrawer} />
+      )}
       </div>
 
       {/* ── Edit User Modal ───────────────────────────────────────────────── */}
@@ -2679,6 +2727,19 @@ export default function SettingsPage() {
           </div>
         </div>
       )}
+      </div>
+
+      <SlideOverChatDrawer
+        chatId={claudeDrawerChatId}
+        showDetails={claudeShowChatDetails}
+        isClosing={isClaudeDrawerClosing}
+        panelRef={claudeDrawerPanelRef}
+        onToggleDetails={() => setClaudeShowChatDetails((prev) => !prev)}
+        onCloseDetails={() => setClaudeShowChatDetails(false)}
+        onClose={closeClaudeDrawer}
+        onAnimationEnd={handleClaudeDrawerAnimationEnd}
+        enableEscapeClose={!editingMember && !deactivatingMember && !deletingMember && !branchToDelete}
+      />
     </div>
   );
 }

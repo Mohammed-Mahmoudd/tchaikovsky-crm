@@ -89,5 +89,15 @@ describe("CRM roles & permissions", () => {
     ]);
     assert.deepEqual(groups.map((g) => g.key), ["chairman"]);
   });
+
+  it("restricts /claude-leads strictly to Chairman and legacy Manager/Owner aliases", () => {
+    assert.equal(canAccessRoute("chairman", "/claude-leads"), true);
+    assert.equal(canAccessRoute("manager", "/claude-leads"), true);
+    assert.equal(canAccessRoute("owner", "/claude-leads"), true);
+
+    for (const role of ["marketing", "admission_advanced", "admission_officer", "enrollment_director", "finance"]) {
+      assert.equal(canAccessRoute(role, "/claude-leads"), false, `${role} should not access /claude-leads`);
+    }
+  });
 });
 
