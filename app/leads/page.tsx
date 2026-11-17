@@ -12,7 +12,12 @@ import {
 import { useAuth, isDirectorOrChairmanRole, isAdmissionRole } from "../components/AuthProvider";
 import { useBranches } from "../lib/branches";
 import { BranchSelect } from "../components/BranchSelect";
+import { CampaignFilterPopover } from "../components/CampaignFilterPopover";
 import { buildLabelNameMap, matchLeadSearch } from "../utils/search";
+import {
+  formatLeadSource,
+  buildCampaignFilterList,
+} from "../utils/leadSource";
 import {
   MessageSquare,
   Plus,
@@ -69,7 +74,10 @@ type Lead = {
   leadName?: string;
   phone: string;
   campaign: string;
+  adset: string;
   ad: string;
+  sourceDisplay: string;
+  sourceLabel: string;
   stage: string;
   agent: string;
   channel: string;
@@ -133,8 +141,12 @@ const LeadTableRow = memo(function LeadTableRow({
           {lead.channel}
         </span>
       </td>
-      <td className="py-3 px-4 max-w-[200px] truncate" style={{ color: "var(--text-secondary)" }}>
-        {lead.campaign}
+      <td
+        className="py-2.5 px-4 min-w-[220px] max-w-[360px]"
+        style={{ color: "var(--text-secondary)" }}
+        title={lead.sourceDisplay}
+      >
+        <span className="break-words leading-snug block">{lead.sourceLabel}</span>
       </td>
       <td className="py-3 px-4 whitespace-nowrap">
         <div className="flex items-center gap-1.5">
@@ -283,9 +295,9 @@ const LeadMobileCard = memo(function LeadMobileCard({
         </div>
       </div>
 
-      <div className="flex items-center justify-between gap-2 text-[11px]">
-        <span className="truncate" style={{ color: "var(--text-secondary)" }}>
-          Source: <strong style={{ color: "var(--text-primary)" }}>{lead.campaign}</strong>
+      <div className="text-[11px] min-w-0" style={{ color: "var(--text-secondary)" }} title={lead.sourceDisplay}>
+        <span className="break-words leading-snug">
+          Source: <strong style={{ color: "var(--text-primary)" }}>{lead.sourceLabel}</strong>
         </span>
       </div>
 
@@ -994,52 +1006,28 @@ export default function LeadsPage() {
   }, [filterStage, filterCampaign, effectiveSearch]);
 
   const leads: Lead[] = useMemo(() => {
-    return conversations.map((c) => ({
-      id: c.id,
-      received: formatReceivedDate(c.createdAt),
-      name: c.leadName || c.profileName || c.name,
-      leadName: c.leadName,
-      phone: c.phone || "—",
-      campaign:
-        typeof c.source === "object"
-          ? c.source?.campaign || "Direct"
-          : c.source && c.source !== "direct"
-          ? c.source
-          : "Direct",
-      ad: typeof c.source === "object" ? c.source?.ad || "—" : "—",
-      stage: c.pipeline || "New",
-      agent: c.agent || "Unassigned",
-      channel: c.channel || "—",
-      labels: c.labels || [],
-    }));
+    return conversations.map((c) => {
+      const formattedSource = formatLeadSource(c.source);
+      return {
+        id: c.id,
+        received: formatReceivedDate(c.createdAt),
+        name: c.leadName || c.profileName || c.name,
+        leadName: c.leadName,
+        phone: c.phone || "—",
+        campaign: formattedSource.campaign,
+        adset: formattedSource.adset,
+        ad: formattedSource.ad || "—",
+        sourceDisplay: formattedSource.display,
+        sourceLabel: formattedSource.shortDisplay,
+        stage: c.pipeline || "New",
+        agent: c.agent || "Unassigned",
+        channel: c.channel || "—",
+        labels: c.labels || [],
+      };
+    });
   }, [conversations]);
 
-  const campaignOptions = useMemo(() => {
-    const counts: Record<string, number> = {};
-    leads.forEach((l) => {
-      const camp = l.campaign || "Direct";
-      counts[camp] = (counts[camp] || 0) + 1;
-    });
-
-    const nonDirect = Object.keys(counts)
-      .filter((c) => c !== "Direct")
-      .sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
-
-    const options: { label: string; value: string }[] = [
-      { label: `All campaigns (${leads.length})`, value: "All campaigns" },
-    ];
-
-    if (counts["Direct"]) {
-      options.push({ label: `Direct (${counts["Direct"]})`, value: "Direct" });
-    }
-
-    nonDirect.forEach((c) => {
-      const display = /^\d+$/.test(c) ? `Campaign #${c}` : c;
-      options.push({ label: `${display} (${counts[c]})`, value: c });
-    });
-
-    return options;
-  }, [leads]);
+  const campaignFilterList = useMemo(() => buildCampaignFilterList(leads), [leads]);
 
   const stages = [
     "All",
@@ -1057,7 +1045,7 @@ export default function LeadsPage() {
   const filtered = useMemo(() => {
     return leads.filter((l) => {
       if (filterStage !== "All" && l.stage !== filterStage) return false;
-      if (filterCampaign !== "All campaigns" && l.campaign !== filterCampaign) return false;
+      if (filterCampaign !== "All campaigns" && l.sourceDisplay !== filterCampaign) return false;
       if (effectiveSearch && !matchLeadSearch(l, effectiveSearch, labelNameMap)) return false;
       return true;
     });
@@ -1143,45 +1131,64 @@ export default function LeadsPage() {
 
         {/* Filters & Search row */}
         <div
-          className="flex items-center gap-3 overflow-x-auto flex-nowrap shrink-0 pb-0.5"
+          className="flex flex-col md:flex-row md:flex-nowrap md:items-center md:overflow-x-auto no-scrollbar gap-2 xl:gap-2.5 shrink-0 pb-0.5"
           style={{ WebkitOverflowScrolling: "touch" }}
         >
-          <div
-            className="relative flex items-center h-[28px] w-[180px] sm:w-[210px] px-2 rounded-[6px] shrink-0"
-            style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)" }}
-          >
-            <Search className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--text-secondary)" }} />
-            <input
-              type="text"
-              value={localSearch}
-              onChange={(e) => setLocalSearch(e.target.value)}
-              placeholder="Filter name, phone, or label…"
-              aria-label="Filter leads by name, phone, or label"
-              className="flex-1 w-full h-full px-1.5 text-[12px] bg-transparent outline-none"
-              style={{ color: "var(--text-primary)" }}
-            />
-            {localSearch && (
-              <button
-                type="button"
-                onClick={() => setLocalSearch("")}
-                aria-label="Clear filter"
-                className="p-0.5 rounded hover:opacity-80"
-                style={{ color: "var(--text-secondary)" }}
+          <div className="flex items-center justify-between gap-2 md:contents">
+            <div
+              className="relative flex items-center h-[28px] flex-1 min-w-0 max-w-[240px] md:flex-none md:w-[175px] xl:w-[205px] px-2 rounded-[6px] shrink-0 md:order-1"
+              style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)" }}
+            >
+              <Search className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--text-secondary)" }} />
+              <input
+                type="text"
+                value={localSearch}
+                onChange={(e) => setLocalSearch(e.target.value)}
+                placeholder="Filter name, phone, or label…"
+                aria-label="Filter leads by name, phone, or label"
+                className="flex-1 min-w-0 w-full h-full px-1.5 text-[16px] md:text-[12px] bg-transparent outline-none"
+                style={{ color: "var(--text-primary)" }}
+              />
+              {localSearch && (
+                <button
+                  type="button"
+                  onClick={() => setLocalSearch("")}
+                  aria-label="Clear filter"
+                  className="p-0.5 rounded hover:opacity-80"
+                  style={{ color: "var(--text-secondary)" }}
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0 md:order-5">
+              <span
+                className="hidden sm:inline text-[9px] font-bold uppercase tracking-widest"
+                style={{ color: "var(--text-muted)" }}
               >
-                <X className="w-3 h-3" />
-              </button>
-            )}
+                CAMPAIGN
+              </span>
+              <CampaignFilterPopover
+                value={filterCampaign}
+                onChange={setFilterCampaign}
+                filterList={campaignFilterList}
+              />
+            </div>
           </div>
 
-          <div className="h-4 w-[1px] shrink-0" style={{ background: "var(--border-main)" }} />
+          <div className="hidden md:block h-4 w-[1px] shrink-0 md:order-2" style={{ background: "var(--border-main)" }} />
 
-          <div className="flex gap-1.5 shrink-0">
+          <div
+            className="flex gap-1 xl:gap-1.5 overflow-x-auto no-scrollbar md:overflow-visible md:flex-nowrap shrink-0 md:order-3 pb-0.5 md:pb-0"
+            style={{ WebkitOverflowScrolling: "touch" }}
+          >
             {stages.map((s) => (
               <button
                 key={s}
                 type="button"
                 onClick={() => setFilterStage(s)}
-                className="text-[11px] font-semibold px-2.5 py-1 rounded-full transition-colors shrink-0 cursor-pointer touch-manipulation"
+                className="text-[11px] font-semibold px-2 xl:px-2.5 py-1 rounded-full transition-colors shrink-0 cursor-pointer touch-manipulation"
                 style={
                   filterStage === s
                     ? { background: "#0066FF", color: "#fff" }
@@ -1193,33 +1200,7 @@ export default function LeadsPage() {
             ))}
           </div>
 
-          <div className="h-4 w-[1px] shrink-0" style={{ background: "var(--border-main)" }} />
-
-          <div className="flex items-center gap-1.5 shrink-0">
-            <span
-              className="text-[9px] font-bold uppercase tracking-widest"
-              style={{ color: "var(--text-muted)" }}
-            >
-              CAMPAIGN
-            </span>
-            <select
-              value={filterCampaign}
-              onChange={(e) => setFilterCampaign(e.target.value)}
-              aria-label="Filter by campaign or source"
-              className="h-[26px] text-[11px] rounded-[6px] px-2 outline-none cursor-pointer font-medium"
-              style={{
-                background: "var(--bg-pill)",
-                border: "1px solid var(--border-input)",
-                color: "var(--text-primary)",
-              }}
-            >
-              {campaignOptions.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </div>
+          <div className="hidden md:block h-4 w-[1px] shrink-0 md:order-4" style={{ background: "var(--border-main)" }} />
         </div>
       </div>
 
@@ -1277,44 +1258,49 @@ export default function LeadsPage() {
             </div>
 
             {/* Desktop Table (md+) */}
-            <div className="hidden md:block min-w-[800px] p-4 md:p-6">
-              <table className="w-full text-left border-collapse rounded-xl overflow-hidden shadow-sm">
-                <thead
-                  className="text-[10px] uppercase tracking-widest font-bold"
-                  style={{
-                    background: "var(--bg-table-header)",
-                    color: "var(--text-secondary)",
-                  }}
-                >
-                  <tr>
-                    <th className="py-2.5 px-4 font-bold">Received</th>
-                    <th className="py-2.5 px-4 font-bold">Name</th>
-                    <th className="py-2.5 px-4 font-bold">Phone</th>
-                    <th className="py-2.5 px-4 font-bold">Channel</th>
-                    <th className="py-2.5 px-4 font-bold">Campaign / Source</th>
-                    <th className="py-2.5 px-4 font-bold">Agent</th>
-                    <th className="py-2.5 px-4 font-bold">Stage</th>
-                    <th className="py-2.5 px-4 font-bold text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="text-[12px]" style={{ color: "var(--text-primary)" }}>
-                  {paginatedLeads.map((lead, idx) => (
-                    <LeadTableRow
-                      key={lead.id}
-                      lead={lead}
-                      idx={idx}
-                      isChairman={isChairman}
-                      isAdmission={isAdmission}
-                      isReadOnly={isReadOnly}
-                      userClean={userClean}
-                      userName={user?.name}
-                      assignableAgents={assignableAgents}
-                      onPatchAgent={handlePatchAgent}
-                      onOpenChat={openChat}
-                    />
-                  ))}
-                </tbody>
-              </table>
+            <div className="hidden md:block min-w-[840px] p-4 md:p-6">
+              <div
+                className="rounded-xl overflow-x-clip shadow-sm"
+                style={{ border: "1px solid var(--border-main)" }}
+              >
+                <table className="w-full text-left border-collapse">
+                  <thead
+                    className="text-[10px] uppercase tracking-widest font-bold sticky top-0 z-10"
+                    style={{
+                      background: "var(--bg-table-header)",
+                      color: "var(--text-secondary)",
+                    }}
+                  >
+                    <tr>
+                      <th className="py-2.5 px-4 font-bold rounded-tl-xl">Received</th>
+                      <th className="py-2.5 px-4 font-bold">Name</th>
+                      <th className="py-2.5 px-4 font-bold">Phone</th>
+                      <th className="py-2.5 px-4 font-bold">Channel</th>
+                      <th className="py-2.5 px-4 font-bold">Campaign / Source</th>
+                      <th className="py-2.5 px-4 font-bold">Agent</th>
+                      <th className="py-2.5 px-4 font-bold">Stage</th>
+                      <th className="py-2.5 px-4 font-bold text-right rounded-tr-xl">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-[12px]" style={{ color: "var(--text-primary)" }}>
+                    {paginatedLeads.map((lead, idx) => (
+                      <LeadTableRow
+                        key={lead.id}
+                        lead={lead}
+                        idx={idx}
+                        isChairman={isChairman}
+                        isAdmission={isAdmission}
+                        isReadOnly={isReadOnly}
+                        userClean={userClean}
+                        userName={user?.name}
+                        assignableAgents={assignableAgents}
+                        onPatchAgent={handlePatchAgent}
+                        onOpenChat={openChat}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
 
             {/* Pagination Footer (shown when leads > PAGE_SIZE) */}
