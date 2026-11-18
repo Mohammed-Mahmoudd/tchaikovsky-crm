@@ -8,11 +8,16 @@ import { useAuth, canAccessRoute, isDirectorOrChairmanRole, isAdmissionRole } fr
 import EditableLeadName from "./EditableLeadName";
 import LeadLabelsSection from "./LeadLabelsSection";
 import LeadClaudeToggleSection from "./LeadClaudeToggleSection";
+import LeadCashInSection from "./LeadCashInSection";
 import {
   buildLeadNamePatchUpdates,
   getEditableLeadDisplayName,
   hasAgentEditedLeadName,
 } from "../utils/leadName";
+import {
+  extractExplicitAuditionTime,
+  syncAuditionSlotCacheOnUpdate,
+} from "../utils/auditionSchedule";
 
 const PIPELINE_STAGES = [
   "New",
@@ -313,6 +318,14 @@ export function ConversationDetailsSidebar({
         </div>
       </div>
 
+      {/* CASH IN */}
+      <LeadCashInSection
+        conversationId={conversation.id}
+        cashIn={conversation.cashIn}
+        isReadOnly={isReadOnly}
+        onSaveCash={(amount) => patchConversation(conversation.id, { cashIn: amount })}
+      />
+
       {/* SOURCE */}
       <div className="mb-5">
         <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">
@@ -425,10 +438,12 @@ export function ConversationDetailsSidebar({
                 <CheckCircle2 className="w-3.5 h-3.5 shrink-0" style={{ color: "#0066FF" }} />
                 <select
                   disabled={isReadOnly}
-                  value={conversation.auditionOutcome || ""}
-                  onChange={(e) =>
-                    patchConversation(conversation.id, { auditionOutcome: e.target.value })
-                  }
+                  value={conversation.auditionOutcome === "booked" ? "" : (conversation.auditionOutcome || "")}
+                  onChange={(e) => {
+                    const nextOutcome = e.target.value;
+                    syncAuditionSlotCacheOnUpdate(conversation.id, { clearStatusOverride: true });
+                    void patchConversation(conversation.id, { auditionOutcome: nextOutcome });
+                  }}
                   className="text-[11px] font-bold rounded px-1.5 py-0.5 outline-none cursor-pointer border transition-colors flex-1 min-w-0"
                   style={{
                     borderColor: "var(--border-input)",
@@ -453,18 +468,30 @@ export function ConversationDetailsSidebar({
                 <Calendar className="w-3 h-3" /> Calendar →
               </Link>
             </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              {(conversation.auditionDate || conversation.followUpDate) && (
-                <span className="text-[11px] font-medium" style={{ color: "var(--text-secondary)" }}>
-                  {conversation.auditionDate || conversation.followUpDate}
-                </span>
-              )}
-              {conversation.branch && (
-                <span className="text-[10px] font-medium" style={{ color: "var(--text-muted)" }}>
-                  · {conversation.branch}
-                </span>
-              )}
-            </div>
+            {(() => {
+              const storedDate = conversation.auditionDate || conversation.followUpDate;
+              const storedTime = extractExplicitAuditionTime(conversation);
+              return (
+                <div className="flex items-center gap-2 flex-wrap">
+                  {storedDate && (
+                    <span className="text-[11px] font-medium" style={{ color: "var(--text-secondary)" }}>
+                      {storedDate}
+                      {storedTime ? ` · ${storedTime}` : ""}
+                    </span>
+                  )}
+                  {!storedDate && storedTime && (
+                    <span className="text-[11px] font-medium" style={{ color: "var(--text-secondary)" }}>
+                      {storedTime}
+                    </span>
+                  )}
+                  {conversation.branch && (
+                    <span className="text-[10px] font-medium" style={{ color: "var(--text-muted)" }}>
+                      · {conversation.branch}
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
             {!isReadOnly && onOpenBookingModal && (
               <button
                 type="button"

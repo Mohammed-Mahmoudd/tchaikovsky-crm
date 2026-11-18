@@ -701,11 +701,11 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
       'cash_recorded',
       convActor,
       undefined,
-      cashInNum > 0 ? `Recorded payment: ${cashInNum.toLocaleString()} EGP` : 'Enrolled student',
+      cashInNum > 0 ? `Recorded payment: ${cashInNum.toLocaleString()} SAR` : 'Enrolled student',
       c.branch ? `Branch: ${c.branch}` : 'Enrolled',
       convTs,
       'Attended',
-      cashInNum > 0 ? `${cashInNum.toLocaleString()} EGP` : 'Enrolled'
+      cashInNum > 0 ? `${cashInNum.toLocaleString()} SAR` : 'Enrolled'
     );
   }
 
@@ -3442,12 +3442,12 @@ function TeamActivitiesPageInner() {
                           </div>
                           <div className="text-[26px] font-bold mt-1.5 tracking-tight flex items-baseline gap-1" style={{ color: 'var(--text-primary)' }}>
                             <span>{cash.toLocaleString()}</span>
-                            <span className="text-[12px] font-semibold" style={{ color: 'var(--text-secondary)' }}>EGP</span>
+                            <span className="text-[12px] font-semibold" style={{ color: 'var(--text-secondary)' }}>SAR</span>
                           </div>
                         </div>
                         <div className="flex items-center justify-between gap-2 mt-1.5">
                           <p className="text-[11px] truncate" style={{ color: 'var(--text-secondary)' }}>
-                            {enrolled > 0 ? `${avgPerStudent.toLocaleString()} EGP / student` : 'Direct collections'}
+                            {enrolled > 0 ? `${avgPerStudent.toLocaleString()} SAR / student` : 'Direct collections'}
                           </p>
                           <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-amber-500 shrink-0">
                             Audit
@@ -3908,7 +3908,7 @@ function TeamActivitiesPageInner() {
                                 <div className="flex items-center justify-between text-[11px] pt-0.5" style={{ color: 'var(--text-secondary)' }}>
                                   <span>{stLeads} leads · {stBooked} booked · {stEnrolled} enrolled</span>
                                   <span className="font-semibold tabular-nums" style={{ color: 'var(--text-primary)' }}>
-                                    {stCash.toLocaleString()} EGP
+                                    {stCash.toLocaleString()} SAR
                                   </span>
                                 </div>
                               </div>
@@ -3933,7 +3933,7 @@ function TeamActivitiesPageInner() {
                                 <th className="py-2.5 px-3 text-right">Booked</th>
                                 <th className="py-2.5 px-3 text-right">Attended / Show %</th>
                                 <th className="py-2.5 px-3 text-right">Enrolled / Win %</th>
-                                <th className="py-2.5 px-4 text-right">Revenue (EGP)</th>
+                                <th className="py-2.5 px-4 text-right">Revenue (SAR)</th>
                               </tr>
                             </thead>
                             <tbody

@@ -756,7 +756,7 @@ export function FunnelAuditModal({
     {
       id: "cash",
       label: "Revenue",
-      value: `${report.cohortCashTotal.toLocaleString("en-US")} EGP`,
+      value: `${report.cohortCashTotal.toLocaleString("en-US")} SAR`,
       icon: <Banknote className="w-3.5 h-3.5" />,
     },
   ];
@@ -814,7 +814,7 @@ export function FunnelAuditModal({
           "Why Excluded",
           "Created Date",
           "Milestone Date",
-          "Cash (EGP)",
+          "Cash (SAR)",
         ],
         filteredExcludedRows.map((row, idx) => [
           idx + 1,
@@ -852,7 +852,7 @@ export function FunnelAuditModal({
         "Created Date",
         "Created Field",
         "Milestone Date",
-        "Cash (EGP)",
+        "Cash (SAR)",
       ],
       filteredIncludedRows.map((row, idx) => {
         const milestone = getMilestoneTimestamp(row, target.metric);
@@ -895,14 +895,14 @@ export function FunnelAuditModal({
             </span>
             <div className="text-2xl font-bold tracking-tight text-[var(--text-primary)] tabular-nums mt-0.5">
               {target.metric === "cash"
-                ? `${report.totalCash.toLocaleString("en-US")} EGP`
+                ? `${report.totalCash.toLocaleString("en-US")} SAR`
                 : report.totalCount.toLocaleString("en-US")}
             </div>
             <p className="text-xs text-[var(--text-secondary)] mt-0.5">
               {target.metric === "cash"
                 ? `${report.paidCount} paid lead${report.paidCount === 1 ? "" : "s"}${
                     report.unpaidEnrolledCount > 0
-                      ? ` · ${report.unpaidEnrolledCount} enrolled (0 EGP)`
+                      ? ` · ${report.unpaidEnrolledCount} enrolled (0 SAR)`
                       : ""
                   }`
                 : target.metric === "leads"
@@ -1076,7 +1076,7 @@ export function FunnelAuditModal({
 
                   {target.metric === "cash" && bucket.cashTotal > 0 && (
                     <div className="text-xs font-mono text-emerald-500 tabular-nums">
-                      {bucket.cashTotal.toLocaleString("en-US")} EGP
+                      {bucket.cashTotal.toLocaleString("en-US")} SAR
                     </div>
                   )}
 
@@ -1142,7 +1142,7 @@ export function FunnelAuditModal({
                     </span>
                     <span className="font-bold tabular-nums text-[var(--text-primary)] shrink-0">
                       {target.metric === "cash" && ag.cashTotal > 0
-                        ? `${ag.cashTotal.toLocaleString("en-US")} EGP (${ag.count})`
+                        ? `${ag.cashTotal.toLocaleString("en-US")} SAR (${ag.count})`
                         : `${ag.count} (${sharePct}%)`}
                     </span>
                   </div>
@@ -1311,7 +1311,7 @@ export function FunnelAuditModal({
               <div className="min-w-0">
                 <span className="text-sm font-bold text-[var(--text-primary)] tabular-nums">
                   {target.metric === "cash"
-                    ? `${report.totalCash.toLocaleString("en-US")} EGP`
+                    ? `${report.totalCash.toLocaleString("en-US")} SAR`
                     : `${report.totalCount.toLocaleString("en-US")} verified`}
                 </span>
                 <span className="ml-2 text-xs text-[var(--text-secondary)]">
@@ -1449,7 +1449,7 @@ export function FunnelAuditModal({
                             report.totalCount === 1 ? "" : "s"
                           }`}
                       {(target.metric === "cash" || filteredCashSubtotal > 0) &&
-                        ` · ${filteredCashSubtotal.toLocaleString("en-US")} EGP`}
+                        ` · ${filteredCashSubtotal.toLocaleString("en-US")} SAR`}
                     </>
                   ) : (
                     `${filteredExcludedRows.length} excluded record${
@@ -1791,7 +1791,7 @@ export function FunnelAuditModal({
 
                             {row.cashIn > 0 && (
                               <span className="text-sm font-bold tabular-nums text-emerald-500">
-                                {row.cashIn.toLocaleString("en-US")} EGP
+                                {row.cashIn.toLocaleString("en-US")} SAR
                               </span>
                             )}
                           </div>
@@ -1998,7 +1998,7 @@ export function FunnelAuditModal({
                             <td className="py-3 px-3 text-right align-top whitespace-nowrap tabular-nums border-b border-[var(--border-main)]">
                               {row.cashIn > 0 && (
                                 <div className="font-bold text-emerald-500">
-                                  {row.cashIn.toLocaleString("en-US")} EGP
+                                  {row.cashIn.toLocaleString("en-US")} SAR
                                 </div>
                               )}
                               {milestone.ts && milestone.label !== "Created" ? (
@@ -2123,7 +2123,7 @@ export function FunnelAuditModal({
                           </span>
                           {ex.cashIn > 0 && (
                             <span className="font-bold text-emerald-500 tabular-nums">
-                              {ex.cashIn.toLocaleString("en-US")} EGP
+                              {ex.cashIn.toLocaleString("en-US")} SAR
                             </span>
                           )}
                         </div>
@@ -2258,7 +2258,7 @@ export function FunnelAuditModal({
                           <td className="py-3 px-3 text-right align-top whitespace-nowrap tabular-nums border-b border-[var(--border-main)]">
                             {ex.cashIn > 0 && (
                               <div className="font-bold text-emerald-500">
-                                {ex.cashIn.toLocaleString("en-US")} EGP
+                                {ex.cashIn.toLocaleString("en-US")} SAR
                               </div>
                             )}
                             {ex.createdTs > 0 && (

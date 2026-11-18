@@ -462,8 +462,8 @@ export function formatAuditOutcome(outcome?: string): string {
   return AUDIT_OUTCOME_LABELS[clean.toLowerCase()] || clean;
 }
 
-function formatEgp(amount: number): string {
-  return `${amount.toLocaleString("en-US")} EGP`;
+function formatSar(amount: number): string {
+  return `${amount.toLocaleString("en-US")} SAR`;
 }
 
 function getAuditDisplayName(c: AuditConversationInput): string {
@@ -502,7 +502,7 @@ function resolveStageFlagReason(
       description: "Converted to enrolled student or recorded tuition cash.",
       detail:
         flags.cashIn > 0
-          ? `Stage: ${pipeline} · ${formatEgp(flags.cashIn)}`
+          ? `Stage: ${pipeline} · ${formatSar(flags.cashIn)}`
           : `Stage: ${pipeline} · Enrolled`,
     };
   }
@@ -556,7 +556,7 @@ function classifyMetricReason(
     case "booked": {
       if (!flags.booked) return null;
       if (flags.enrolled) {
-        const cashSuffix = flags.cashIn > 0 ? ` (${formatEgp(flags.cashIn)})` : "";
+        const cashSuffix = flags.cashIn > 0 ? ` (${formatSar(flags.cashIn)})` : "";
         let detail: string;
         if (hasExplicitAuditionBookingRecord(c)) {
           detail = `Enrolled${cashSuffix}${auditionDate ? ` · Audition ${auditionDate}` : ""} · counted cumulatively in Booked`;
@@ -567,7 +567,7 @@ function classifyMetricReason(
         ) {
           detail = `Enrolled${cashSuffix} without an audition date · counted cumulatively in Booked`;
         } else {
-          detail = `Direct payment (${formatEgp(flags.cashIn)}) in ${pipeline} · rolled up cumulatively to Booked`;
+          detail = `Direct payment (${formatSar(flags.cashIn)}) in ${pipeline} · rolled up cumulatively to Booked`;
         }
         return {
           key: "progressed_enrolled",
@@ -612,7 +612,7 @@ function classifyMetricReason(
           key: "progressed_enrolled",
           label: "Progressed to Enrolled / Paid",
           description: "Attended and progressed to Enrolled / Paid (counted cumulatively).",
-          detail: `Enrolled${flags.cashIn > 0 ? ` (${formatEgp(flags.cashIn)})` : ""} · counted cumulatively in Attended`,
+          detail: `Enrolled${flags.cashIn > 0 ? ` (${formatSar(flags.cashIn)})` : ""} · counted cumulatively in Attended`,
         };
       }
       if (flags.enrolled && !flags.directAttended) {
@@ -622,7 +622,7 @@ function classifyMetricReason(
           description: "Enrolled or paid directly without an Attended stage or attended audition outcome.",
           detail:
             flags.cashIn > 0
-              ? `Rolled up from tuition payment (${formatEgp(flags.cashIn)}) while stage is ${pipeline}`
+              ? `Rolled up from tuition payment (${formatSar(flags.cashIn)}) while stage is ${pipeline}`
               : `Rolled up from ${outcomeLabel || pipeline} without an Attended stage`,
         };
       }
@@ -651,8 +651,8 @@ function classifyMetricReason(
           description: "Pipeline stage is Enrolled or Registered.",
           detail:
             flags.cashIn > 0
-              ? `Pipeline is ${pipeline} · ${formatEgp(flags.cashIn)} recorded`
-              : `Pipeline is ${pipeline} · 0 EGP recorded`,
+              ? `Pipeline is ${pipeline} · ${formatSar(flags.cashIn)} recorded`
+              : `Pipeline is ${pipeline} · 0 SAR recorded`,
         };
       }
       if (outcomeLower === "registered") {
@@ -660,14 +660,14 @@ function classifyMetricReason(
           key: "outcome_registered",
           label: "Outcome: Registered",
           description: "Audition outcome is Registered while pipeline is another stage.",
-          detail: `Outcome is Registered (stage: ${pipeline})${flags.cashIn > 0 ? ` · ${formatEgp(flags.cashIn)}` : ""}`,
+          detail: `Outcome is Registered (stage: ${pipeline})${flags.cashIn > 0 ? ` · ${formatSar(flags.cashIn)}` : ""}`,
         };
       }
       return {
         key: "cash_recorded",
         label: "Tuition Cash Recorded",
         description: "Positive tuition payment (cashIn > 0) recorded without Enrolled stage.",
-        detail: `Cash recorded (${formatEgp(flags.cashIn)}) while stage is ${pipeline}`,
+        detail: `Cash recorded (${formatSar(flags.cashIn)}) while stage is ${pipeline}`,
       };
     }
 
@@ -684,14 +684,14 @@ function classifyMetricReason(
           key: "paid_enrolled",
           label: "Paid Tuition",
           description: "Enrolled/converted leads with positive cash recorded.",
-          detail: `${formatEgp(flags.cashIn)} recorded · ${origin}`,
+          detail: `${formatSar(flags.cashIn)} recorded · ${origin}`,
         };
       }
       return {
         key: "unpaid_enrolled",
-        label: "Enrolled (0 EGP)",
-        description: "Enrolled leads in this cohort with 0 EGP recorded.",
-        detail: `Counted as enrolled (${pipeline}) with 0 EGP recorded`,
+        label: "Enrolled (0 SAR)",
+        description: "Enrolled leads in this cohort with 0 SAR recorded.",
+        detail: `Counted as enrolled (${pipeline}) with 0 SAR recorded`,
       };
     }
 
@@ -1018,7 +1018,7 @@ function buildAuditCopy(
     case "enrolled":
       return {
         title: `Enrolled Audit — ${counts.totalCount.toLocaleString("en-US")}`,
-        ruleSummary: `${counts.totalCount} lead${counts.totalCount === 1 ? "" : "s"} enrolled or with recorded tuition cash (> 0 EGP) inside ${periodLabel}${scopeActorClause}.`,
+        ruleSummary: `${counts.totalCount} lead${counts.totalCount === 1 ? "" : "s"} enrolled or with recorded tuition cash (> 0 SAR) inside ${periodLabel}${scopeActorClause}.`,
         formulaText: `${counts.cohortEnrolledCount} enrolled / ${counts.cohortAttendedCount} attended = ${closeRateStr}% close rate (${winRateStr}% of ${counts.cohortLeadsCount} leads)`,
       };
     case "cash": {
@@ -1027,9 +1027,9 @@ function buildAuditCopy(
           ? Math.round(counts.cohortCashTotal / counts.cohortEnrolledCount)
           : 0;
       return {
-        title: `Revenue Audit — ${formatEgp(counts.cohortCashTotal)}`,
+        title: `Revenue Audit — ${formatSar(counts.cohortCashTotal)}`,
         ruleSummary: `Sum of cashIn across the ${counts.cohortEnrolledCount} enrolled/converted leads inside ${periodLabel}${scopeActorClause}.`,
-        formulaText: `${formatEgp(counts.cohortCashTotal)} from ${counts.paidCount} paid record${counts.paidCount === 1 ? "" : "s"}${counts.unpaidEnrolledCount > 0 ? ` + ${counts.unpaidEnrolledCount} enrolled with 0 EGP` : ""} · avg ${formatEgp(avgPerStudent)} / enrolled`,
+        formulaText: `${formatSar(counts.cohortCashTotal)} from ${counts.paidCount} paid record${counts.paidCount === 1 ? "" : "s"}${counts.unpaidEnrolledCount > 0 ? ` + ${counts.unpaidEnrolledCount} enrolled with 0 SAR` : ""} · avg ${formatSar(avgPerStudent)} / enrolled`,
       };
     }
     case "stage": {

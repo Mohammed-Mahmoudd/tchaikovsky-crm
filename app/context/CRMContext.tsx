@@ -634,6 +634,33 @@ function isReviewerAllowedConversation(c: any): boolean {
   return REVIEWER_ALLOWED_NAMES.some((target) => fields.some((f) => f.includes(target)));
 }
 
+type PendingPatchEntry = {
+  updates: Partial<Record<string, any>>;
+  expiresAt: number;
+  patchedAt?: number;
+  confirmedUpdatedAt?: number;
+};
+
+/** Determines whether an optimistic patch guard should still overlay incoming server metadata. */
+function resolvePendingPatchState(
+  pending: PendingPatchEntry | undefined,
+  remoteUpdatedAt: unknown,
+  now = Date.now()
+): { keepOptimistic: boolean; shouldEvict: boolean } {
+  if (!pending) return { keepOptimistic: false, shouldEvict: false };
+  if (now > pending.expiresAt) return { keepOptimistic: false, shouldEvict: true };
+  if (!pending.confirmedUpdatedAt) return { keepOptimistic: true, shouldEvict: false };
+
+  const remoteTs = remoteUpdatedAt ? Date.parse(String(remoteUpdatedAt)) : 0;
+  if (!Number.isFinite(remoteTs) || remoteTs <= 0) {
+    return { keepOptimistic: true, shouldEvict: false };
+  }
+  if (remoteTs >= pending.confirmedUpdatedAt) {
+    return { keepOptimistic: false, shouldEvict: true };
+  }
+  return { keepOptimistic: true, shouldEvict: false };
+}
+
 export function CRMProvider({ children }: { children: React.ReactNode }) {
   const { isReadOnly, canManageTeam, token, user, authFetch, closeSession, verifySession } = useAuth();
   const isMetaReviewer = Boolean(
@@ -836,12 +863,13 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const idbMap = new Map<string, Conversation>(
           idbConvs.map((c) => [c.id, hydrateCachedConversationNames(c)])
         );
-        return prev.map((current) => {
+        const existingIds = new Set<string>();
+        const mergedExisting = prev.map((current) => {
+          existingIds.add(current.id);
           const idbC = idbMap.get(current.id);
           if (!idbC) return current;
           return {
-            ...idbC,
-            ...current, // Preserve newer in-memory/localStorage fields (agent, pipeline, notes, status, etc.)
+            ...current, // Preserve newer in-memory/localStorage fields without resurrecting cleared fields from IDB
             activityLog:
               Array.isArray(idbC.activityLog) && idbC.activityLog.length > (current.activityLog?.length || 0)
                 ? idbC.activityLog
@@ -849,6 +877,17 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             messages: messagesCacheRef.current.get(current.id) || current.messages || [],
           };
         });
+        const overflowFromIdb = idbConvs
+          .filter((c) => !existingIds.has(c.id))
+          .map((c) =>
+            hydrateCachedConversationNames({
+              ...c,
+              messages: messagesCacheRef.current.get(c.id) || c.messages || [],
+            })
+          );
+        return overflowFromIdb.length > 0
+          ? [...mergedExisting, ...overflowFromIdb]
+          : mergedExisting;
       });
       setLoading(false);
     });
@@ -1214,8 +1253,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const topCash = Number(c.cashIn) || 0;
         if (topCash > 0) return topCash;
         if (typeof c.source === "object" && c.source?.cashIn !== undefined && c.source?.cashIn !== null) {
-          const srcCash = Number(c.source.cashIn) || 0;
-          if (srcCash > 0) return srcCash;
+          return Number(c.source.cashIn) || 0;
         }
         if (typeof window !== "undefined") {
           const local = localStorage.getItem(`crm_cash_${c.senderId || c._id}`);
@@ -1278,7 +1316,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // Track pending optimistic updates so periodic background polling does not overwrite recently moved/updated leads
-  const pendingPatchesRef = useRef<Map<string, { updates: Partial<Record<string, any>>; expiresAt: number; patchedAt?: number }>>(new Map());
+  const pendingPatchesRef = useRef<Map<string, PendingPatchEntry>>(new Map());
 
   // Track recently created/opened manual leads so in-flight background polls can NEVER wipe them out before server sync settles
   const recentlyCreatedRef = useRef<Map<string, { conv: Conversation; expiresAt: number }>>(new Map());
@@ -1333,19 +1371,18 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               }
             }
             const pending = pendingPatchesRef.current.get(meta.id);
-            if (pending) {
-              if (now > pending.expiresAt) {
-                pendingPatchesRef.current.delete(meta.id);
-              } else {
-                // Maintain optimistic updates so stale in-flight server poll data never reverts card position
-                const mergedMeta = {
-                  ...meta,
-                  ...pending.updates,
-                  lastMessageAt: Math.max(meta.lastMessageAt || 0, pending.updates.lastMessageAt || 0),
-                  messages: cachedMessages,
-                } as Conversation;
-                return mergedMeta;
-              }
+            const { keepOptimistic, shouldEvict } = resolvePendingPatchState(pending, meta.updatedAt, now);
+            if (shouldEvict) {
+              pendingPatchesRef.current.delete(meta.id);
+            } else if (keepOptimistic && pending) {
+              // Maintain optimistic updates so stale in-flight server poll data never reverts card position
+              const mergedMeta = {
+                ...meta,
+                ...pending.updates,
+                lastMessageAt: Math.max(meta.lastMessageAt || 0, pending.updates.lastMessageAt || 0),
+                messages: cachedMessages,
+              } as Conversation;
+              return mergedMeta;
             }
 
             // Always preserve valid cached messages — slim poll NEVER wipes them
@@ -1570,104 +1607,184 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const lastMsgTs =
           newMessages.length > 0 ? newMessages[newMessages.length - 1]?.timestamp || 0 : 0;
         const pending = pendingPatchesRef.current.get(chatId);
-        const hasActivePending = Boolean(pending && Date.now() <= pending.expiresAt);
+        const normActive = normalizeConversationMeta(json.data);
+        const { keepOptimistic: hasActivePending, shouldEvict } = resolvePendingPatchState(
+          pending,
+          normActive.updatedAt
+        );
+        if (shouldEvict) {
+          pendingPatchesRef.current.delete(chatId);
+        }
         const keepPendingDirection = Boolean(
           hasActivePending &&
             pending?.updates.lastMessageDirection &&
             (pending?.updates.lastMessageAt || 0) >= lastMsgTs
         );
-        const normActive = normalizeConversationMeta(json.data);
 
         // Merge into conversations state (touch active conversation's messages and metadata)
-        setConversations((prev) =>
-          prev.map((c) =>
-            c.id === chatId
-              ? {
-                  ...c,
-                  name: (hasActivePending && pending?.updates.name) || normActive.name || c.name,
-                  profileName:
-                    hasActivePending && pending?.updates.profileName !== undefined
-                      ? pending.updates.profileName
-                      : normActive.profileName ?? c.profileName,
-                  leadName:
-                    hasActivePending && pending?.updates.leadName !== undefined
-                      ? pending.updates.leadName
-                      : normActive.leadName ?? c.leadName,
-                  source:
-                    (hasActivePending && pending?.updates.source) ||
-                    normActive.source ||
-                    c.source,
-                  messages: newMessages,
-                  unreadCount: computedUnread,
-                  lastMessageAt: Math.max(c.lastMessageAt || 0, normActive.lastMessageAt || 0),
-                  lastMessageDirection: keepPendingDirection
-                    ? pending?.updates.lastMessageDirection
-                    : computedDirection ?? normActive.lastMessageDirection ?? c.lastMessageDirection,
-                  lastOutgoingAt:
-                    hasActivePending && pending?.updates.lastOutgoingAt
-                      ? Math.max(
-                          pending.updates.lastOutgoingAt,
-                          normActive.lastOutgoingAt || 0,
-                          c.lastOutgoingAt || 0
-                        )
-                      : normActive.lastOutgoingAt ?? c.lastOutgoingAt,
-                  pipeline: (hasActivePending && pending?.updates.pipeline) || normActive.pipeline || c.pipeline,
-                  auditionOutcome:
-                    hasActivePending && pending?.updates.auditionOutcome !== undefined
-                      ? pending.updates.auditionOutcome
-                      : normActive.auditionOutcome ?? c.auditionOutcome,
-                  followUpDate:
-                    hasActivePending && pending?.updates.followUpDate !== undefined
-                      ? pending.updates.followUpDate
-                      : normActive.followUpDate ?? c.followUpDate,
-                  followUpNote:
-                    hasActivePending && pending?.updates.followUpNote !== undefined
-                      ? pending.updates.followUpNote
-                      : normActive.followUpNote ?? c.followUpNote,
-                  followUpCompleted:
-                    hasActivePending && pending?.updates.followUpCompleted !== undefined
-                      ? pending.updates.followUpCompleted
-                      : normActive.followUpCompleted ?? c.followUpCompleted,
-                  agent: (hasActivePending && pending?.updates.agent) || normActive.agent || c.agent,
-                  status: (hasActivePending && pending?.updates.status) || normActive.status || c.status,
-                  isArchived:
-                    hasActivePending && pending?.updates.isArchived !== undefined
-                      ? Boolean(pending.updates.isArchived)
-                      : normActive.isArchived,
-                  archivedAt:
-                    hasActivePending && "archivedAt" in (pending?.updates || {})
-                      ? (pending?.updates.archivedAt as string | undefined)
-                      : normActive.archivedAt,
-                  archivedBy:
-                    hasActivePending && pending?.updates.archivedBy !== undefined
-                      ? (pending.updates.archivedBy as string | undefined)
-                      : normActive.archivedBy,
-                  isDone:
-                    hasActivePending && pending?.updates.isDone !== undefined
-                      ? Boolean(pending.updates.isDone)
-                      : normActive.isDone,
-                  doneAt:
-                    hasActivePending && "doneAt" in (pending?.updates || {})
-                      ? (pending?.updates.doneAt as string | undefined)
-                      : normActive.doneAt,
-                  doneBy:
-                    hasActivePending && pending?.updates.doneBy !== undefined
-                      ? (pending.updates.doneBy as string | undefined)
-                      : normActive.doneBy,
-                  labels:
-                    hasActivePending && pending?.updates.labels !== undefined
-                      ? normalizeConversationLabelIds(pending.updates.labels)
-                      : normActive.labels ?? c.labels,
-                  claudeEnabled: normActive.claudeEnabled,
-                  claudePaused: normActive.claudePaused,
-                  claudePausedReason: normActive.claudePausedReason,
-                  claudePausedAt: normActive.claudePausedAt,
-                  claudeLastRepliedAt: normActive.claudeLastRepliedAt,
-                  claudeLastError: normActive.claudeLastError,
-                }
-              : c
-          )
-        );
+        setConversations((prev) => {
+          let metaChanged = false;
+          const next = prev.map((c) => {
+            if (c.id !== chatId) return c;
+            const mergedConv: Conversation = {
+              ...c,
+              name: (hasActivePending && pending?.updates.name) || normActive.name || c.name,
+              profileName:
+                hasActivePending && pending?.updates.profileName !== undefined
+                  ? pending.updates.profileName
+                  : normActive.profileName ?? c.profileName,
+              leadName:
+                hasActivePending && pending?.updates.leadName !== undefined
+                  ? pending.updates.leadName
+                  : normActive.leadName ?? c.leadName,
+              source:
+                (hasActivePending && pending?.updates.source) ||
+                normActive.source ||
+                c.source,
+              messages: newMessages,
+              unreadCount: computedUnread,
+              lastMessageAt: Math.max(c.lastMessageAt || 0, normActive.lastMessageAt || 0),
+              lastMessageDirection: keepPendingDirection
+                ? pending?.updates.lastMessageDirection
+                : computedDirection ?? normActive.lastMessageDirection ?? c.lastMessageDirection,
+              lastOutgoingAt:
+                hasActivePending && pending?.updates.lastOutgoingAt
+                  ? Math.max(
+                      pending.updates.lastOutgoingAt,
+                      normActive.lastOutgoingAt || 0,
+                      c.lastOutgoingAt || 0
+                    )
+                  : normActive.lastOutgoingAt ?? c.lastOutgoingAt,
+              pipeline: (hasActivePending && pending?.updates.pipeline) || normActive.pipeline || c.pipeline,
+              auditionDate:
+                hasActivePending && pending?.updates.auditionDate !== undefined
+                  ? pending.updates.auditionDate
+                  : normActive.auditionDate ?? c.auditionDate,
+              auditionOutcome:
+                hasActivePending && pending?.updates.auditionOutcome !== undefined
+                  ? pending.updates.auditionOutcome
+                  : normActive.auditionOutcome ?? c.auditionOutcome,
+              auditionBookedAt:
+                hasActivePending && pending?.updates.auditionBookedAt !== undefined
+                  ? pending.updates.auditionBookedAt
+                  : normActive.auditionBookedAt ?? c.auditionBookedAt,
+              attendedAt:
+                hasActivePending && pending?.updates.attendedAt !== undefined
+                  ? pending.updates.attendedAt
+                  : normActive.attendedAt ?? c.attendedAt,
+              enrolledAt:
+                hasActivePending && pending?.updates.enrolledAt !== undefined
+                  ? pending.updates.enrolledAt
+                  : normActive.enrolledAt ?? c.enrolledAt,
+              paidAt:
+                hasActivePending && pending?.updates.paidAt !== undefined
+                  ? pending.updates.paidAt
+                  : normActive.paidAt ?? c.paidAt,
+              bookedBy:
+                hasActivePending && pending?.updates.bookedBy !== undefined
+                  ? pending.updates.bookedBy
+                  : normActive.bookedBy ?? c.bookedBy,
+              attendedBy:
+                hasActivePending && pending?.updates.attendedBy !== undefined
+                  ? pending.updates.attendedBy
+                  : normActive.attendedBy ?? c.attendedBy,
+              enrolledBy:
+                hasActivePending && pending?.updates.enrolledBy !== undefined
+                  ? pending.updates.enrolledBy
+                  : normActive.enrolledBy ?? c.enrolledBy,
+              branch:
+                hasActivePending && pending?.updates.branch !== undefined
+                  ? pending.updates.branch
+                  : normActive.branch ?? c.branch,
+              notes:
+                hasActivePending && pending?.updates.notes !== undefined
+                  ? pending.updates.notes
+                  : normActive.notes ?? c.notes,
+              followUpDate:
+                hasActivePending && pending?.updates.followUpDate !== undefined
+                  ? pending.updates.followUpDate
+                  : normActive.followUpDate ?? c.followUpDate,
+              followUpNote:
+                hasActivePending && pending?.updates.followUpNote !== undefined
+                  ? pending.updates.followUpNote
+                  : normActive.followUpNote ?? c.followUpNote,
+              followUpCompleted:
+                hasActivePending && pending?.updates.followUpCompleted !== undefined
+                  ? pending.updates.followUpCompleted
+                  : normActive.followUpCompleted ?? c.followUpCompleted,
+              followUpTags:
+                hasActivePending && pending?.updates.followUpTags !== undefined
+                  ? pending.updates.followUpTags
+                  : normActive.followUpTags ?? c.followUpTags,
+              formAnswers:
+                hasActivePending && pending?.updates.formAnswers !== undefined
+                  ? pending.updates.formAnswers
+                  : normActive.formAnswers ?? c.formAnswers,
+              cashIn:
+                hasActivePending && pending?.updates.cashIn !== undefined
+                  ? Number(pending.updates.cashIn) || 0
+                  : normActive.cashIn ?? c.cashIn,
+              activityLog:
+                Array.isArray(normActive.activityLog) &&
+                normActive.activityLog.length >= (c.activityLog?.length || 0)
+                  ? normActive.activityLog
+                  : c.activityLog,
+              agent: (hasActivePending && pending?.updates.agent) || normActive.agent || c.agent,
+              status: (hasActivePending && pending?.updates.status) || normActive.status || c.status,
+              isArchived:
+                hasActivePending && pending?.updates.isArchived !== undefined
+                  ? Boolean(pending.updates.isArchived)
+                  : normActive.isArchived,
+              archivedAt:
+                hasActivePending && "archivedAt" in (pending?.updates || {})
+                  ? (pending?.updates.archivedAt as string | undefined)
+                  : normActive.archivedAt,
+              archivedBy:
+                hasActivePending && pending?.updates.archivedBy !== undefined
+                  ? (pending.updates.archivedBy as string | undefined)
+                  : normActive.archivedBy,
+              isDone:
+                hasActivePending && pending?.updates.isDone !== undefined
+                  ? Boolean(pending.updates.isDone)
+                  : normActive.isDone,
+              doneAt:
+                hasActivePending && "doneAt" in (pending?.updates || {})
+                  ? (pending?.updates.doneAt as string | undefined)
+                  : normActive.doneAt,
+              doneBy:
+                hasActivePending && pending?.updates.doneBy !== undefined
+                  ? (pending.updates.doneBy as string | undefined)
+                  : normActive.doneBy,
+              labels:
+                hasActivePending && pending?.updates.labels !== undefined
+                  ? normalizeConversationLabelIds(pending.updates.labels)
+                  : normActive.labels ?? c.labels,
+              claudeEnabled: normActive.claudeEnabled,
+              claudePaused: normActive.claudePaused,
+              claudePausedReason: normActive.claudePausedReason,
+              claudePausedAt: normActive.claudePausedAt,
+              claudeLastRepliedAt: normActive.claudeLastRepliedAt,
+              claudeLastError: normActive.claudeLastError,
+            };
+            if (
+              mergedConv.pipeline !== c.pipeline ||
+              mergedConv.auditionDate !== c.auditionDate ||
+              mergedConv.auditionOutcome !== c.auditionOutcome ||
+              mergedConv.followUpDate !== c.followUpDate ||
+              mergedConv.followUpNote !== c.followUpNote ||
+              mergedConv.branch !== c.branch ||
+              mergedConv.notes !== c.notes ||
+              mergedConv.cashIn !== c.cashIn
+            ) {
+              metaChanged = true;
+            }
+            return mergedConv;
+          });
+          if (metaChanged && !isMetaReviewer) {
+            persistConversationsCache(next);
+          }
+          return next;
+        });
 
         if (!isReadOnly && (json.data?.unreadCount || 0) !== computedUnread) {
           authFetch(`${API}/messages/${chatId}`, {
@@ -2071,15 +2188,26 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 const exists = prev.some((c) => c.id === conversationId);
                 if (!exists) {
                   const nextList = [{ ...normalizeConversationMeta(remoteConv), messages: [] }, ...prev];
-                  persistConversationsCache(nextList);
+                  persistConversationsCache(nextList, true);
                   return nextList;
                 }
                 const pending = pendingPatchesRef.current.get(conversationId);
-                const hasPending = Boolean(pending && Date.now() <= pending.expiresAt);
+                const { keepOptimistic: hasPending, shouldEvict } = resolvePendingPatchState(
+                  pending,
+                  remoteConv.updatedAt
+                );
+                if (shouldEvict) {
+                  pendingPatchesRef.current.delete(conversationId);
+                }
                 const nextList = prev.map((c) => {
                   if (c.id !== conversationId) return c;
                   const norm = normalizeConversationMeta(remoteConv);
                   const cachedMsgs = messagesCacheRef.current.get(conversationId) || c.messages || [];
+                  if (typeof window !== "undefined" && !hasPending && remoteConv.cashIn !== undefined) {
+                    try {
+                      localStorage.setItem(`crm_cash_${conversationId}`, String(Number(norm.cashIn) || 0));
+                    } catch {}
+                  }
                   return {
                     ...c,
                     ...norm,
@@ -2093,7 +2221,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     messages: cachedMsgs,
                   };
                 });
-                persistConversationsCache(nextList);
+                persistConversationsCache(nextList, true);
                 return nextList;
               });
             } else if (payload.type === "marked_read" && payload.data) {
@@ -2947,8 +3075,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 type: "cash_recorded",
                 actor: actorName,
                 actorRole,
-                summary: `Recorded payment: ${nextCash.toLocaleString()} EGP`,
-                detail: prevCash > 0 ? `Updated from ${prevCash.toLocaleString()} EGP` : "Payment logged",
+                summary: `Recorded payment: ${nextCash.toLocaleString()} SAR`,
+                detail: prevCash > 0 ? `Updated from ${prevCash.toLocaleString()} SAR` : "Payment logged",
                 fromValue: String(prevCash),
                 toValue: String(nextCash),
                 timestamp: nowTs,
@@ -3079,7 +3207,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const next = prev.map((c) =>
           c.id === id ? { ...c, ...enrichedUpdates, ...normalizedInboxOptimistic } : c
         );
-        persistConversationsCache(next);
+        persistConversationsCache(next, true);
         return next;
       });
 
@@ -3144,7 +3272,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             }
             return reverted as Conversation;
           });
-          persistConversationsCache(next);
+          persistConversationsCache(next, true);
           return next;
         });
       };
@@ -3191,17 +3319,21 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     } as Conversation) // keep loaded messages & newer message timestamps
                   : c
               );
-              persistConversationsCache(next);
+              persistConversationsCache(next, true);
               return next;
             });
           }
-          // Keep a 15s post-write guard in case an older slim poll is already in-flight
+          // Keep a short post-write guard in case an older slim poll is already in-flight
           const currentPending = pendingPatchesRef.current.get(id);
           if (currentPending) {
+            const confirmedTs = json.data?.updatedAt
+              ? Date.parse(String(json.data.updatedAt))
+              : Date.now();
             pendingPatchesRef.current.set(id, {
               updates: currentPending.updates,
-              expiresAt: Date.now() + 15000,
+              expiresAt: Date.now() + 8000,
               patchedAt: currentPending.patchedAt,
+              confirmedUpdatedAt: Number.isFinite(confirmedTs) ? confirmedTs : Date.now(),
             });
           }
           return { ok: true };

@@ -155,7 +155,7 @@ describe("teamMetrics", () => {
         auditionOutcome: "no-show",
         createdAt: "2026-11-09T15:00:00Z",
       },
-      // 5. Enrolled with 0 EGP recorded (Mariam)
+      // 5. Enrolled with 0 SAR recorded (Mariam)
       {
         id: "c5",
         name: "Enrolled Unpaid",
@@ -274,7 +274,7 @@ describe("teamMetrics", () => {
     assert.equal(attBuckets.enrolled_rollup.count, 1); // c3 direct payment in Contacted
     assert.equal(attBuckets.progressed_enrolled.count, 1); // c5
 
-    // Cash audit reconciles totalCash and highlights 0 EGP enrolled leads
+    // Cash audit reconciles totalCash and highlights 0 SAR enrolled leads
     const cashReport = buildFunnelAuditReport(sampleConversations, {
       target: { metric: "cash" },
       selectedAgent: "__all__",

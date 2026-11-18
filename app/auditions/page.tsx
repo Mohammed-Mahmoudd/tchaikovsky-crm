@@ -14,6 +14,19 @@ import {
   isLiveAuditionConversation,
   omitRecordKeys,
 } from '../utils/auditionRemoval';
+import {
+  AUDITION_CACHE_UPDATED_EVENT,
+  AUDITION_CLOSED_SLOTS_KEY,
+  AUDITION_LOCKED_DATES_KEY,
+  AUDITION_STATUS_OVERRIDES_KEY,
+  isIsoDateString,
+  readAuditionJsonRecord,
+  reconcileAuditionLocalCaches,
+  resolveAuditionTimeForCalendar,
+  resolveCalendarSlotDateKey,
+  resolveCalendarSlotStatus,
+  writeAuditionJsonRecord,
+} from '../utils/auditionSchedule';
 
 type AuditionOutcome = 'registered' | 'schedule-followup' | 'paid-trial' | 'joining-later' | 'no-show';
 type SlotStatus = AuditionOutcome | 'booked' | 'closed';
@@ -244,45 +257,6 @@ function getAgentDisplayLabel(filter: string): string {
   if (filter === 'MINE') return 'My Auditions';
   if (filter === 'UNASSIGNED') return 'Unassigned';
   return filter;
-}
-
-function getConvDate(c: any, todayIso: string): string {
-  // 1. Explicit dedicated audition date (set when audition is booked)
-  if (c.auditionDate && /^\d{4}-\d{2}-\d{2}$/.test(c.auditionDate)) {
-    return c.auditionDate;
-  }
-  // 2. Follow-up date set during audition booking
-  if (c.followUpDate && /^\d{4}-\d{2}-\d{2}$/.test(c.followUpDate)) {
-    return c.followUpDate;
-  }
-  // 3. Fallback to creation date (when the lead entered) - NEVER updatedAt,
-  // because updatedAt changes whenever status (e.g. no-show, attended) or notes are edited!
-  if (c.createdAt) {
-    try {
-      const d = isoDate(new Date(c.createdAt));
-      if (d && d !== 'NaN-NaN-NaN') return d;
-    } catch { }
-  }
-  return todayIso;
-}
-
-function getConvTime(c: any): string {
-  const text = `${c.followUpNote || ''} ${c.notes || ''}`;
-  const match = text.match(/\b(0?[1-9]|1[0-2]):[0-5][0-9]\s*(?:AM|PM|am|pm)\b/i);
-  if (match) return match[0].toUpperCase();
-  const match24 = text.match(/\b([01]?[0-9]|2[0-3]):[0-5][0-9]\b/);
-  if (match24) {
-    const [h, m] = match24[0].split(':').map(Number);
-    const period = h >= 12 ? 'PM' : 'AM';
-    const hour12 = h % 12 || 12;
-    return `${hour12 < 10 ? '0' : ''}${hour12}:${m < 10 ? '0' : ''}${m} ${period}`;
-  }
-  if (c.lastMessageAt) {
-    try {
-      return new Date(c.lastMessageAt).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-    } catch { }
-  }
-  return '05:00 PM';
 }
 
 type BookingModal = { slotId: string | number; dateKey: string; time: string; dayLabel: string } | null;
@@ -1297,45 +1271,83 @@ function AuditionsPageInner() {
 
   const todayIso = isoDate(new Date());
 
-  // Filter CRM conversations for live auditions (never drops overridden cards)
+  const reconciledCaches = useMemo(
+    () =>
+      reconcileAuditionLocalCaches(
+        conversations,
+        { auditionDates, statusOverrides },
+        parseOverride,
+        (c) => isLiveAuditionConversation(c, {}, {})
+      ),
+    [conversations, auditionDates, statusOverrides]
+  );
+
+  // Sync cleaned local slot caches when live conversations supersede stale entries
+  useEffect(() => {
+    if (!reconciledCaches.changed || typeof window === 'undefined') return;
+    writeAuditionJsonRecord(window.localStorage, AUDITION_LOCKED_DATES_KEY, reconciledCaches.auditionDates);
+    writeAuditionJsonRecord(window.localStorage, AUDITION_STATUS_OVERRIDES_KEY, reconciledCaches.statusOverrides);
+  }, [reconciledCaches]);
+
+  // Listen for same-tab and cross-tab cache updates (e.g. Reschedule in Inbox right sidebar)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const syncFromStorage = (targetKey?: string | null) => {
+      if (!targetKey || targetKey === AUDITION_LOCKED_DATES_KEY) {
+        setAuditionDates(readAuditionJsonRecord<string>(window.localStorage, AUDITION_LOCKED_DATES_KEY));
+      }
+      if (!targetKey || targetKey === AUDITION_STATUS_OVERRIDES_KEY) {
+        const rawOverrides = readAuditionJsonRecord<unknown>(window.localStorage, AUDITION_STATUS_OVERRIDES_KEY);
+        const clean: Record<string, SlotStatus> = {};
+        for (const [k, v] of Object.entries(rawOverrides)) {
+          const parsed = parseOverride(v);
+          if (parsed) clean[k] = parsed;
+        }
+        setStatusOverrides(clean);
+      }
+      if (!targetKey || targetKey === AUDITION_CLOSED_SLOTS_KEY) {
+        setClosedSlots(readAuditionJsonRecord<boolean>(window.localStorage, AUDITION_CLOSED_SLOTS_KEY));
+      }
+    };
+    const handleStorage = (e: StorageEvent) => {
+      if (
+        e.key === AUDITION_LOCKED_DATES_KEY ||
+        e.key === AUDITION_STATUS_OVERRIDES_KEY ||
+        e.key === AUDITION_CLOSED_SLOTS_KEY
+      ) {
+        syncFromStorage(e.key);
+      }
+    };
+    const handleCustomSync = () => {
+      syncFromStorage();
+    };
+    window.addEventListener('storage', handleStorage);
+    window.addEventListener(AUDITION_CACHE_UPDATED_EVENT, handleCustomSync);
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+      window.removeEventListener(AUDITION_CACHE_UPDATED_EVENT, handleCustomSync);
+    };
+  }, []);
+
+  // Filter CRM conversations for live auditions using reconciled caches
   const liveAuditionConvs = useMemo(() => {
     return conversations.filter(c =>
-      isLiveAuditionConversation(c, statusOverrides, auditionDates)
+      isLiveAuditionConversation(c, reconciledCaches.statusOverrides, reconciledCaches.auditionDates)
     );
-  }, [conversations, statusOverrides, auditionDates]);
+  }, [conversations, reconciledCaches]);
 
-  // Merge live CRM pipeline cards into calendar schedule with zero mock test data
+  // Merge live CRM pipeline cards into calendar schedule with real stored values taking priority
   const slots = useMemo<DaySlots>(() => {
     const result: DaySlots = {};
 
     liveAuditionConvs.forEach(c => {
-      const localLockedDate = auditionDates[c.id] || auditionDates[`crm-${c.id}`];
-      const lockedDate = localLockedDate || c.auditionDate || (c.followUpDate && /^\d{4}-\d{2}-\d{2}$/.test(c.followUpDate) ? c.followUpDate : null);
-      const dateKey = lockedDate || getConvDate(c, todayIso);
-      const override = statusOverrides[c.id] || statusOverrides[`crm-${c.id}`];
-
-      let slotStatus: AuditionStatus = 'booked';
-
-      if (closedSlots[`crm-${c.id}`] || closedSlots[c.id]) {
-        slotStatus = 'closed';
-      } else if (override) {
-        slotStatus = override;
-      } else if (c.auditionOutcome) {
-        // Use persisted outcome from backend
-        const parsed = parseOverride(c.auditionOutcome);
-        slotStatus = parsed || 'booked';
-      } else {
-        // Legacy pipeline-based mapping
-        if (c.pipeline === 'Enrolled') {
-          slotStatus = 'registered';
-        } else if (c.pipeline === 'Attended') {
-          slotStatus = 'schedule-followup';
-        } else if (c.pipeline === 'Lost' || (c.notes && c.notes.toLowerCase().includes('no-show'))) {
-          slotStatus = 'no-show';
-        } else {
-          slotStatus = 'booked';
-        }
-      }
+      const dateKey = resolveCalendarSlotDateKey(c, reconciledCaches.auditionDates, todayIso);
+      const slotStatus: AuditionStatus = resolveCalendarSlotStatus(
+        c,
+        reconciledCaches.statusOverrides,
+        closedSlots,
+        parseOverride
+      );
 
       const inst = c.formAnswers?.instrument || "";
       const age = c.formAnswers?.studentAge ? `Child ${c.formAnswers.studentAge}` : "Adult";
@@ -1344,7 +1356,7 @@ function AuditionsPageInner() {
       const slot: Slot = {
         id: `crm-${c.id}`,
         conversationId: c.id,
-        time: getConvTime(c),
+        time: resolveAuditionTimeForCalendar(c),
         name: c.name || `Lead ${c.id.slice(-4)}`,
         type,
         status: slotStatus,
@@ -1352,7 +1364,7 @@ function AuditionsPageInner() {
         comment: stripNoResponseTag(c.notes || c.followUpNote || ""),
         phone: c.phone || "",
         branch: c.branch || "",
-        auditionDate: lockedDate || dateKey,
+        auditionDate: isIsoDateString(c.auditionDate) ? c.auditionDate.trim() : dateKey,
         followUpDate: c.followUpDate || "",
         dateKey,
       };
@@ -1373,7 +1385,7 @@ function AuditionsPageInner() {
     });
 
     return result;
-  }, [liveAuditionConvs, customSlots, todayIso, statusOverrides, auditionDates, closedSlots, closedDays]);
+  }, [liveAuditionConvs, customSlots, todayIso, reconciledCaches, closedSlots, closedDays]);
 
   const weekStart = useMemo(() => getWeekStart(currentDate), [currentDate]);
   const weekDays = useMemo(() => {
@@ -1555,11 +1567,11 @@ function AuditionsPageInner() {
     slotId: string | number,
     status: SlotStatus
   ) => {
+    if (isReadOnly) return;
     updateStatusOverride(slotId, status);
 
     const currentSlot = (slots[dateKey] || []).find(s => s.id === slotId);
     if (currentSlot?.conversationId) {
-      if (isReadOnly) return;
       const targetPipeline = getOutcomePipeline(status);
       const cleanComment = stripNoResponseTag(currentSlot.comment);
       // Lock the date so it NEVER changes when updating outcome
@@ -2815,7 +2827,7 @@ function AuditionsPageInner() {
                 This lead is currently marked{' '}
                 <span className="font-semibold">{removeConfirm.currentPipeline || 'Enrolled'}</span>
                 {removeConfirm.cashIn > 0
-                  ? ` with ${removeConfirm.cashIn.toLocaleString()} EGP recorded`
+                  ? ` with ${removeConfirm.cashIn.toLocaleString()} SAR recorded`
                   : ''}
                 . Removing this audition moves the stage back to <span className="font-semibold">Contacted</span> and clears audition booking and attendance metrics (recorded cash-in remains intact).
               </div>

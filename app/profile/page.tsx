@@ -505,7 +505,7 @@ export default function ProfilePage() {
             leadId: c.id,
             timestamp: convTime,
             type: "enrollment",
-            detail: cashVal > 0 ? `${cashVal.toLocaleString()} EGP Collected` : "Registered Student",
+            detail: cashVal > 0 ? `${cashVal.toLocaleString()} SAR Collected` : "Registered Student",
           });
         }
       }
@@ -930,10 +930,10 @@ export default function ProfilePage() {
             />
             <KpiCard
               label="Tuition Recorded"
-              value={`${staffMetrics.totalCash.toLocaleString()} EGP`}
+              value={`${staffMetrics.totalCash.toLocaleString()} SAR`}
               subtext={
                 staffMetrics.enrolledCount > 0
-                  ? `Avg ~${staffMetrics.avgTicket.toLocaleString()} EGP`
+                  ? `Avg ~${staffMetrics.avgTicket.toLocaleString()} SAR`
                   : "Tuition in"
               }
               icon={Banknote}

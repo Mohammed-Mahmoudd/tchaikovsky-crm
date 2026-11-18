@@ -11,8 +11,16 @@ import { useBranches } from "../lib/branches";
 import { BranchSelect } from "../components/BranchSelect";
 import { ConversationChatView } from "../components/ConversationChatView";
 import { ConversationDetailsSidebar } from "../components/ConversationDetailsSidebar";
+import LeadCashInSection from "../components/LeadCashInSection";
 import { Conversation } from "../context/CRMContext";
 import { getTeamReturnBannerInfo, navigateBackToTeamActivities } from "../utils/teamAuditNav";
+import {
+  buildAuditionBookingPatch,
+  buildBookingModalDefaults,
+  extractExplicitAuditionTime,
+  getAuditionTimeSelectOptions,
+  syncAuditionSlotCacheOnUpdate,
+} from "../utils/auditionSchedule";
 
 import {
   DndContext,
@@ -518,6 +526,7 @@ function PipelinePageInner() {
   const [auditionBranch, setAuditionBranch] = useState("");
   const { branchGroups } = useBranches();
   const [isBookingAudition, setIsBookingAudition] = useState(false);
+  const [bookingError, setBookingError] = useState<string | null>(null);
 
   const handleOpenPanel = useCallback((leadId: string, tab: "details" | "chat" = "details") => {
     if (closeTimeoutRef.current) {
@@ -1008,42 +1017,52 @@ function PipelinePageInner() {
 
   const handleOpenBookingModal = useCallback(() => {
     if (!panelLead) return;
-    const defaultDate = panelConv?.followUpDate || new Date().toISOString().split("T")[0];
-    const defaultNote = panelConv?.followUpNote || "";
-    const timeMatch = defaultNote.match(/\b(0?[1-9]|1[0-2]):[0-5][0-9]\s*(?:AM|PM|am|pm)\b/i);
-    setAuditionDate(defaultDate);
-    setAuditionTime(timeMatch ? timeMatch[0].toUpperCase() : "05:00 PM");
-    setAuditionNotes(panelConv?.formAnswers?.instrument || "");
-    setAuditionBranch(panelConv?.branch || "");
+    const defaults = buildBookingModalDefaults(
+      panelConv || {
+        id: panelLead.id,
+      }
+    );
+    setAuditionDate(defaults.date);
+    setAuditionTime(defaults.time);
+    setAuditionNotes(defaults.notes);
+    setAuditionBranch(defaults.branch);
+    setBookingError(null);
     setShowAuditionModal(true);
   }, [panelLead, panelConv]);
 
   const handleConfirmBooking = useCallback(async () => {
     if (!panelLead || isReadOnly || isBookingAudition) return;
     setIsBookingAudition(true);
+    setBookingError(null);
     try {
-      const formattedNote = `${auditionTime}${auditionNotes ? ` · ${auditionNotes}` : ""}`;
-      moveLeadToStage(panelLead.id, "Audition Booked");
-      setFollowUpDate(auditionDate);
-      setFollowUpNote(formattedNote);
-      await patchConversation(panelLead.id, {
-        pipeline: "Audition Booked",
-        auditionDate: auditionDate,
-        followUpDate: auditionDate,
-        followUpNote: formattedNote,
+      const bookingPatch = buildAuditionBookingPatch(panelConv, {
+        date: auditionDate,
+        time: auditionTime,
+        notes: auditionNotes,
         branch: auditionBranch,
       });
+      const res = await patchConversation(panelLead.id, bookingPatch);
+      if (!res.ok) {
+        setBookingError(res.error || "Could not save audition schedule. Please try again.");
+        return;
+      }
+      syncAuditionSlotCacheOnUpdate(panelLead.id, {
+        auditionDate: bookingPatch.auditionDate,
+        clearStatusOverride: true,
+        clearClosedSlot: true,
+      });
+      setFollowUpDate(bookingPatch.followUpDate);
+      setFollowUpNote(bookingPatch.followUpNote);
       setShowAuditionModal(false);
     } catch (err) {
       console.error("Failed to book audition:", err);
+      setBookingError("Could not save audition schedule. Please try again.");
     } finally {
       setIsBookingAudition(false);
     }
-  }, [panelLead, isReadOnly, isBookingAudition, auditionDate, auditionTime, auditionNotes, auditionBranch, moveLeadToStage, patchConversation]);
+  }, [panelLead, panelConv, isReadOnly, isBookingAudition, auditionDate, auditionTime, auditionNotes, auditionBranch, patchConversation]);
 
-  // Cash In & Follow-up states for side panel
-  const [cashVal, setCashVal] = useState<string>("");
-  const [cashSaved, setCashSaved] = useState(false);
+  // Follow-up states for side panel
   const [followUpNote, setFollowUpNote] = useState("");
   const [followUpDate, setFollowUpDate] = useState("");
   const [followUpSaved, setFollowUpSaved] = useState(false);
@@ -1051,21 +1070,11 @@ function PipelinePageInner() {
   // Sync inputs when selected lead changes
   useEffect(() => {
     if (panelConv) {
-      setCashVal(panelConv.cashIn !== undefined && panelConv.cashIn !== null ? String(panelConv.cashIn) : "");
       setFollowUpNote(panelConv.followUpNote || "");
       setFollowUpDate(panelConv.followUpDate || "");
-      setCashSaved(false);
       setFollowUpSaved(false);
     }
-  }, [panelConv?.id, panelConv?.followUpNote, panelConv?.followUpDate, panelConv?.cashIn]);
-
-  const handleSaveCash = useCallback(async () => {
-    if (!panelLead || isReadOnly) return;
-    const num = parseFloat(cashVal) || 0;
-    await patchConversation(panelLead.id, { cashIn: num });
-    setCashSaved(true);
-    setTimeout(() => setCashSaved(false), 2000);
-  }, [panelLead, isReadOnly, cashVal, patchConversation]);
+  }, [panelConv?.id, panelConv?.followUpNote, panelConv?.followUpDate]);
 
   const handleSaveFollowUp = useCallback(async () => {
     if (!panelLead || isReadOnly) return;
@@ -1529,18 +1538,30 @@ function PipelinePageInner() {
                         Calendar →
                       </Link>
                     </div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      {(panelConv?.auditionDate || followUpDate || panelConv?.followUpDate) && (
-                        <span className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>
-                          {panelConv?.auditionDate || followUpDate || panelConv?.followUpDate}
-                        </span>
-                      )}
-                      {panelConv?.branch && (
-                        <span className="text-[11px] font-medium" style={{ color: 'var(--text-muted)' }}>
-                          · {panelConv.branch}
-                        </span>
-                      )}
-                    </div>
+                    {(() => {
+                      const storedDate = panelConv?.auditionDate || followUpDate || panelConv?.followUpDate;
+                      const storedTime = extractExplicitAuditionTime(panelConv);
+                      return (
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {storedDate && (
+                            <span className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                              {storedDate}
+                              {storedTime ? ` · ${storedTime}` : ""}
+                            </span>
+                          )}
+                          {!storedDate && storedTime && (
+                            <span className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                              {storedTime}
+                            </span>
+                          )}
+                          {panelConv?.branch && (
+                            <span className="text-[11px] font-medium" style={{ color: 'var(--text-muted)' }}>
+                              · {panelConv.branch}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
                     {!isReadOnly && (
                       <button
                         type="button"
@@ -1668,37 +1689,17 @@ function PipelinePageInner() {
                   </div>
                 </div>
 
+                <LeadCashInSection
+                  variant="panel"
+                  conversationId={panelLead.id}
+                  cashIn={panelConv?.cashIn}
+                  isReadOnly={isReadOnly}
+                  onSaveCash={(amount) => patchConversation(panelLead.id, { cashIn: amount })}
+                />
+
                 <div className="mb-6">
                   <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Source</h3>
                   <p className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{panelLead.campaign}</p>
-                </div>
-
-                <div className="mb-6">
-                  <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Cash In</h3>
-                  <div className="flex gap-2">
-                    <input
-                      type="number"
-                      placeholder="0"
-                      value={cashVal}
-                      onChange={(e) => setCashVal(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          handleSaveCash();
-                        }
-                      }}
-                      className="flex-1 rounded-[6px] text-[13px] py-1.5 px-3 outline-none"
-                      style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
-                    />
-                    <button
-                      type="button"
-                      disabled={isReadOnly}
-                      onClick={handleSaveCash}
-                      className="bg-[#0066FF] text-white font-semibold text-[13px] px-4 rounded-[6px] shadow-sm hover:bg-[#0055d4] transition-colors cursor-pointer disabled:opacity-50"
-                    >
-                      {cashSaved ? "Saved ✓" : "Save"}
-                    </button>
-                  </div>
                 </div>
 
                 <div className="mb-6">
@@ -1852,123 +1853,144 @@ function PipelinePageInner() {
         </div>
       )}
 
-      {/* Book Audition Modal */}
-      {showAuditionModal && panelLead && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs transition-opacity animate-in fade-in duration-150"
-          onClick={() => !isBookingAudition && setShowAuditionModal(false)}
-        >
+      {/* Book / Reschedule Audition Modal */}
+      {showAuditionModal && panelLead && (() => {
+        const isReschedule = Boolean(panelConv?.auditionDate);
+        const timeOptions = getAuditionTimeSelectOptions(auditionTime);
+        return (
           <div
-            className="w-full max-w-[440px] rounded-2xl p-6 shadow-2xl relative border animate-in fade-in zoom-in-95 duration-150 flex flex-col gap-4 max-h-[90vh] overflow-y-auto"
-            style={{
-              background: 'var(--bg-card)',
-              borderColor: 'var(--border-main)',
-              color: 'var(--text-primary)',
-            }}
-            onClick={(e) => e.stopPropagation()}
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs transition-opacity animate-in fade-in duration-150"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="pipeline-audition-modal-title"
+            onClick={() => !isBookingAudition && setShowAuditionModal(false)}
           >
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-[11px] font-semibold uppercase tracking-wider text-[#0066FF]">
-                  Auditions Calendar
-                </p>
-                <h3 className="text-[16px] font-bold mt-0.5" style={{ color: 'var(--text-primary)' }}>
-                  Book Audition for {panelLead.name}
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowAuditionModal(false)}
-                className="p-1.5 rounded-lg transition-colors hover:opacity-70 cursor-pointer"
-                style={{ color: 'var(--text-secondary)' }}
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="flex flex-col gap-3.5">
-              <div>
-                <label className="text-[12px] font-bold mb-1 block" style={{ color: 'var(--text-primary)' }}>
-                  Branch *
-                </label>
-                <BranchSelect
-                  value={auditionBranch}
-                  onChange={setAuditionBranch}
-                  branchGroups={branchGroups}
-                />
-              </div>
-
-              <div>
-                <label className="text-[12px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>
-                  Audition Date *
-                </label>
-                <input
-                  type="date"
-                  value={auditionDate}
-                  onChange={(e) => setAuditionDate(e.target.value)}
-                  className="w-full h-[38px] px-3 text-[13px] rounded-xl outline-none cursor-pointer"
-                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
-                />
-              </div>
-
-              <div>
-                <label className="text-[12px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>
-                  Audition Time *
-                </label>
-                <select
-                  value={auditionTime}
-                  onChange={(e) => setAuditionTime(e.target.value)}
-                  className="w-full h-[38px] px-3 text-[13px] rounded-xl outline-none cursor-pointer"
-                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+            <div
+              className="w-full max-w-[440px] rounded-2xl p-6 shadow-2xl relative border animate-in fade-in zoom-in-95 duration-150 flex flex-col gap-4 max-h-[90vh] overflow-y-auto"
+              style={{
+                background: 'var(--bg-card)',
+                borderColor: 'var(--border-main)',
+                color: 'var(--text-primary)',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-[#0066FF]">
+                    Auditions Calendar
+                  </p>
+                  <h3 id="pipeline-audition-modal-title" className="text-[16px] font-bold mt-0.5" style={{ color: 'var(--text-primary)' }}>
+                    {isReschedule ? "Reschedule Audition" : "Book Audition"} for {panelLead.name}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  disabled={isBookingAudition}
+                  onClick={() => setShowAuditionModal(false)}
+                  aria-label="Close audition modal"
+                  className="p-1.5 rounded-lg transition-colors hover:opacity-70 cursor-pointer disabled:opacity-50"
+                  style={{ color: 'var(--text-secondary)' }}
                 >
-                  {[
-                    "02:00 PM", "02:30 PM", "03:00 PM", "03:30 PM",
-                    "04:00 PM", "04:30 PM", "05:00 PM", "05:30 PM",
-                    "06:00 PM", "06:30 PM", "07:00 PM", "07:30 PM",
-                    "08:00 PM", "08:30 PM", "09:00 PM"
-                  ].map((t) => (
-                    <option key={t} value={t}>{t}</option>
-                  ))}
-                </select>
+                  <X className="w-5 h-5" />
+                </button>
               </div>
 
-              <div>
-                <label className="text-[12px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>
-                  Instrument / Notes (Optional)
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. Piano, Violin, Vocal"
-                  value={auditionNotes}
-                  onChange={(e) => setAuditionNotes(e.target.value)}
-                  className="w-full h-[38px] px-3 text-[13px] rounded-xl outline-none"
-                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
-                />
-              </div>
-            </div>
+              <div className="flex flex-col gap-3.5">
+                <div>
+                  <label className="text-[12px] font-bold mb-1 block" style={{ color: 'var(--text-primary)' }}>
+                    Branch *
+                  </label>
+                  <BranchSelect
+                    value={auditionBranch}
+                    onChange={setAuditionBranch}
+                    branchGroups={branchGroups}
+                  />
+                </div>
 
-            <div className="flex items-center gap-2 pt-2">
-              <button
-                type="button"
-                disabled={isBookingAudition || !auditionDate || !auditionBranch}
-                onClick={handleConfirmBooking}
-                className="flex-1 h-[40px] text-[13px] font-semibold text-white rounded-xl cursor-pointer hover:bg-[#0055d4] transition-colors disabled:opacity-50"
-                style={{ background: '#0066FF' }}
-              >
-                {isBookingAudition ? "Booking..." : "Confirm Audition Booking"}
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowAuditionModal(false)}
-                className="h-[40px] px-5 text-[13px] font-medium rounded-xl cursor-pointer hover:opacity-80 transition-colors"
-                style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}
-              >
-                Cancel
-              </button>
+                <div>
+                  <label className="text-[12px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>
+                    Audition Date *
+                  </label>
+                  <input
+                    type="date"
+                    value={auditionDate}
+                    onChange={(e) => setAuditionDate(e.target.value)}
+                    className="w-full h-[38px] px-3 text-[13px] rounded-xl outline-none cursor-pointer"
+                    style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[12px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>
+                    Audition Time *
+                  </label>
+                  <select
+                    value={auditionTime}
+                    onChange={(e) => setAuditionTime(e.target.value)}
+                    className="w-full h-[38px] px-3 text-[13px] rounded-xl outline-none cursor-pointer"
+                    style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                  >
+                    {timeOptions.map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-[12px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>
+                    Instrument / Notes (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Piano, Violin, Vocal"
+                    value={auditionNotes}
+                    onChange={(e) => setAuditionNotes(e.target.value)}
+                    className="w-full h-[38px] px-3 text-[13px] rounded-xl outline-none"
+                    style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                  />
+                </div>
+              </div>
+
+              {bookingError && (
+                <div
+                  role="alert"
+                  className="px-3 py-2 rounded-lg text-[12px] font-medium border"
+                  style={{
+                    background: "var(--label-red-bg)",
+                    borderColor: "var(--label-red-border)",
+                    color: "var(--label-red-text)",
+                  }}
+                >
+                  {bookingError}
+                </div>
+              )}
+
+              <div className="flex items-center gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={isBookingAudition || !auditionDate || !auditionBranch}
+                  onClick={handleConfirmBooking}
+                  className="flex-1 h-[40px] text-[13px] font-semibold text-white rounded-xl cursor-pointer hover:bg-[#0055d4] transition-colors disabled:opacity-50"
+                  style={{ background: '#0066FF' }}
+                >
+                  {isBookingAudition
+                    ? (isReschedule ? "Saving..." : "Booking...")
+                    : (isReschedule ? "Save Reschedule" : "Confirm Audition Booking")}
+                </button>
+                <button
+                  type="button"
+                  disabled={isBookingAudition}
+                  onClick={() => setShowAuditionModal(false)}
+                  className="h-[40px] px-5 text-[13px] font-medium rounded-xl cursor-pointer hover:opacity-80 transition-colors disabled:opacity-50"
+                  style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-secondary)' }}
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Confirmation Alert Popup Before Deleting Lead */}
       {showDeleteConfirm && panelLead && (
