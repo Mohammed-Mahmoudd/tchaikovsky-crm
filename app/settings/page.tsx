@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { useAuth, Role, ROLE_OPTIONS, getRoleDisplayName, normalizeRole, canManageTeamRole, canAccessRoute } from "../components/AuthProvider";
-import { organizeTeamMembersByRole } from "../utils/roles";
+import { useAuth, Role, ROLE_OPTIONS, getRoleDisplayName, normalizeRole, canManageTeamRole, canAccessRoute, isOperationRole } from "../components/AuthProvider";
+import { organizeTeamMembersByRole, reconcileMemberPatchResponse } from "../utils/roles";
 import { useCRM } from "../context/CRMContext";
 import { useBranches } from "../lib/branches";
 import { ClaudeSettingsTab } from "../components/ClaudeSettingsTab";
@@ -128,6 +128,8 @@ export default function SettingsPage() {
   const [newRole, setNewRole] = useState<Role>("admission_officer");
   const [addingUser, setAddingUser] = useState(false);
   const [addStatus, setAddStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [teamStatus, setTeamStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [updatingMemberIds, setUpdatingMemberIds] = useState<Record<string, boolean>>({});
 
   // Edit user state
   const [editingMember, setEditingMember] = useState<TeamMember | null>(null);
@@ -175,7 +177,9 @@ export default function SettingsPage() {
     toggleDevicePush,
     testDevicePush,
   } = useCRM();
-  const canUseInboxNotifications = canAccessRoute(user?.role, "/");
+  const isOperation = isOperationRole(user?.role);
+  const canUseInboxNotifications =
+    canAccessRoute(user?.role, "/") || canAccessRoute(user?.role, "/operation-inbox");
   const [pushStatus, setPushStatus] = useState<{ ok: boolean; msg: string } | null>(null);
   const pushStatusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -590,18 +594,21 @@ export default function SettingsPage() {
 
   // Update team member role or active state
   const handleUpdateMember = async (id: string, updates: Partial<TeamMember>) => {
+    if (updatingMemberIds[id]) return;
     const previousMember = team.find((m) => m.id === id);
+    if (!previousMember) return;
+    setTeamStatus(null);
+
     // If activating a member, check if seats are already full
-    if (updates.active === true) {
-      if (previousMember && !previousMember.active && isSeatLimitReached) {
-        setAddStatus({
-          ok: false,
-          msg: `Cannot activate ${previousMember.name}. All ${maxSeats} seats are currently in use. Deactivate another member first.`,
-        });
-        return;
-      }
+    if (updates.active === true && !previousMember.active && isSeatLimitReached) {
+      setTeamStatus({
+        ok: false,
+        msg: `Cannot activate ${previousMember.name}. All ${maxSeats} seats are currently in use. Deactivate another member first.`,
+      });
+      return;
     }
 
+    setUpdatingMemberIds((prev) => ({ ...prev, [id]: true }));
     // Optimistic update
     setTeam((prev) => prev.map((m) => (m.id === id ? { ...m, ...updates } : m)));
 
@@ -611,19 +618,51 @@ export default function SettingsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updates),
       });
-      const data = await res.json();
-      if (!data.success) {
-        if (previousMember) {
-          setTeam((prev) => prev.map((m) => (m.id === id ? previousMember : m)));
-        }
-        setAddStatus({ ok: false, msg: data.error || "Failed to update member." });
+      const data = await res.json().catch(() => null);
+      const reconciled = reconcileMemberPatchResponse({
+        previousMember,
+        requestedRole: updates.role,
+        resOk: res.ok,
+        payload: data,
+      });
+
+      setTeam((prev) => prev.map((m) => (m.id === id ? reconciled.member : m)));
+
+      if (!reconciled.ok) {
+        setTeamStatus({ ok: false, msg: reconciled.error });
+        return;
       }
+
+      if (id === user?.id || previousMember.email === user?.email) {
+        updateCurrentUser({
+          name: reconciled.member.name,
+          email: reconciled.member.email,
+          role: reconciled.member.role,
+          avatar: reconciled.member.avatar,
+        });
+      }
+
+      const roleLabel = getRoleDisplayName(reconciled.member.role);
+      setTeamStatus({
+        ok: true,
+        msg:
+          updates.role !== undefined
+            ? `${reconciled.member.name}'s role updated to ${roleLabel}.`
+            : `${reconciled.member.name} updated successfully.`,
+      });
+      setTimeout(() => {
+        setTeamStatus((curr) => (curr?.ok ? null : curr));
+      }, 3500);
     } catch (err) {
       console.error("Failed to update user:", err);
-      if (previousMember) {
-        setTeam((prev) => prev.map((m) => (m.id === id ? previousMember : m)));
-      }
-      setAddStatus({ ok: false, msg: "Network error. Unable to reach server." });
+      setTeam((prev) => prev.map((m) => (m.id === id ? previousMember : m)));
+      setTeamStatus({ ok: false, msg: "Network error. Unable to reach server." });
+    } finally {
+      setUpdatingMemberIds((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
     }
   };
 
@@ -693,38 +732,39 @@ export default function SettingsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = await res.json();
-      if (data.success && data.user) {
-        setTeam((prev) =>
-          prev.map((m) =>
-            m.id === editingMember.id
-              ? {
-                  ...m,
-                  name: data.user.name,
-                  email: data.user.email,
-                  role: data.user.role,
-                  avatar: data.user.avatar !== undefined ? data.user.avatar : editAvatar,
-                  active: data.user.active,
-                }
-              : m
-          )
-        );
+      const data = await res.json().catch(() => null);
+      const reconciled = reconcileMemberPatchResponse({
+        previousMember: editingMember,
+        requestedRole: editRole,
+        resOk: res.ok,
+        payload: data,
+      });
 
-        // If user edited their own account info, sync auth context
+      if (data?.success && data?.user) {
+        const persisted = {
+          ...reconciled.member,
+          avatar: data.user.avatar !== undefined ? data.user.avatar : editAvatar,
+        };
+        setTeam((prev) => prev.map((m) => (m.id === editingMember.id ? persisted : m)));
+
         if (editingMember.id === user?.id || editingMember.email === user?.email) {
           updateCurrentUser({
-            name: data.user.name,
-            email: data.user.email,
-            role: data.user.role,
-            avatar: data.user.avatar !== undefined ? data.user.avatar : editAvatar,
+            name: persisted.name,
+            email: persisted.email,
+            role: persisted.role,
+            avatar: persisted.avatar,
           });
         }
+      }
 
-        setAddStatus({ ok: true, msg: `User ${data.user.name} updated successfully.` });
-        setTimeout(() => setAddStatus(null), 3500);
+      if (reconciled.ok) {
+        setTeamStatus({ ok: true, msg: `User ${reconciled.member.name} updated successfully.` });
+        setTimeout(() => {
+          setTeamStatus((curr) => (curr?.ok ? null : curr));
+        }, 3500);
         setEditingMember(null);
       } else {
-        setEditError(data.error || "Failed to update member.");
+        setEditError(reconciled.error);
       }
     } catch {
       setEditError("Network error. Unable to reach server.");
@@ -943,6 +983,7 @@ export default function SettingsPage() {
             Settings
           </h1>
 
+          {!isOperation && (
           <div className="flex items-center gap-1 p-0.5 rounded-[8px]" style={{ background: "var(--bg-pill)", border: "1px solid var(--border-input)" }}>
             <button
               type="button"
@@ -980,6 +1021,7 @@ export default function SettingsPage() {
               </button>
             )}
           </div>
+          )}
         </div>
 
       {/* ── GENERAL TAB CONTENT ─────────────────────────────────────────── */}
@@ -1289,7 +1331,9 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* Team Card */}
+      {/* Team Card (hidden for Operation role — personal settings & notifications only) */}
+      {!isOperation && (
+        <>
       <div
         className="rounded-xl p-5 shadow-sm overflow-hidden mb-5"
         style={{ background: "var(--bg-card)", border: "1px solid var(--border-main)" }}
@@ -1305,6 +1349,29 @@ export default function SettingsPage() {
             {activeSeats} / {maxSeats} seats used{isSeatLimitReached ? " (Limit reached)" : ""}
           </span>
         </div>
+
+        {teamStatus && (
+          <div
+            role="status"
+            className="mb-3 px-3 py-2 rounded-lg text-[11px] font-medium flex items-center justify-between gap-2"
+            style={{
+              background: teamStatus.ok ? "rgba(52, 199, 89, 0.1)" : "rgba(255, 59, 48, 0.08)",
+              border: `1px solid ${teamStatus.ok ? "rgba(52, 199, 89, 0.25)" : "rgba(255, 59, 48, 0.2)"}`,
+              color: teamStatus.ok ? "#1e7e34" : "#FF3B30",
+            }}
+          >
+            <span>{teamStatus.msg}</span>
+            {!teamStatus.ok && (
+              <button
+                type="button"
+                onClick={() => setTeamStatus(null)}
+                className="text-[10px] underline shrink-0 cursor-pointer"
+              >
+                Dismiss
+              </button>
+            )}
+          </div>
+        )}
 
         {loadingTeam ? (
           <div className="py-6 text-center text-[12px]" style={{ color: "var(--text-muted)", borderTop: "1px solid var(--border-main)" }}>
@@ -1400,10 +1467,12 @@ export default function SettingsPage() {
 
                   {/* Quick role select */}
                   <select
-                    disabled={!canEditThisMember}
+                    disabled={!canEditThisMember || Boolean(updatingMemberIds[member.id])}
                     value={normMemberRole}
                     onChange={(e) => handleUpdateMember(member.id, { role: e.target.value as Role })}
-                    className="h-[26px] text-[11px] rounded-[6px] px-2 outline-none shrink-0 w-[155px] transition-colors"
+                    className={`h-[26px] text-[11px] rounded-[6px] px-2 outline-none shrink-0 w-[155px] transition-colors ${
+                      updatingMemberIds[member.id] ? "opacity-60 cursor-wait" : ""
+                    }`}
                     style={{
                       background: "var(--bg-input)",
                       border: "1px solid var(--border-input)",
@@ -1694,6 +1763,9 @@ export default function SettingsPage() {
               <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Admission (Advanced)</span> — admission officer access plus Reports and Team Activities.
             </li>
             <li>
+              <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Operation</span> — dedicated access to Operation Inbox (Operation WhatsApp account), Profile, and personal Settings (account &amp; notifications).
+            </li>
+            <li>
               <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Enrollment Director</span> — access to auditions only: schedule auditions, manage applicants, and track attendance.
             </li>
             <li>
@@ -1704,11 +1776,13 @@ export default function SettingsPage() {
             </li>
           </ul>
         </div>
+      </>
+      )}
         </>
       )}
 
       {/* ── BRANCHES TAB CONTENT ────────────────────────────────────────── */}
-      {activeTab === "branches" && (
+      {!isOperation && activeTab === "branches" && (
         <>
           {/* Container 1: Dedicated container for adding branches (Chairman only) */}
           {canManageTeam && (

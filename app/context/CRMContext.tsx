@@ -2,7 +2,16 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { useAuth, isAssignableRole, canAccessRoute, type LogoutReason } from "../components/AuthProvider";
+import {
+  useAuth,
+  isAssignableRole,
+  isAssignableForInbox,
+  isOperationRole,
+  canAccessInbox,
+  canAccessRoute,
+  type InboxScope,
+  type LogoutReason,
+} from "../components/AuthProvider";
 import { formatMetaErrorMessage } from "../utils/errorParser";
 import {
   computeUnreadFromMessages,
@@ -17,7 +26,11 @@ import {
   isPlaceholderLeadName,
   resolveConversationLeadNames,
 } from "../utils/leadName";
-import { computeInboxUnreadBadge } from "../utils/inboxFilters";
+import {
+  computeInboxUnreadBadge,
+  filterConversationsByInbox,
+  resolveConvInboxMode,
+} from "../utils/inboxFilters";
 import {
   type LeadLabel,
   type LeadLabelColor,
@@ -105,6 +118,8 @@ export type Conversation = {
   phone: string;
   agent: string;
   channel: Channel;
+  inbox?: InboxScope;
+  whatsappAccount?: InboxScope;
   status: "Open" | "Pending" | "Resolved";
   isArchived?: boolean;
   archivedAt?: string;
@@ -193,6 +208,7 @@ export type ActivityLogEntry = {
 
 export type BadgeCounts = {
   inbox: number;
+  operationInbox: number;
   leads: number;
   auditions: number;
   followUps: number;
@@ -209,6 +225,7 @@ export type CreateManualLeadInput = {
   branch?: string;
   notes?: string;
   instrument?: string;
+  inbox?: InboxScope;
 };
 
 export type CreateManualLeadResult = {
@@ -253,9 +270,12 @@ export function normalizeWhatsAppPhone(raw: string): { digits: string; e164: str
 
 type CRMContextType = {
   conversations: Conversation[];
+  admissionsConversations: Conversation[];
+  operationConversations: Conversation[];
   loading: boolean;
   badgeCounts: BadgeCounts;
   assignableAgents: AssignableAgent[];
+  operationAssignableAgents: AssignableAgent[];
   teamMembers: AssignableAgent[];
   labels: LeadLabel[];
   labelsLoading: boolean;
@@ -293,7 +313,7 @@ type CRMContextType = {
   searchQuery: string;
   setSearchQuery: (query: string) => void;
   deleteConversation: (id: string) => Promise<void>;
-  clearWhatsAppConversations: () => Promise<void>;
+  clearWhatsAppConversations: (inbox?: InboxScope) => Promise<void>;
   editMessage: (chatId: string, messageId: string, newText: string) => Promise<{ ok: boolean; error?: string }>;
   unsendMessage: (chatId: string, messageId: string) => Promise<{ ok: boolean; error?: string }>;
   reactToMessage: (chatId: string, messageId: string, emoji: string) => Promise<boolean>;
@@ -436,6 +456,8 @@ function slimConversationsForStorage(convs: Conversation[], limit?: number): Con
       messages: [],
     };
     if (c._id) item._id = c._id;
+    if (c.inbox) item.inbox = c.inbox;
+    if (c.whatsappAccount) item.whatsappAccount = c.whatsappAccount;
     if (c.profileName) item.profileName = c.profileName;
     if (c.leadName) item.leadName = c.leadName;
     if (c.metaChannel) item.metaChannel = c.metaChannel;
@@ -667,20 +689,32 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     user?.email && user.email.toLowerCase().trim() === "test@meta.com"
   );
 
-  // Hydrate instantly from cache so dashboard/reports/pipeline appear in 0ms (no loading spinner)
+  // Hydrate instantly from cache so dashboard/reports/pipeline appear in 0ms (no loading spinner),
+  // strictly filtering by the signed-in role's authorized inboxes so prior sessions never bleed through.
   const [conversations, setConversations] = useState<Conversation[]>(() => {
     const cached = getCachedConversations();
+    const roleFiltered =
+      typeof window !== "undefined" && user?.role
+        ? cached.filter((c) => canAccessInbox(user.role, resolveConvInboxMode(c)))
+        : cached;
     if (typeof window !== "undefined" && user?.email?.toLowerCase().trim() === "test@meta.com") {
-      return cached.filter(isReviewerAllowedConversation);
+      return roleFiltered.filter(isReviewerAllowedConversation);
     }
-    return cached;
+    return roleFiltered;
   });
 
   useEffect(() => {
-    if (isMetaReviewer) {
-      setConversations((prev) => prev.filter(isReviewerAllowedConversation));
-    }
-  }, [isMetaReviewer]);
+    setConversations((prev) => {
+      let next = prev;
+      if (user?.role) {
+        next = next.filter((c) => canAccessInbox(user.role, resolveConvInboxMode(c)));
+      }
+      if (isMetaReviewer) {
+        next = next.filter(isReviewerAllowedConversation);
+      }
+      return next.length === prev.length ? prev : next;
+    });
+  }, [isMetaReviewer, user?.role]);
   const [loading, setLoading] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
     try {
@@ -694,6 +728,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   });
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [assignableAgents, setAssignableAgents] = useState<AssignableAgent[]>([]);
+  const [operationAssignableAgents, setOperationAssignableAgents] = useState<AssignableAgent[]>([]);
   const [teamMembers, setTeamMembers] = useState<AssignableAgent[]>([]);
   const [labels, setLabels] = useState<LeadLabel[]>(() => getCachedLabels());
   const [labelsLoading, setLabelsLoading] = useState<boolean>(false);
@@ -740,7 +775,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const canUseInboxPush = Boolean(token && canAccessRoute(user?.role, "/"));
+  const canUseInboxPush = Boolean(
+    token &&
+      (canAccessRoute(user?.role, "/") || canAccessRoute(user?.role, "/operation-inbox"))
+  );
 
   // Sync existing Web Push subscription for signed-in Inbox-authorized staff
   useEffect(() => {
@@ -847,13 +885,17 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     loadConversationsFromIDB().then((idbConvs) => {
       if (cancelled || !idbConvs || idbConvs.length === 0) return;
+      const authorizedIdb = user?.role
+        ? idbConvs.filter((c) => canAccessInbox(user.role, resolveConvInboxMode(c)))
+        : idbConvs;
+      if (authorizedIdb.length === 0) return;
       // Only apply IDB snapshot if live server fetch hasn't already populated full activityLog data
-      if (lastServerRevRef.current > 0 && conversationsRef.current.length >= idbConvs.length) {
+      if (lastServerRevRef.current > 0 && conversationsRef.current.length >= authorizedIdb.length) {
         return;
       }
       setConversations((prev) => {
         if (prev.length === 0) {
-          return idbConvs.map((c) =>
+          return authorizedIdb.map((c) =>
             hydrateCachedConversationNames({
               ...c,
               messages: messagesCacheRef.current.get(c.id) || c.messages || [],
@@ -861,7 +903,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           );
         }
         const idbMap = new Map<string, Conversation>(
-          idbConvs.map((c) => [c.id, hydrateCachedConversationNames(c)])
+          authorizedIdb.map((c) => [c.id, hydrateCachedConversationNames(c)])
         );
         const existingIds = new Set<string>();
         const mergedExisting = prev.map((current) => {
@@ -877,7 +919,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             messages: messagesCacheRef.current.get(current.id) || current.messages || [],
           };
         });
-        const overflowFromIdb = idbConvs
+        const overflowFromIdb = authorizedIdb
           .filter((c) => !existingIds.has(c.id))
           .map((c) =>
             hydrateCachedConversationNames({
@@ -894,7 +936,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [isMetaReviewer]);
+  }, [isMetaReviewer, user?.role]);
 
   // Fix B: when true the 3s poll is silently skipped (set during drag + 3s after drop)
   const pollPausedRef = useRef(false);
@@ -966,6 +1008,11 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           (a: AssignableAgent) => a.active !== false && isAssignableRole(a.role)
         );
         setAssignableAgents(filtered);
+
+        const opFiltered = allMembers.filter(
+          (a: AssignableAgent) => a.active !== false && isAssignableForInbox(a.role, "operation")
+        );
+        setOperationAssignableAgents(opFiltered);
       }
     } catch (e) {
       console.warn("Failed to load assignable agents:", e);
@@ -1139,9 +1186,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   // Normalize raw API data to CRM Conversation model (without messages)
   const normalizeConversationMeta = useCallback((c: any): Omit<Conversation, "messages"> => {
     const resolvedNames = resolveConversationLeadNames(c);
+    const resolvedInbox = resolveConvInboxMode(c);
     return {
       id: c.senderId,
       _id: c._id ? String(c._id) : undefined,
+      inbox: resolvedInbox,
+      whatsappAccount: resolvedInbox,
       name: resolvedNames.name,
       profileName: resolvedNames.profileName,
       leadName: resolvedNames.leadName,
@@ -1155,7 +1205,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           if (fDigits.length >= 7 && fDigits.length <= 15) return `+${fDigits}`;
         }
         if (c.channel === "WA") {
-          const digits = String(c.senderId || "").replace(/\D/g, "");
+          const digits = String(c.senderId || "")
+            .replace(/^op_/, "")
+            .replace(/\D/g, "");
           if (digits.length >= 7 && digits.length <= 13) return `+${digits}`;
         }
         return c.phone || `Live ${c.channel}`;
@@ -2342,9 +2394,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               }
             } else if (payload.type === "conversations_purged" && payload.data) {
               if (payload.data.channel === "WA") {
-                setConversations((prev) => prev.filter((c) => c.channel !== "WA"));
-                const active = conversations.find((c) => c.id === activeChatIdRef.current);
-                if (active?.channel === "WA") {
+                const purgedInbox: InboxScope = payload.data.inbox === "operation" ? "operation" : "admissions";
+                setConversations((prev) =>
+                  prev.filter(
+                    (c) => !(c.channel === "WA" && resolveConvInboxMode(c) === purgedInbox)
+                  )
+                );
+                const active = conversationsRef.current.find((c) => c.id === activeChatIdRef.current);
+                if (active?.channel === "WA" && resolveConvInboxMode(active) === purgedInbox) {
                   setActiveChatId(null);
                 }
               }
@@ -2713,16 +2770,28 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     return conversations;
   }, [conversations, isMetaReviewer]);
 
+  // Partitioned inbox views (admissions vs operation) and clean badges per inbox
+  const admissionsConversations = useMemo(
+    () => filterConversationsByInbox(visibleConversations, "admissions"),
+    [visibleConversations]
+  );
+
+  const operationConversations = useMemo(
+    () => filterConversationsByInbox(visibleConversations, "operation"),
+    [visibleConversations]
+  );
+
   // Compute live badges across all pages
   const badgeCounts = useMemo<BadgeCounts>(() => {
     const today = getLocalTodayIso();
 
-    const inbox = computeInboxUnreadBadge(visibleConversations);
+    const inbox = computeInboxUnreadBadge(admissionsConversations);
+    const operationInbox = computeInboxUnreadBadge(operationConversations);
     let leads = 0;
     let auditions = 0;
     let followUps = 0;
 
-    visibleConversations.forEach((c) => {
+    admissionsConversations.forEach((c) => {
       // 2. Leads badge: newly arrived uncontacted leads
       if (c.pipeline === "New") {
         leads += 1;
@@ -2750,8 +2819,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       }
     });
 
-    return { inbox, leads, auditions, followUps };
-  }, [visibleConversations]);
+    return { inbox, operationInbox, leads, auditions, followUps };
+  }, [admissionsConversations, operationConversations]);
 
   // Instant optimistic update across all pages + background PATCH
   const patchConversation = useCallback(
@@ -3448,20 +3517,35 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     [isReadOnly, authFetch, normalizeConversationMeta]
   );
 
-  // 1-Click navigation from any page to open that user's chat in Inbox
+  // 1-Click navigation from any page to open that user's chat in its assigned Inbox
   const openChat = useCallback(
     (id: string) => {
       activeChatIdRef.current = id;
       setActiveChatId(id);
       setSearchQuery("");
-      router.push("/");
+      const existing = conversationsRef.current.find((c) => c.id === id);
+      const inboxMode = existing ? resolveConvInboxMode(existing) : resolveConvInboxMode(id);
+      const targetPath = inboxMode === "operation" ? "/operation-inbox" : "/";
+      if (canAccessRoute(user?.role, targetPath)) {
+        router.push(targetPath);
+      } else if (isOperationRole(user?.role)) {
+        router.push("/operation-inbox");
+      } else {
+        router.push("/");
+      }
     },
-    [router]
+    [router, user?.role]
   );
 
   // Open deep-linked conversation from notification click (?chat=<id> or Service Worker postMessage)
   useEffect(() => {
-    if (!token || typeof window === "undefined" || !canAccessRoute(user?.role, "/")) return;
+    if (
+      !token ||
+      typeof window === "undefined" ||
+      (!canAccessRoute(user?.role, "/") && !canAccessRoute(user?.role, "/operation-inbox"))
+    ) {
+      return;
+    }
 
     const params = new URLSearchParams(window.location.search);
     const chatParam = params.get("chat")?.trim();
@@ -3505,21 +3589,26 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         };
       }
 
-      const { digits: senderId, e164: e164Phone } = normalized;
+      const targetInbox: InboxScope =
+        input.inbox || (isOperationRole(user?.role) ? "operation" : "admissions");
+      const { digits: rawDigits, e164: e164Phone } = normalized;
+      const senderId = targetInbox === "operation" ? `op_${rawDigits}` : rawDigits;
       deletedIdsRef.current.delete(senderId);
 
       const cleanName = (input.name || "").trim();
-      const cleanReferralType = (input.referralType || "").trim() || "Student Referral";
+      const cleanReferralType =
+        (input.referralType || "").trim() ||
+        (targetInbox === "operation" ? "Direct Chat" : "Student Referral");
       const cleanReferredBy = (input.referredBy || "").trim();
       const cleanBranch = (input.branch || "").trim();
       const cleanInstrument = (input.instrument || "").trim();
       const rawNotes = (input.notes || "").trim();
 
       const noteParts: string[] = [];
-      if (cleanReferredBy) {
+      if (cleanReferredBy && targetInbox !== "operation") {
         noteParts.push(`Referred by: ${cleanReferredBy} (${cleanReferralType})`);
       }
-      if (cleanInstrument) {
+      if (cleanInstrument && targetInbox !== "operation") {
         noteParts.push(`Instrument: ${cleanInstrument}`);
       }
       if (rawNotes) {
@@ -3533,13 +3622,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       const actorRole = user?.role || "";
       const resolvedAgent = (input.agent || "").trim() || "Unassigned";
 
-      // Check if lead already exists in current conversations state
+      // Check if conversation already exists within the SAME inbox only
       const existingConv = conversations.find(
         (c) =>
-          c.id === senderId ||
-          c.phone === e164Phone ||
-          c.formPhone === senderId ||
-          (c.phone && normalizeWhatsAppPhone(c.phone)?.digits === senderId)
+          resolveConvInboxMode(c) === targetInbox &&
+          (c.id === senderId ||
+            c.phone === e164Phone ||
+            c.formPhone === rawDigits ||
+            (c.phone && normalizeWhatsAppPhone(c.phone)?.digits === rawDigits))
       );
 
       if (existingConv) {
@@ -3596,8 +3686,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           type: "note_updated",
           actor: actorName,
           actorRole,
-          summary: `Added manual lead (${cleanReferralType})`,
-          detail: cleanReferredBy ? `Referred by ${cleanReferredBy}` : e164Phone,
+          summary:
+            targetInbox === "operation"
+              ? "Started Operation WhatsApp conversation"
+              : `Added manual lead (${cleanReferralType})`,
+          detail:
+            targetInbox !== "operation" && cleanReferredBy
+              ? `Referred by ${cleanReferredBy}`
+              : e164Phone,
           fromValue: "",
           toValue: cleanName || e164Phone,
           timestamp: now,
@@ -3611,26 +3707,31 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           actor: actorName,
           actorRole,
           summary: `Assigned to ${resolvedAgent}`,
-          detail: "Assigned on manual lead creation",
+          detail: "Assigned on manual chat creation",
           fromValue: "Unassigned",
           toValue: resolvedAgent,
           timestamp: now + 1,
         });
       }
 
-      const sourceObj = {
-        campaign: cleanReferralType,
-        adset: cleanReferredBy ? `Referred by: ${cleanReferredBy}` : "Manual Lead",
-        ad: "WhatsApp Manual Lead",
-        activityLog: initialActivities,
-      };
+      const sourceObj =
+        targetInbox === "operation"
+          ? "direct"
+          : {
+              campaign: cleanReferralType,
+              adset: cleanReferredBy ? `Referred by: ${cleanReferredBy}` : "Manual Lead",
+              ad: "WhatsApp Manual Lead",
+              activityLog: initialActivities,
+            };
 
       const optimisticConv: Conversation = {
         id: senderId,
+        inbox: targetInbox,
+        whatsappAccount: targetInbox,
         name: e164Phone,
         profileName: cleanName || undefined,
         leadName: cleanName || undefined,
-        formPhone: senderId,
+        formPhone: rawDigits,
         phone: e164Phone,
         agent: resolvedAgent,
         channel: "WA",
@@ -3641,7 +3742,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         source: sourceObj,
         notes: combinedNotes,
         branch: cleanBranch,
-        formAnswers: cleanInstrument ? { instrument: cleanInstrument } : {},
+        formAnswers: cleanInstrument && targetInbox !== "operation" ? { instrument: cleanInstrument } : {},
         activityLog: initialActivities,
         messages: [],
         createdAt: nowIso,
@@ -3685,6 +3786,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             branch: cleanBranch || undefined,
             notes: rawNotes || undefined,
             instrument: cleanInstrument || undefined,
+            inbox: targetInbox,
           }),
         });
 
@@ -3794,22 +3896,37 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     [authFetch]
   );
 
-  const clearWhatsAppConversations = useCallback(async () => {
-    try {
-      persistManualLeads({});
-      recentlyCreatedRef.current.clear();
-      setConversations((prev) => prev.filter((c) => c.channel !== "WA"));
-      const active = conversations.find((c) => c.id === activeChatIdRef.current);
-      if (active?.channel === "WA") {
-        setActiveChatId(null);
+  const clearWhatsAppConversations = useCallback(
+    async (inbox: InboxScope = "admissions") => {
+      try {
+        const targetInbox: InboxScope = inbox === "operation" ? "operation" : "admissions";
+        if (targetInbox === "admissions") {
+          persistManualLeads({});
+        }
+        recentlyCreatedRef.current.clear();
+        setConversations((prev) =>
+          prev.filter(
+            (c) => !(c.channel === "WA" && resolveConvInboxMode(c) === targetInbox)
+          )
+        );
+        const active = conversationsRef.current.find((c) => c.id === activeChatIdRef.current);
+        if (active?.channel === "WA" && resolveConvInboxMode(active) === targetInbox) {
+          setActiveChatId(null);
+        }
+        await authFetch(
+          `${API}/whatsapp/clear-conversations?account=${encodeURIComponent(targetInbox)}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ account: targetInbox }),
+          }
+        );
+      } catch (err) {
+        console.error("Failed to clear WhatsApp conversations:", err);
       }
-      await authFetch(`${API}/whatsapp/clear-conversations`, {
-        method: "POST",
-      });
-    } catch (err) {
-      console.error("Failed to clear WhatsApp conversations:", err);
-    }
-  }, [conversations, authFetch]);
+    },
+    [authFetch]
+  );
 
   // 0ms optimistic message edit + server sync
   const editMessage = useCallback(
@@ -4232,9 +4349,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     <CRMContext.Provider
       value={{
         conversations: visibleConversations,
+        admissionsConversations,
+        operationConversations,
         loading,
         badgeCounts,
         assignableAgents,
+        operationAssignableAgents,
         teamMembers,
         labels,
         labelsLoading,

@@ -2,17 +2,20 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   INBOX_FILTERS,
+  OPERATION_INBOX_FILTERS,
   buildArchivePatch,
   buildMarkAsDonePatch,
   buildReopenDonePatch,
   buildUnarchivePatch,
   computeInboxUnreadBadge,
+  filterConversationsByInbox,
   getFilterBucketTotal,
   getInboxBucketCounts,
   isConversationArchived,
   isConversationDone,
   isConversationInMainInbox,
   matchesInboxFilter,
+  resolveConvInboxMode,
 } from "./inboxFilters.ts";
 
 describe("inboxFilters", () => {
@@ -153,6 +156,33 @@ describe("inboxFilters", () => {
       archivedAt: null,
       archivedBy: "",
     });
+  });
+
+  it("partitions conversations and filters cleanly between admissions and operation inboxes", () => {
+    assert.deepEqual(OPERATION_INBOX_FILTERS, [
+      "All",
+      "Mine",
+      "Unassigned",
+      "Open",
+      "Resolved",
+      "DONE",
+      "Archived",
+    ]);
+
+    const mixed = [
+      { id: "201001234567", channel: "WA", unreadCount: 2, isDone: false, isArchived: false },
+      { id: "op_201001234567", channel: "WA", inbox: "operation", unreadCount: 4, isDone: false, isArchived: false },
+    ];
+    assert.equal(resolveConvInboxMode(mixed[0]), "admissions");
+    assert.equal(resolveConvInboxMode(mixed[1]), "operation");
+    assert.equal(resolveConvInboxMode("op_201009998888"), "operation");
+
+    const adm = filterConversationsByInbox(mixed, "admissions");
+    const op = filterConversationsByInbox(mixed, "operation");
+    assert.equal(adm.length, 1);
+    assert.equal(op.length, 1);
+    assert.equal(computeInboxUnreadBadge(adm), 2);
+    assert.equal(computeInboxUnreadBadge(op), 4);
   });
 });
 

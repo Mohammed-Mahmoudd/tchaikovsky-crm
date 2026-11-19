@@ -11,9 +11,24 @@ export const INBOX_FILTERS = [
   "Archived",
 ] as const;
 
+export const OPERATION_INBOX_FILTERS = [
+  "All",
+  "Mine",
+  "Unassigned",
+  "Open",
+  "Resolved",
+  "DONE",
+  "Archived",
+] as const;
+
 export type InboxFilter = (typeof INBOX_FILTERS)[number];
+export type InboxMode = "admissions" | "operation";
 
 export interface InboxConversationLike {
+  id?: string | null;
+  senderId?: string | null;
+  inbox?: string | null;
+  whatsappAccount?: string | null;
   agent?: string | null;
   status?: string | null;
   channel?: string | null;
@@ -25,6 +40,31 @@ export interface InboxConversationLike {
   doneAt?: string | null;
   doneBy?: string | null;
   unreadCount?: number | null;
+}
+
+/** Resolves whether a conversation or raw senderId belongs to Operation Inbox or Admissions Inbox. */
+export function resolveConvInboxMode(
+  convOrId?: InboxConversationLike | string | null
+): InboxMode {
+  if (!convOrId) return "admissions";
+  if (typeof convOrId === "string") {
+    return convOrId.trim().startsWith("op_") ? "operation" : "admissions";
+  }
+  const rawInbox = String(convOrId.inbox || convOrId.whatsappAccount || "")
+    .trim()
+    .toLowerCase();
+  if (rawInbox === "operation") return "operation";
+  const rawId = String(convOrId.id || convOrId.senderId || "").trim();
+  if (rawId.startsWith("op_")) return "operation";
+  return "admissions";
+}
+
+/** Returns only conversations matching the requested inbox (`admissions` or `operation`). */
+export function filterConversationsByInbox<T extends InboxConversationLike>(
+  conversations: ReadonlyArray<T>,
+  inboxMode: InboxMode
+): T[] {
+  return conversations.filter((conv) => resolveConvInboxMode(conv) === inboxMode);
 }
 
 export interface InboxBucketCounts {

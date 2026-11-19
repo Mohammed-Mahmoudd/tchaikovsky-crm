@@ -91,7 +91,7 @@ function getWhatsAppUrl(phone?: string) {
 }
 
 export default function FollowUpsPage() {
-  const { conversations, labels, loading, patchConversation, openChat } = useCRM();
+  const { admissionsConversations: conversations, labels, loading, patchConversation, openChat } = useCRM();
   const labelNameMap = useMemo(() => buildLabelNameMap(labels), [labels]);
   const { isReadOnly } = useAuth();
   const [filter, setFilter] = useState<FilterMode>('all');

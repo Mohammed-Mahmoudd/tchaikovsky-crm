@@ -104,7 +104,9 @@ export function resolveConversationLeadNames(
 
   if (channel === "WA") {
     const phoneStr = typeof raw.phone === "string" ? raw.phone.trim() : "";
-    const senderDigits = String(raw.senderId || "").replace(/\D/g, "");
+    const senderDigits = String(raw.senderId || "")
+      .replace(/^op_/, "")
+      .replace(/\D/g, "");
     const pushName = cleanRealLeadName(raw.name);
 
     let resolvedName = "WhatsApp Contact";
@@ -155,7 +157,7 @@ export function resolveConversationLeadNames(
     typeof raw.phone === "string" && E164_PHONE_REGEX.test(raw.phone.trim())
       ? raw.phone.trim()
       : null;
-  const senderStr = typeof raw.senderId === "string" ? raw.senderId : "";
+  const senderStr = typeof raw.senderId === "string" ? raw.senderId.replace(/^op_/, "") : "";
   const derivedDigits = senderStr.replace(/\D/g, "");
   const derivedPhone =
     senderStr && senderStr.length <= 13 && derivedDigits.length >= 7 ? `+${derivedDigits}` : null;

@@ -4,11 +4,12 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useTheme } from './ThemeProvider';
-import { useAuth, canAccessRoute, normalizeRole } from './AuthProvider';
+import { useAuth, canAccessRoute, canAccessInbox, isOperationRole, normalizeRole } from './AuthProvider';
 import {
   Search,
   X,
   Inbox,
+  MessageSquare,
   Download,
   Calendar,
   ListTodo,
@@ -24,7 +25,7 @@ import { useCRM } from '../context/CRMContext';
 import { buildLabelNameMap, matchLeadSearch } from '../utils/search';
 import { LeadLabelBadges } from './LeadLabelBadges';
 import { markTeamSidebarNavigation } from '../utils/teamAuditNav';
-import { isConversationArchived, isConversationDone } from '../utils/inboxFilters';
+import { isConversationArchived, isConversationDone, resolveConvInboxMode } from '../utils/inboxFilters';
 
 interface SidebarProps {
   isMobileOpen?: boolean;
@@ -51,12 +52,14 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
 
   const labelNameMap = useMemo(() => buildLabelNameMap(labels), [labels]);
 
-  // Top matching leads for the quick sidebar search dropdown
+  // Top matching leads/conversations for the quick sidebar search dropdown (scoped by authorized inbox)
   const sidebarMatches = useMemo(() => {
     const q = searchQuery.trim();
     if (!q) return [];
-    return conversations.filter((c) => matchLeadSearch(c, q, labelNameMap)).slice(0, 6);
-  }, [conversations, searchQuery, labelNameMap]);
+    return conversations
+      .filter((c) => canAccessInbox(user?.role, resolveConvInboxMode(c)) && matchLeadSearch(c, q, labelNameMap))
+      .slice(0, 6);
+  }, [conversations, searchQuery, labelNameMap, user?.role]);
 
   // Close dropdown on click outside
   useEffect(() => {
@@ -94,12 +97,13 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
   );
 
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    const defaultInboxPath = isOperationRole(user?.role) ? '/operation-inbox' : '/';
     if (e.key === 'Enter') {
       if (sidebarMatches.length > 0) {
         handleSelectLead(sidebarMatches[0].id);
-      } else if (pathname !== '/') {
+      } else if (pathname !== defaultInboxPath) {
         markTeamSidebarNavigation();
-        router.push('/');
+        router.push(defaultInboxPath);
         setIsDropdownOpen(false);
         onCloseMobile?.();
       }
@@ -236,6 +240,17 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
                         <LeadLabelBadges labelIds={lead.labels} catalog={labels} maxVisible={2} className="mt-1" />
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
+                        {resolveConvInboxMode(lead) === 'operation' && canAccessRoute(user?.role, '/') && (
+                          <span
+                            className="text-[9px] font-semibold px-1.5 py-0.5 rounded"
+                            style={{
+                              background: 'var(--bg-selected)',
+                              color: '#0066FF',
+                            }}
+                          >
+                            Ops
+                          </span>
+                        )}
                         {isConversationArchived(lead) ? (
                           <span
                             className="text-[9px] font-semibold px-1.5 py-0.5 rounded"
@@ -269,19 +284,23 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
                       </div>
                     </button>
                   ))}
-                  {pathname !== '/' && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        router.push('/');
-                        setIsDropdownOpen(false);
-                        onCloseMobile?.();
-                      }}
-                      className="w-full text-center py-1.5 text-[11px] font-medium text-[#0066FF] hover:underline bg-[var(--bg-panel)]"
-                    >
-                      View all in Inbox →
-                    </button>
-                  )}
+                  {(() => {
+                    const fallbackInboxPath = isOperationRole(user?.role) ? '/operation-inbox' : '/';
+                    if (pathname === fallbackInboxPath) return null;
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          router.push(fallbackInboxPath);
+                          setIsDropdownOpen(false);
+                          onCloseMobile?.();
+                        }}
+                        className="w-full text-center py-1.5 text-[11px] font-medium text-[#0066FF] hover:underline bg-[var(--bg-panel)]"
+                      >
+                        View all in {fallbackInboxPath === '/operation-inbox' ? 'Operation Inbox' : 'Inbox'} →
+                      </button>
+                    );
+                  })()}
                 </div>
               ) : (
                 <div className="p-3 text-center text-[11px]" style={{ color: 'var(--text-secondary)' }}>
@@ -302,6 +321,17 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
               badge={badgeCounts.inbox > 0 ? String(badgeCounts.inbox) : undefined}
               badgeColor="#0066FF"
               active={pathname === '/'}
+              onClick={onCloseMobile}
+            />
+          )}
+          {canAccessRoute(user?.role, '/operation-inbox') && (
+            <NavItem
+              href="/operation-inbox"
+              icon={<MessageSquare className="w-[17px] h-[17px]" />}
+              label="Operation Inbox"
+              badge={badgeCounts.operationInbox > 0 ? String(badgeCounts.operationInbox) : undefined}
+              badgeColor="#0066FF"
+              active={pathname === '/operation-inbox'}
               onClick={onCloseMobile}
             />
           )}

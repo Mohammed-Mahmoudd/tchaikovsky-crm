@@ -124,6 +124,14 @@ describe("resolveConversationLeadNames", () => {
       profileName: undefined,
       leadName: undefined,
     });
+
+    const opUnedited = resolveConversationLeadNames({
+      channel: "WA",
+      name: "Yusuf Parent",
+      senderId: "op_201001234567",
+      source: "direct",
+    });
+    assert.equal(opUnedited.name, "+201001234567");
   });
 });
 

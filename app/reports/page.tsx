@@ -198,7 +198,7 @@ function getDisplayName(c: Conversation): string {
 }
 
 export default function ReportsPage() {
-  const { conversations, loading, openChat } = useCRM();
+  const { admissionsConversations: conversations, loading, openChat } = useCRM();
   const [activeModal, setActiveModal] = useState<BreakdownModalType>(null);
 
   // Filter state: 'all' | 'day' | 'week'

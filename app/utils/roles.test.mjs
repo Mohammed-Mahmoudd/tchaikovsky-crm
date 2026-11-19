@@ -2,17 +2,21 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   ROLE_OPTIONS,
+  canAccessInbox,
   canAccessRoute,
   canManageTeamRole,
   formatRoleLabel,
   getDefaultRouteForRole,
   getRoleDisplayName,
   isAdmissionRole,
+  isAssignableForInbox,
   isAssignableRole,
   isDirectorOrChairmanRole,
+  isOperationRole,
   isReadOnlyRole,
   normalizeRole,
   organizeTeamMembersByRole,
+  reconcileMemberPatchResponse,
 } from "./roles.ts";
 
 describe("CRM roles & permissions", () => {
@@ -95,9 +99,99 @@ describe("CRM roles & permissions", () => {
     assert.equal(canAccessRoute("manager", "/claude-leads"), true);
     assert.equal(canAccessRoute("owner", "/claude-leads"), true);
 
-    for (const role of ["marketing", "admission_advanced", "admission_officer", "enrollment_director", "finance"]) {
+    for (const role of ["marketing", "admission_advanced", "admission_officer", "enrollment_director", "finance", "operation"]) {
       assert.equal(canAccessRoute(role, "/claude-leads"), false, `${role} should not access /claude-leads`);
     }
+  });
+
+  it("isolates Operation role to /operation-inbox, /profile, and /settings while letting Chairman access both inboxes", () => {
+    assert.equal(normalizeRole("Operation"), "operation");
+    assert.equal(getRoleDisplayName("operation"), "Operation");
+    assert.equal(formatRoleLabel("Operations"), "Operation");
+    assert.equal(isOperationRole("operation"), true);
+    assert.equal(isOperationRole("chairman"), false);
+    assert.equal(getDefaultRouteForRole("operation"), "/operation-inbox");
+
+    assert.equal(canAccessRoute("operation", "/operation-inbox"), true);
+    assert.equal(canAccessRoute("operation", "/profile"), true);
+    assert.equal(canAccessRoute("operation", "/settings"), true);
+    for (const forbidden of ["/", "/leads", "/pipeline", "/auditions", "/follow-ups", "/reports", "/team-performance", "/claude-leads"]) {
+      assert.equal(canAccessRoute("operation", forbidden), false, `operation must not access ${forbidden}`);
+    }
+
+    for (const role of ["admission_officer", "admission_advanced", "marketing", "finance", "enrollment_director"]) {
+      assert.equal(canAccessRoute(role, "/operation-inbox"), false, `${role} must not access /operation-inbox`);
+    }
+    assert.equal(canAccessRoute("chairman", "/operation-inbox"), true);
+    assert.equal(canAccessRoute("chairman", "/"), true);
+
+    assert.equal(canAccessInbox("operation", "operation"), true);
+    assert.equal(canAccessInbox("operation", "admissions"), false);
+    assert.equal(canAccessInbox("chairman", "operation"), true);
+    assert.equal(canAccessInbox("chairman", "admissions"), true);
+    assert.equal(canAccessInbox("admission_officer", "operation"), false);
+
+    assert.equal(isAssignableForInbox("operation", "operation"), true);
+    assert.equal(isAssignableForInbox("chairman", "operation"), true);
+    assert.equal(isAssignableForInbox("operation", "admissions"), false);
+    assert.equal(isAssignableForInbox("admission_officer", "operation"), false);
+
+    const withOpGroups = organizeTeamMembersByRole([
+      { id: "1", name: "Sara", email: "s@school.com", role: "operation", active: true },
+      { id: "2", name: "Adham", email: "a@school.com", role: "chairman", active: true },
+    ]);
+    assert.deepEqual(
+      withOpGroups.map((g) => g.key),
+      ["chairman", "operation"]
+    );
+  });
+
+  it("reconciles team-member PATCH responses and detects silent server role rejections", () => {
+    const prev = {
+      id: "u1",
+      name: "Sara",
+      email: "s@school.com",
+      role: "admission_officer",
+      active: true,
+    };
+
+    const okResult = reconcileMemberPatchResponse({
+      previousMember: prev,
+      requestedRole: "operation",
+      resOk: true,
+      payload: {
+        success: true,
+        user: { id: "u1", name: "Sara", email: "s@school.com", role: "operation", active: true },
+      },
+    });
+    assert.equal(okResult.ok, true);
+    assert.equal(okResult.member.role, "operation");
+
+    // Server returned success: true but kept old role (e.g. stale backend)
+    const staleBackendResult = reconcileMemberPatchResponse({
+      previousMember: prev,
+      requestedRole: "operation",
+      resOk: true,
+      payload: {
+        success: true,
+        user: { id: "u1", name: "Sara", email: "s@school.com", role: "admission_officer", active: true },
+      },
+    });
+    assert.equal(staleBackendResult.ok, false);
+    assert.equal(staleBackendResult.member.role, "admission_officer");
+    if (!staleBackendResult.ok) {
+      assert.match(staleBackendResult.error, /Operation/);
+    }
+
+    // HTTP error reverts to previousMember
+    const errorResult = reconcileMemberPatchResponse({
+      previousMember: prev,
+      requestedRole: "operation",
+      resOk: false,
+      payload: { success: false, error: "Unsupported role" },
+    });
+    assert.equal(errorResult.ok, false);
+    assert.equal(errorResult.member.role, "admission_officer");
   });
 });
 

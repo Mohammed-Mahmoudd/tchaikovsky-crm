@@ -4,7 +4,16 @@ import React from "react";
 import Link from "next/link";
 import { ExternalLink, CheckCircle2, Calendar, Trash2, X, MessageSquare } from "lucide-react";
 import { useCRM, Conversation } from "../context/CRMContext";
-import { useAuth, canAccessRoute, isDirectorOrChairmanRole, isAdmissionRole } from "./AuthProvider";
+import {
+  useAuth,
+  canAccessRoute,
+  isDirectorOrChairmanRole,
+  isAdmissionRole,
+  isOperationRole,
+} from "./AuthProvider";
+import { resolveConvInboxMode } from "../utils/inboxFilters";
+import { useBranches } from "../lib/branches";
+import { BranchSelect } from "./BranchSelect";
 import EditableLeadName from "./EditableLeadName";
 import LeadLabelsSection from "./LeadLabelsSection";
 import LeadClaudeToggleSection from "./LeadClaudeToggleSection";
@@ -71,7 +80,11 @@ export function ConversationDetailsSidebar({
   const isAssignedToMe = isAssigned && !!userClean && userClean === agentClean;
   const isChairman = isDirectorOrChairmanRole(user?.role);
   const isAdmission = isAdmissionRole(user?.role);
+  const isOperation = isOperationRole(user?.role);
+  const isOperationConv = resolveConvInboxMode(conversation) === "operation";
+  const canHandleAssignment = isOperationConv ? isOperation || isChairman : isAdmission || isChairman;
   const canViewTeamActivity = isChairman || canAccessRoute(user?.role, "/team-performance");
+  const { branchGroups } = useBranches();
 
   const isJoiningLater =
     conversation.pipeline === "Joining Later" ||
@@ -243,14 +256,16 @@ export function ConversationDetailsSidebar({
         onUpdateLabels={(nextIds) => patchConversation(conversation.id, { labels: nextIds })}
       />
 
-      <LeadClaudeToggleSection
-        conversationId={conversation.id}
-        claudeEnabled={conversation.claudeEnabled}
-        claudePaused={conversation.claudePaused}
-        claudePausedReason={conversation.claudePausedReason}
-        claudeLastRepliedAt={conversation.claudeLastRepliedAt}
-        claudeLastError={conversation.claudeLastError}
-      />
+      {!isOperationConv && (
+        <LeadClaudeToggleSection
+          conversationId={conversation.id}
+          claudeEnabled={conversation.claudeEnabled}
+          claudePaused={conversation.claudePaused}
+          claudePausedReason={conversation.claudePausedReason}
+          claudeLastRepliedAt={conversation.claudeLastRepliedAt}
+          claudeLastError={conversation.claudeLastError}
+        />
+      )}
 
       {/* Optional Open Conversation button (e.g. In standalone details view) */}
       {showOpenConversationButton && onOpenConversation && (
@@ -286,7 +301,7 @@ export function ConversationDetailsSidebar({
           <span className="text-[12px] font-medium truncate" style={{ color: "var(--text-primary)" }}>
             {conversation.agent || "Unassigned"}
           </span>
-          {!isReadOnly && !isAssigned && (isAdmission || isChairman) && user?.name && (
+          {!isReadOnly && !isAssigned && canHandleAssignment && user?.name && (
             <button
               type="button"
               onClick={() => patchConversation(conversation.id, { agent: user.name })}
@@ -295,7 +310,7 @@ export function ConversationDetailsSidebar({
               Assign to me →
             </button>
           )}
-          {!isReadOnly && isAssignedToMe && isAdmission && (
+          {!isReadOnly && isAssignedToMe && canHandleAssignment && !isChairman && (
             <button
               type="button"
               onClick={() => patchConversation(conversation.id, { agent: "Unassigned" })}
@@ -305,7 +320,7 @@ export function ConversationDetailsSidebar({
               Unassign
             </button>
           )}
-          {isAssigned && canViewTeamActivity && (
+          {!isOperationConv && isAssigned && canViewTeamActivity && (
             <Link
               href={`/team-performance?agent=${encodeURIComponent(conversation.agent)}`}
               className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold rounded text-[#0066FF] bg-[#0066FF]/10 hover:bg-[#0066FF]/20 transition-colors shrink-0 cursor-pointer"
@@ -318,6 +333,52 @@ export function ConversationDetailsSidebar({
         </div>
       </div>
 
+      {isOperationConv && (
+        <>
+          <div className="mb-5">
+            <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">
+              Phone
+            </h3>
+            <div
+              className="rounded-[6px] p-2.5 text-[12px] font-mono font-medium truncate"
+              style={{
+                background: "var(--bg-input)",
+                border: "1px solid var(--border-input)",
+                color: "var(--text-primary)",
+              }}
+            >
+              {conversation.phone || conversation.id}
+            </div>
+          </div>
+
+          <div className="mb-5">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase">
+                Branch
+              </h3>
+              {!isReadOnly && conversation.branch && (
+                <button
+                  type="button"
+                  onClick={() => patchConversation(conversation.id, { branch: "" })}
+                  className="text-[10px] font-medium hover:underline cursor-pointer"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <BranchSelect
+              value={conversation.branch || ""}
+              onChange={(val) => patchConversation(conversation.id, { branch: val })}
+              branchGroups={branchGroups}
+              disabled={isReadOnly}
+            />
+          </div>
+        </>
+      )}
+
+      {!isOperationConv && (
+        <>
       {/* CASH IN */}
       <LeadCashInSection
         conversationId={conversation.id}
@@ -780,6 +841,8 @@ export function ConversationDetailsSidebar({
           />
         </div>
       </div>
+        </>
+      )}
 
       {/* NOTES */}
       <div>

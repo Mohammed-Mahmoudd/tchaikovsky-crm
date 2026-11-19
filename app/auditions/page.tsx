@@ -949,7 +949,7 @@ function AgentFilterPopover({
 const subscribeNoop = () => () => {};
 
 function AuditionsPageInner() {
-  const { conversations, patchConversation, openChat, assignableAgents } = useCRM();
+  const { admissionsConversations: conversations, patchConversation, openChat, assignableAgents } = useCRM();
   const { isReadOnly, user } = useAuth();
   const { branchGroups, legacyBranchGroups } = useBranches();
   const router = useRouter();

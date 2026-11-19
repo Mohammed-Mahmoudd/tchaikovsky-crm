@@ -950,7 +950,7 @@ const AddManualLeadModal = memo(function AddManualLeadModal({
 
 export default function LeadsPage() {
   const {
-    conversations,
+    admissionsConversations: conversations,
     labels,
     loading,
     openChat,

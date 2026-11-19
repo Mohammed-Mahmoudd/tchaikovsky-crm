@@ -4,7 +4,8 @@ export type CanonicalRole =
   | "admission_officer"
   | "admission_advanced"
   | "finance"
-  | "marketing";
+  | "marketing"
+  | "operation";
 
 export type Role =
   | CanonicalRole
@@ -12,6 +13,8 @@ export type Role =
   | "manager"
   | "agent"
   | "analyst";
+
+export type InboxScope = "admissions" | "operation";
 
 export interface RoleOption {
   value: CanonicalRole;
@@ -22,6 +25,7 @@ export interface RoleOption {
 export const ROLE_OPTIONS: ReadonlyArray<RoleOption> = [
   { value: "admission_officer", label: "Admission Officer" },
   { value: "admission_advanced", label: "Admission (Advanced)" },
+  { value: "operation", label: "Operation" },
   { value: "enrollment_director", label: "Enrollment Director" },
   { value: "finance", label: "Finance" },
   { value: "marketing", label: "Marketing" },
@@ -33,6 +37,7 @@ const ROLE_DISPLAY_NAMES: Record<CanonicalRole, string> = {
   enrollment_director: "Enrollment Director",
   admission_officer: "Admission Officer",
   admission_advanced: "Admission (Advanced)",
+  operation: "Operation",
   finance: "Finance",
   marketing: "Marketing",
 };
@@ -45,6 +50,9 @@ export function normalizeRole(role?: string): CanonicalRole {
   if (r === "enrollment_director") return "enrollment_director";
   if (r === "admission_officer" || r === "agent") return "admission_officer";
   if (r === "admission_advanced" || r === "admission (advanced)") return "admission_advanced";
+  if (r === "operation" || r === "operations" || r === "operation team" || r === "operation_team" || r === "ops") {
+    return "operation";
+  }
   if (r === "finance" || r === "analyst") return "finance";
   if (r === "marketing") return "marketing";
   return "admission_officer";
@@ -63,6 +71,9 @@ export function formatRoleLabel(role?: string): string {
   if (r === "enrollment_director") return "Enrollment Director";
   if (r === "admission_officer" || r === "agent") return "Admission Officer";
   if (r === "admission_advanced" || r === "admission (advanced)") return "Admission (Advanced)";
+  if (r === "operation" || r === "operations" || r === "operation team" || r === "operation_team" || r === "ops") {
+    return "Operation";
+  }
   if (r === "finance" || r === "analyst") return "Finance";
   if (r === "marketing") return "Marketing";
   return role.replace(/_/g, " ");
@@ -92,9 +103,38 @@ export function isAdmissionRole(role?: string): boolean {
   return norm === "admission_officer" || norm === "admission_advanced";
 }
 
-/** Returns true if users with this role should appear in lead-assignment dropdowns. */
+/** Returns true if users with this role belong to the dedicated Operations team. */
+export function isOperationRole(role?: string): boolean {
+  if (!role) return false;
+  return normalizeRole(role) === "operation";
+}
+
+/** Returns true if users with this role can view the specified inbox (`admissions` vs `operation`). */
+export function canAccessInbox(role?: string, inbox: InboxScope = "admissions"): boolean {
+  const norm = normalizeRole(role);
+  if (inbox === "operation") {
+    return norm === "chairman" || norm === "operation";
+  }
+  return (
+    norm === "chairman" ||
+    norm === "admission_officer" ||
+    norm === "admission_advanced" ||
+    norm === "marketing"
+  );
+}
+
+/** Returns true if users with this role should appear in assignment dropdowns for Admissions. */
 export function isAssignableRole(role?: string): boolean {
   return isDirectorOrChairmanRole(role) || isAdmissionRole(role);
+}
+
+/** Returns true if users with this role can be assigned inside the given inbox. */
+export function isAssignableForInbox(role?: string, inbox: InboxScope = "admissions"): boolean {
+  if (inbox === "operation") {
+    const norm = normalizeRole(role);
+    return Boolean(role) && (norm === "chairman" || norm === "operation");
+  }
+  return isAssignableRole(role);
 }
 
 /** Enforces route-level RBAC for sidebar navigation and page guards. */
@@ -102,6 +142,14 @@ export function canAccessRoute(role: string | undefined, pathname: string): bool
   if (pathname === "/login") return true;
   if (pathname === "/profile") return true;
   const norm = normalizeRole(role);
+
+  if (pathname === "/operation-inbox" || pathname.startsWith("/operation-inbox/")) {
+    return norm === "chairman" || norm === "operation";
+  }
+
+  if (norm === "operation") {
+    return pathname === "/settings";
+  }
 
   if (pathname === "/claude-leads" || pathname.startsWith("/claude-leads/")) {
     return norm === "chairman";
@@ -134,6 +182,8 @@ export function canAccessRoute(role: string | undefined, pathname: string): bool
 export function getDefaultRouteForRole(role?: string): string {
   const norm = normalizeRole(role);
   switch (norm) {
+    case "operation":
+      return "/operation-inbox";
     case "enrollment_director":
       return "/auditions";
     case "finance":
@@ -147,7 +197,7 @@ export function getDefaultRouteForRole(role?: string): string {
   }
 }
 
-export type SettingsTeamGroupKey = "chairman" | "admissions" | "other";
+export type SettingsTeamGroupKey = "chairman" | "admissions" | "operation" | "other";
 
 export interface SettingsTeamGroup<T> {
   key: SettingsTeamGroupKey;
@@ -166,18 +216,20 @@ const SETTINGS_ROLE_SORT_RANK: Record<CanonicalRole, number> = {
   chairman: 0,
   admission_advanced: 1,
   admission_officer: 2,
-  enrollment_director: 3,
-  finance: 4,
-  marketing: 5,
+  operation: 3,
+  enrollment_director: 4,
+  finance: 5,
+  marketing: 6,
 };
 
 const SETTINGS_GROUP_META: ReadonlyArray<{ key: SettingsTeamGroupKey; label: string }> = [
   { key: "chairman", label: "Chairman" },
   { key: "admissions", label: "Admissions" },
+  { key: "operation", label: "Operation" },
   { key: "other", label: "Other Roles" },
 ];
 
-/** Compares two team members by active state (active first), role hierarchy (Chairman, Admissions, other roles), and name. */
+/** Compares two team members by active state (active first), role hierarchy, and name. */
 export function compareTeamMembersByRole(a: RoleSortableMember, b: RoleSortableMember): number {
   const aActive = a.active !== false;
   const bActive = b.active !== false;
@@ -197,13 +249,14 @@ export function compareTeamMembersByRole(a: RoleSortableMember, b: RoleSortableM
   });
 }
 
-/** Groups Settings team members into Chairman, Admissions, and Other Roles with deactivated accounts at the end of their own role group. */
+/** Groups Settings team members into Chairman, Admissions, Operation, and Other Roles with deactivated accounts at the end of their own group. */
 export function organizeTeamMembersByRole<T extends RoleSortableMember>(
   members: ReadonlyArray<T>
 ): SettingsTeamGroup<T>[] {
   const buckets: Record<SettingsTeamGroupKey, T[]> = {
     chairman: [],
     admissions: [],
+    operation: [],
     other: [],
   };
 
@@ -213,6 +266,8 @@ export function organizeTeamMembersByRole<T extends RoleSortableMember>(
       buckets.chairman.push(member);
     } else if (norm === "admission_advanced" || norm === "admission_officer") {
       buckets.admissions.push(member);
+    } else if (norm === "operation") {
+      buckets.operation.push(member);
     } else {
       buckets.other.push(member);
     }
@@ -223,5 +278,75 @@ export function organizeTeamMembersByRole<T extends RoleSortableMember>(
     label,
     members: buckets[key],
   }));
+}
+
+export interface PatchableTeamMember {
+  id: string;
+  name: string;
+  email: string;
+  role: Role;
+  avatar?: string;
+  active: boolean;
+}
+
+export interface MemberPatchResponsePayload {
+  success?: boolean;
+  error?: string;
+  user?: {
+    id?: string;
+    name?: string;
+    email?: string;
+    role?: string;
+    avatar?: string;
+    active?: boolean;
+  };
+}
+
+export type ReconcileMemberPatchResult<T extends PatchableTeamMember> =
+  | { ok: true; member: T }
+  | { ok: false; member: T; error: string };
+
+/**
+ * Reconciles a team-member PATCH response against the requested changes so
+ * silent backend rejections or unrecognized roles never leave stale UI state.
+ */
+export function reconcileMemberPatchResponse<T extends PatchableTeamMember>({
+  previousMember,
+  requestedRole,
+  resOk,
+  payload,
+}: {
+  previousMember: T;
+  requestedRole?: Role;
+  resOk: boolean;
+  payload: MemberPatchResponsePayload | null | undefined;
+}): ReconcileMemberPatchResult<T> {
+  if (!resOk || !payload?.success || !payload.user) {
+    return {
+      ok: false,
+      member: previousMember,
+      error: payload?.error || "Failed to update member.",
+    };
+  }
+
+  const persistedRole = normalizeRole(payload.user.role || previousMember.role);
+  const persistedMember: T = {
+    ...previousMember,
+    name: typeof payload.user.name === "string" ? payload.user.name : previousMember.name,
+    email: typeof payload.user.email === "string" ? payload.user.email : previousMember.email,
+    role: persistedRole,
+    avatar: payload.user.avatar !== undefined ? payload.user.avatar : previousMember.avatar,
+    active: payload.user.active !== undefined ? Boolean(payload.user.active) : previousMember.active,
+  };
+
+  if (requestedRole !== undefined && persistedRole !== normalizeRole(requestedRole)) {
+    return {
+      ok: false,
+      member: persistedMember,
+      error: `Role did not change to "${getRoleDisplayName(requestedRole)}" (server kept "${getRoleDisplayName(persistedRole)}"). Ensure the latest backend is deployed.`,
+    };
+  }
+
+  return { ok: true, member: persistedMember };
 }
 

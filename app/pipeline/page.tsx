@@ -490,7 +490,7 @@ const Column = React.memo(function Column({
 const subscribeNoop = () => () => {};
 
 function PipelinePageInner() {
-  const { conversations, patchConversation, openChat, setPollPaused, assignableAgents } = useCRM();
+  const { admissionsConversations: conversations, patchConversation, openChat, setPollPaused, assignableAgents } = useCRM();
   const { isReadOnly, user } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();

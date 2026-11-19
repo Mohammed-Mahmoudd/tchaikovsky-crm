@@ -52,7 +52,7 @@ const BULK_BATCH_SIZE = 5;
 export default function ClaudeLeadsAssignmentPage() {
   const { user, authFetch } = useAuth();
   const isChairman = normalizeRole(user?.role) === "chairman";
-  const { conversations, labels, updateConversationClaude } = useCRM();
+  const { admissionsConversations: conversations, labels, updateConversationClaude } = useCRM();
   const { allBranchNames } = useBranches();
   const {
     chatId: drawerChatId,
