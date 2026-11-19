@@ -119,7 +119,7 @@ export default function SettingsPage() {
 
   // Team state
   const [team, setTeam] = useState<TeamMember[]>([]);
-  const [maxSeats, setMaxSeats] = useState(15);
+  const [maxSeats, setMaxSeats] = useState(25);
   const [loadingTeam, setLoadingTeam] = useState(true);
   const [addMode, setAddMode] = useState<"invite" | "password">("invite");
   const [newName, setNewName] = useState("");
