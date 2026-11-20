@@ -514,3 +514,18 @@ export function formatDurationLabel(durationMs?: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+/** Splits Adham replies into 1 or 2 display bubbles when [[SPLIT]] is present. */
+export function splitDisplayReplyChunks(replyText?: string | null): string[] {
+  const clean = String(replyText || "").trim();
+  if (!clean) return [];
+  if (!/\[\[SPLIT\]\]/i.test(clean)) return [clean];
+  const parts = clean
+    .split(/\[\[SPLIT\]\]/i)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (parts.length <= 1) return parts;
+  const first = parts[0];
+  const second = parts.slice(1).join("\n\n").trim();
+  return second ? [first, second] : [first];
+}
+

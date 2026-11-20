@@ -17,6 +17,7 @@ import {
   type ClaudeActivitySummary,
   formatDurationLabel,
   getActivityOutcomeMeta,
+  splitDisplayReplyChunks,
 } from "../utils/claudeAgent";
 import { formatLastMessageTime } from "../utils/time";
 import { ClaudeStatusPill } from "./ClaudeUiPrimitives";
@@ -385,9 +386,22 @@ export function ClaudeActivityPanel({
                         {item.errorMessage || "Turn failed"}
                       </p>
                     ) : item.replyText ? (
-                      <p dir="auto" className="whitespace-pre-wrap break-words" style={{ color: "var(--text-primary)" }}>
-                        {item.replyText}
-                      </p>
+                      <div className="space-y-1.5">
+                        {splitDisplayReplyChunks(item.replyText).map((chunk, chunkIdx) => (
+                          <p
+                            key={`${item._id}-chunk-${chunkIdx}`}
+                            dir="auto"
+                            className="whitespace-pre-wrap break-words rounded-md px-2.5 py-1.5"
+                            style={{
+                              background: "var(--bg-card)",
+                              border: "1px solid var(--border-main)",
+                              color: "var(--text-primary)",
+                            }}
+                          >
+                            {chunk}
+                          </p>
+                        ))}
+                      </div>
                     ) : (
                       <p className="italic" style={{ color: "var(--text-secondary)" }}>
                         No message sent to lead (handled silently in CRM).

@@ -22,6 +22,7 @@ import {
   type ClaudeBranchConfig,
   type ClaudeToolTrace,
   formatToolTraceTitle,
+  splitDisplayReplyChunks,
 } from "../utils/claudeAgent";
 import { ClaudeStatusPill } from "./ClaudeUiPrimitives";
 
@@ -447,7 +448,12 @@ export function ClaudeSandboxPanel({
                       </div>
                       <button
                         type="button"
-                        onClick={() => void handleCopy(m.id, m.text)}
+                        onClick={() =>
+                          void handleCopy(
+                            m.id,
+                            m.silentNoReply ? m.text : splitDisplayReplyChunks(m.text).join("\n\n")
+                          )
+                        }
                         aria-label="Copy reply"
                         className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-medium cursor-pointer hover:bg-[var(--bg-hover)]"
                         style={{ color: "var(--text-secondary)" }}
@@ -530,17 +536,36 @@ export function ClaudeSandboxPanel({
                     )}
 
                     {/* Assistant Response */}
-                    <div
-                      dir="auto"
-                      className="rounded-2xl rounded-tl-sm px-4 py-3 text-[13.5px] leading-relaxed whitespace-pre-wrap"
-                      style={{
-                        background: m.silentNoReply ? "var(--label-amber-bg)" : "var(--bg-chat-incoming)",
-                        color: m.silentNoReply ? "var(--label-amber-text)" : "var(--text-chat-incoming)",
-                        border: `1px solid ${m.silentNoReply ? "var(--label-amber-border)" : "var(--border-main)"}`,
-                      }}
-                    >
-                      {m.text}
-                    </div>
+                    {m.silentNoReply ? (
+                      <div
+                        dir="auto"
+                        className="rounded-2xl rounded-tl-sm px-4 py-3 text-[13.5px] leading-relaxed whitespace-pre-wrap"
+                        style={{
+                          background: "var(--label-amber-bg)",
+                          color: "var(--label-amber-text)",
+                          border: "1px solid var(--label-amber-border)",
+                        }}
+                      >
+                        {m.text}
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5">
+                        {splitDisplayReplyChunks(m.text).map((chunk, chunkIdx) => (
+                          <div
+                            key={`${m.id}-chunk-${chunkIdx}`}
+                            dir="auto"
+                            className="rounded-2xl rounded-tl-sm px-4 py-3 text-[13.5px] leading-relaxed whitespace-pre-wrap"
+                            style={{
+                              background: "var(--bg-chat-incoming)",
+                              color: "var(--text-chat-incoming)",
+                              border: "1px solid var(--border-main)",
+                            }}
+                          >
+                            {chunk}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               )

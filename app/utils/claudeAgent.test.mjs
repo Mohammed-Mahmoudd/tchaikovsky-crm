@@ -14,6 +14,7 @@ import {
   formatToolTraceTitle,
   getActivityOutcomeMeta,
   formatDurationLabel,
+  splitDisplayReplyChunks,
 } from "./claudeAgent.ts";
 
 test("formatClaudePausedReason returns readable labels for pause codes", () => {
@@ -137,5 +138,10 @@ test("filterClaudeLeadCandidates, summarizeClaudeLeadCounts, and mergeAssignedCl
   assert.deepEqual(getActivityOutcomeMeta("error"), { label: "Error", tone: "red" });
   assert.equal(formatDurationLabel(420), "420ms");
   assert.equal(formatDurationLabel(1660), "1.7s");
+  assert.deepEqual(splitDisplayReplyChunks("Hello\n\nWorld"), ["Hello\n\nWorld"]);
+  assert.deepEqual(splitDisplayReplyChunks("Hi!\n[[SPLIT]]\nHow can I help?"), [
+    "Hi!",
+    "How can I help?",
+  ]);
 });
 
