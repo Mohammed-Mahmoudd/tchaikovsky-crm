@@ -16,12 +16,10 @@ import {
   SlidersHorizontal,
   Sparkles,
   UserCheck,
-  Wrench,
 } from "lucide-react";
 import {
   type ClaudeBranchConfig,
   type ClaudeToolTrace,
-  formatToolTraceTitle,
   splitDisplayReplyChunks,
 } from "../utils/claudeAgent";
 import { ClaudeStatusPill } from "./ClaudeUiPrimitives";
@@ -472,69 +470,6 @@ export function ClaudeSandboxPanel({
                       </button>
                     </div>
 
-                    {/* Tool Call Disclosures (Claude / ChatGPT style) */}
-                    {m.toolTraces && m.toolTraces.length > 0 && (
-                      <div className="flex flex-col gap-1.5">
-                        {m.toolTraces.map((trace, i) => (
-                          <details
-                            key={`${m.id}-trace-${i}`}
-                            className="rounded-lg overflow-hidden text-[11px]"
-                            style={{
-                              background: "var(--bg-card)",
-                              border: `1px solid ${trace.isError ? "var(--label-red-border)" : "var(--border-main)"}`,
-                            }}
-                          >
-                            <summary className="px-3 py-2 cursor-pointer flex items-center justify-between gap-2 font-medium select-none hover:bg-[var(--bg-hover)]">
-                              <span className="inline-flex items-center gap-2 min-w-0">
-                                <span
-                                  className="w-1.5 h-1.5 rounded-full shrink-0"
-                                  style={{
-                                    backgroundColor: trace.isError
-                                      ? "var(--label-red-dot)"
-                                      : "var(--label-green-dot)",
-                                  }}
-                                />
-                                <Wrench className="w-3 h-3 shrink-0" style={{ color: "var(--text-secondary)" }} />
-                                <span className="truncate" style={{ color: "var(--text-primary)" }}>
-                                  {formatToolTraceTitle(trace.name)}
-                                </span>
-                              </span>
-                              <span className="text-[10px] font-mono shrink-0" style={{ color: "var(--text-muted)" }}>
-                                {trace.name}
-                              </span>
-                            </summary>
-                            <div
-                              className="px-3 py-2.5 space-y-2 text-[11px] font-mono overflow-x-auto"
-                              style={{
-                                background: "var(--bg-panel)",
-                                borderTop: "1px solid var(--border-main)",
-                                color: "var(--text-secondary)",
-                              }}
-                            >
-                              <div>
-                                <div className="text-[10px] font-sans font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--text-muted)" }}>
-                                  Tool Input
-                                </div>
-                                <pre className="whitespace-pre-wrap break-all">
-                                  {JSON.stringify(trace.input, null, 2)}
-                                </pre>
-                              </div>
-                              <div>
-                                <div className="text-[10px] font-sans font-semibold uppercase tracking-wide mb-1" style={{ color: "var(--text-muted)" }}>
-                                  Mocked Output
-                                </div>
-                                <pre className="whitespace-pre-wrap break-all">
-                                  {typeof trace.output === "string"
-                                    ? trace.output
-                                    : JSON.stringify(trace.output, null, 2)}
-                                </pre>
-                              </div>
-                            </div>
-                          </details>
-                        ))}
-                      </div>
-                    )}
-
                     {/* Assistant Response */}
                     {m.silentNoReply ? (
                       <div
@@ -591,7 +526,7 @@ export function ClaudeSandboxPanel({
                     color: "var(--text-secondary)",
                   }}
                 >
-                  <span>Adham is thinking & checking CRM tools</span>
+                  <span>Adham is typing</span>
                   <span className="inline-flex gap-1" aria-hidden="true">
                     <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: "var(--bg-banner)" }} />
                     <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: "var(--bg-banner)" }} />
