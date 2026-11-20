@@ -204,11 +204,19 @@ export function formatClosedDatesInput(dates?: ReadonlyArray<string>): string {
   return Array.isArray(dates) ? dates.join(", ") : "";
 }
 
-export type ClaudeSubTab = "overview" | "sandbox" | "leads" | "studio";
+export type ClaudeSubTab =
+  | "overview"
+  | "activity"
+  | "skills"
+  | "sandbox"
+  | "leads"
+  | "studio";
 
 /** Resolves the Settings → Claude sub-tab from the current URL hash. */
 export function resolveClaudeSubTabFromHash(hash?: string | null): ClaudeSubTab {
   const clean = String(hash || "").trim().toLowerCase();
+  if (clean === "#claude-activity") return "activity";
+  if (clean === "#claude-skills") return "skills";
   if (clean === "#claude-sandbox") return "sandbox";
   if (clean === "#claude-leads") return "leads";
   if (clean === "#claude-studio") return "studio";
@@ -217,6 +225,8 @@ export function resolveClaudeSubTabFromHash(hash?: string | null): ClaudeSubTab 
 
 /** Returns the canonical URL hash string for a Settings → Claude sub-tab. */
 export function getHashForClaudeSubTab(tab: ClaudeSubTab): string {
+  if (tab === "activity") return "claude-activity";
+  if (tab === "skills") return "claude-skills";
   if (tab === "sandbox") return "claude-sandbox";
   if (tab === "leads") return "claude-leads";
   if (tab === "studio") return "claude-studio";
@@ -423,10 +433,84 @@ const TOOL_DISPLAY_LABELS: Record<string, string> = {
   book_discovery_session: "Booked discovery session (simulated)",
   update_lead_details: "Updated lead CRM details (simulated)",
   escalate_to_human: "Escalated to human admission officer (simulated)",
+  get_skill_guidance: "Loaded trained skill guidance",
 };
 
 /** Formats Managed Agent tool names into friendly disclosure labels in the Sandbox. */
 export function formatToolTraceTitle(name: string): string {
   return TOOL_DISPLAY_LABELS[name] || `Used ${name}`;
+}
+
+export type ClaudeActivityOutcome =
+  | "replied"
+  | "booked"
+  | "updated"
+  | "escalated"
+  | "silent"
+  | "error";
+
+export interface ClaudeActivityItem {
+  _id: string;
+  senderId: string;
+  leadName?: string;
+  channel: string;
+  branch?: string;
+  pipeline?: string;
+  sessionId?: string;
+  incomingText: string;
+  replyText: string;
+  outcome: ClaudeActivityOutcome;
+  skillsUsed?: string[];
+  toolTraces?: ClaudeToolTrace[];
+  errorMessage?: string;
+  durationMs?: number;
+  createdAt: string;
+}
+
+export interface ClaudeActivitySummary {
+  total: number;
+  replied: number;
+  booked: number;
+  updated: number;
+  escalated: number;
+  silent: number;
+  error: number;
+}
+
+export interface ClaudeSkillItem {
+  _id: string;
+  slug: string;
+  title: string;
+  whenToUse: string;
+  instructions: string;
+  examples?: string;
+  enabled: boolean;
+  usageCount: number;
+  lastUsedAt?: string | null;
+  createdBy?: string;
+  updatedBy?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** Maps a live turn outcome to a calm label and theme pill tone. */
+export function getActivityOutcomeMeta(outcome: ClaudeActivityOutcome): {
+  label: string;
+  tone: "green" | "blue" | "amber" | "red" | "slate";
+} {
+  if (outcome === "booked") return { label: "Booked session", tone: "green" };
+  if (outcome === "escalated") return { label: "Escalated", tone: "amber" };
+  if (outcome === "silent") return { label: "Silent handoff", tone: "slate" };
+  if (outcome === "updated") return { label: "Updated CRM", tone: "blue" };
+  if (outcome === "error") return { label: "Error", tone: "red" };
+  return { label: "Replied", tone: "blue" };
+}
+
+/** Formats turn latency in milliseconds into a compact readable string. */
+export function formatDurationLabel(durationMs?: number): string {
+  const ms = Number(durationMs || 0);
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 

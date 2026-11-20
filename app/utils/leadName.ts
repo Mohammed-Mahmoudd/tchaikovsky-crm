@@ -15,6 +15,8 @@ export interface RawConversationLeadFields {
   leadName?: unknown;
   phone?: unknown;
   senderId?: unknown;
+  id?: unknown;
+  isGroup?: boolean | null;
   source?: unknown;
 }
 
@@ -103,6 +105,27 @@ export function resolveConversationLeadNames(
   const channel = typeof raw.channel === "string" ? raw.channel : "";
 
   if (channel === "WA") {
+    const rawSenderStr = String(raw.senderId || raw.id || "").trim().toLowerCase();
+    const isGroup =
+      Boolean(raw.isGroup) ||
+      rawSenderStr.startsWith("op_grp_") ||
+      rawSenderStr.startsWith("grp_") ||
+      rawSenderStr.endsWith("@g.us");
+
+    if (isGroup) {
+      const rawGroupName = typeof raw.name === "string" ? raw.name.trim() : "";
+      const groupName =
+        cleanRealLeadName(rawGroupName) ||
+        realLeadName ||
+        (rawGroupName && rawGroupName !== "WhatsApp Group" ? rawGroupName : "") ||
+        "WhatsApp Group";
+      return {
+        name: groupName,
+        profileName: undefined,
+        leadName: realLeadName,
+      };
+    }
+
     const phoneStr = typeof raw.phone === "string" ? raw.phone.trim() : "";
     const senderDigits = String(raw.senderId || "")
       .replace(/^op_/, "")

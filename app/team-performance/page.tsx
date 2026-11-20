@@ -457,7 +457,7 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
 
   const leadName = getDisplayName(c);
   const leadPhone = c.phone || '';
-  const channel = c.metaChannel ? `${c.channel} · ${c.metaChannel}` : (c.channel || 'WA');
+  const channel = c.isGroup ? 'WA Group' : c.metaChannel ? `${c.channel} · ${c.metaChannel}` : (c.channel || 'WA');
   const branch = c.branch || '';
   const pipeline = c.pipeline || 'New';
   const assignedAgent = (c.agent || 'Unassigned').trim();
@@ -548,7 +548,7 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
     }
   }
 
-  const channelLabel = c.channel === 'WA' ? 'WhatsApp' : c.channel === 'IG' ? 'Instagram' : 'Messenger';
+  const channelLabel = c.isGroup ? 'WhatsApp Group' : c.channel === 'WA' ? 'WhatsApp' : c.channel === 'IG' ? 'Instagram' : 'Messenger';
   if (Array.isArray(c.messages) && c.messages.length > 0) {
     const loggedMsgs = collectLoggedMessageKeys(c.activityLog);
     for (let i = 0; i < c.messages.length; i++) {

@@ -29,6 +29,7 @@ import {
 import {
   computeInboxUnreadBadge,
   filterConversationsByInbox,
+  isGroupConversation,
   resolveConvInboxMode,
 } from "../utils/inboxFilters";
 import {
@@ -120,6 +121,7 @@ export type Conversation = {
   channel: Channel;
   inbox?: InboxScope;
   whatsappAccount?: InboxScope;
+  isGroup?: boolean;
   status: "Open" | "Pending" | "Resolved";
   isArchived?: boolean;
   archivedAt?: string;
@@ -1187,11 +1189,13 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   const normalizeConversationMeta = useCallback((c: any): Omit<Conversation, "messages"> => {
     const resolvedNames = resolveConversationLeadNames(c);
     const resolvedInbox = resolveConvInboxMode(c);
+    const groupConv = isGroupConversation(c);
     return {
       id: c.senderId,
       _id: c._id ? String(c._id) : undefined,
       inbox: resolvedInbox,
       whatsappAccount: resolvedInbox,
+      isGroup: groupConv,
       name: resolvedNames.name,
       profileName: resolvedNames.profileName,
       leadName: resolvedNames.leadName,
@@ -1199,6 +1203,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       metaSenderId: c.metaSenderId || undefined,
       formPhone: c.formPhone || undefined,
       phone: (() => {
+        if (groupConv) return "";
         if (c.phone && /^\+\d{7,15}$/.test(c.phone)) return c.phone;
         if (c.formPhone) {
           const fDigits = String(c.formPhone).replace(/\D/g, "");
@@ -1374,9 +1379,11 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   const recentlyCreatedRef = useRef<Map<string, { conv: Conversation; expiresAt: number }>>(new Map());
   const deletedIdsRef = useRef<Set<string>>(new Set());
   const lastServerRevRef = useRef<number>(0);
+  const fetchConversationsInflightRef = useRef<Promise<void> | null>(null);
+  const fetchConversationsQueuedRef = useRef<boolean>(false);
 
   // ── Slim bulk fetch — metadata only, never touches messages ──
-  const fetchConversations = useCallback(async () => {
+  const runFetchConversations = useCallback(async () => {
     // Fix B: skip this poll cycle if a drag is in progress or we're in the post-drop quiet window
     if (pollPausedRef.current) return;
     try {
@@ -1623,6 +1630,26 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       }
     }
   }, [normalizeConversationMeta, isMetaReviewer, authFetch]);
+
+  // Coalesce overlapping slim fetches so concurrent triggers (e.g. SSE + Sync button) reuse one active request
+  const fetchConversations = useCallback(async () => {
+    if (fetchConversationsInflightRef.current) {
+      fetchConversationsQueuedRef.current = true;
+      return fetchConversationsInflightRef.current;
+    }
+
+    const runLoop = (async () => {
+      do {
+        fetchConversationsQueuedRef.current = false;
+        await runFetchConversations();
+      } while (fetchConversationsQueuedRef.current);
+    })().finally(() => {
+      fetchConversationsInflightRef.current = null;
+    });
+
+    fetchConversationsInflightRef.current = runLoop;
+    return runLoop;
+  }, [runFetchConversations]);
   // NOTE: activeChatId intentionally excluded — we use the ref instead
   // so this callback is stable and the polling interval never restarts on chat selection.
 
@@ -2119,9 +2146,15 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     ...existing,
                     ...(normRemote
                       ? {
+                          isGroup: normRemote.isGroup ?? existing.isGroup,
                           name:
                             (hasActivePendingPatch && activePendingUpdates?.name) ||
-                            normRemote.name ||
+                            (normRemote.isGroup &&
+                            normRemote.name === "WhatsApp Group" &&
+                            existing.name &&
+                            existing.name !== "WhatsApp Group"
+                              ? existing.name
+                              : normRemote.name) ||
                             existing.name,
                           profileName:
                             hasActivePendingPatch &&
@@ -2133,7 +2166,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                             activePendingUpdates?.leadName !== undefined
                               ? activePendingUpdates.leadName
                               : normRemote.leadName ?? existing.leadName,
-                          phone: normRemote.phone || existing.phone,
+                          phone: normRemote.isGroup ? "" : normRemote.phone || existing.phone,
                           formPhone: normRemote.formPhone || existing.formPhone,
                           activityLog:
                             normRemote.activityLog && normRemote.activityLog.length > 0

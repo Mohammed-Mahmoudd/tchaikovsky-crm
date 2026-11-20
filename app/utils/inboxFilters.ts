@@ -17,18 +17,46 @@ export const OPERATION_INBOX_FILTERS = [
   "Unassigned",
   "Open",
   "Resolved",
+  "Groups",
   "DONE",
   "Archived",
 ] as const;
 
-export type InboxFilter = (typeof INBOX_FILTERS)[number];
+export type InboxFilter =
+  | (typeof INBOX_FILTERS)[number]
+  | (typeof OPERATION_INBOX_FILTERS)[number];
 export type InboxMode = "admissions" | "operation";
+
+/** Returns true when a conversation or senderId represents a WhatsApp group (`@g.us` / `op_grp_...` / `grp_...`). */
+export function isGroupConversation(
+  convOrId?: { isGroup?: boolean | null; id?: string | null; senderId?: string | null } | string | null
+): boolean {
+  if (!convOrId) return false;
+  if (typeof convOrId === "string") {
+    const trimmed = convOrId.trim().toLowerCase();
+    return (
+      trimmed.startsWith("op_grp_") ||
+      trimmed.startsWith("grp_") ||
+      trimmed.endsWith("@g.us")
+    );
+  }
+  if (convOrId.isGroup) return true;
+  const rawId = String(convOrId.id || convOrId.senderId || "")
+    .trim()
+    .toLowerCase();
+  return (
+    rawId.startsWith("op_grp_") ||
+    rawId.startsWith("grp_") ||
+    rawId.endsWith("@g.us")
+  );
+}
 
 export interface InboxConversationLike {
   id?: string | null;
   senderId?: string | null;
   inbox?: string | null;
   whatsappAccount?: string | null;
+  isGroup?: boolean | null;
   agent?: string | null;
   status?: string | null;
   channel?: string | null;
@@ -47,6 +75,7 @@ export function resolveConvInboxMode(
   convOrId?: InboxConversationLike | string | null
 ): InboxMode {
   if (!convOrId) return "admissions";
+  if (isGroupConversation(convOrId)) return "operation";
   if (typeof convOrId === "string") {
     return convOrId.trim().startsWith("op_") ? "operation" : "admissions";
   }
@@ -126,6 +155,8 @@ export function matchesInboxFilter(
       return conv.status === "Open";
     case "Resolved":
       return conv.status === "Resolved";
+    case "Groups":
+      return isGroupConversation(conv);
     case "WA":
       return conv.channel === "WA";
     case "IG":
@@ -163,6 +194,20 @@ export function getFilterBucketTotal(counts: InboxBucketCounts, filter: InboxFil
   if (filter === "DONE") return counts.done;
   if (filter === "Archived") return counts.archived;
   return counts.main;
+}
+
+/** Counts non-archived, non-DONE WhatsApp group chats for the Operation Groups filter badge. */
+export function getGroupConversationCount(
+  conversations: ReadonlyArray<InboxConversationLike>
+): number {
+  let groups = 0;
+  for (let i = 0; i < conversations.length; i++) {
+    const conv = conversations[i];
+    if (isConversationInMainInbox(conv) && isGroupConversation(conv)) {
+      groups += 1;
+    }
+  }
+  return groups;
 }
 
 /**

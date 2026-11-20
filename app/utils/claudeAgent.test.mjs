@@ -12,6 +12,8 @@ import {
   filterClaudeLeadCandidates,
   mergeAssignedClaudeLeads,
   formatToolTraceTitle,
+  getActivityOutcomeMeta,
+  formatDurationLabel,
 } from "./claudeAgent.ts";
 
 test("formatClaudePausedReason returns readable labels for pause codes", () => {
@@ -67,10 +69,14 @@ test("slot and closed-date list helpers parse and format cleanly", () => {
 
 test("resolveClaudeSubTabFromHash and getHashForClaudeSubTab round-trip sub-tabs", () => {
   assert.equal(resolveClaudeSubTabFromHash("#claude"), "overview");
+  assert.equal(resolveClaudeSubTabFromHash("#claude-activity"), "activity");
+  assert.equal(resolveClaudeSubTabFromHash("#claude-skills"), "skills");
   assert.equal(resolveClaudeSubTabFromHash("#claude-sandbox"), "sandbox");
   assert.equal(resolveClaudeSubTabFromHash("#claude-leads"), "leads");
   assert.equal(resolveClaudeSubTabFromHash("#claude-studio"), "studio");
   assert.equal(getHashForClaudeSubTab("overview"), "claude");
+  assert.equal(getHashForClaudeSubTab("activity"), "claude-activity");
+  assert.equal(getHashForClaudeSubTab("skills"), "claude-skills");
   assert.equal(getHashForClaudeSubTab("sandbox"), "claude-sandbox");
   assert.equal(getHashForClaudeSubTab("leads"), "claude-leads");
   assert.equal(getHashForClaudeSubTab("studio"), "claude-studio");
@@ -126,5 +132,10 @@ test("filterClaudeLeadCandidates, summarizeClaudeLeadCounts, and mergeAssignedCl
     ["6", "2"]
   );
   assert.equal(formatToolTraceTitle("book_discovery_session"), "Booked discovery session (simulated)");
+  assert.equal(formatToolTraceTitle("get_skill_guidance"), "Loaded trained skill guidance");
+  assert.deepEqual(getActivityOutcomeMeta("booked"), { label: "Booked session", tone: "green" });
+  assert.deepEqual(getActivityOutcomeMeta("error"), { label: "Error", tone: "red" });
+  assert.equal(formatDurationLabel(420), "420ms");
+  assert.equal(formatDurationLabel(1660), "1.7s");
 });
 

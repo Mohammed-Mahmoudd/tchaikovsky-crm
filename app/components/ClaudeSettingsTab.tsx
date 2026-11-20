@@ -3,7 +3,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
+  Activity,
   AlertCircle,
+  BookOpen,
   Bot,
   Check,
   ChevronDown,
@@ -46,6 +48,9 @@ import { buildLabelNameMap, matchLeadSearch } from "../utils/search";
 import { formatLastMessageTime } from "../utils/time";
 import { ClaudeSettingSwitch, ClaudeStatusPill } from "./ClaudeUiPrimitives";
 import { ClaudeSandboxPanel, type SandboxMessage } from "./ClaudeSandboxPanel";
+import { ClaudeActivityPanel } from "./ClaudeActivityPanel";
+import { ClaudeSkillsPanel } from "./ClaudeSkillsPanel";
+import { ClaudePromptEditor } from "./ClaudePromptEditor";
 
 function BranchSlotDraftRow({
   branch,
@@ -330,7 +335,6 @@ export function ClaudeSettingsTab({
   const [agentSystem, setAgentSystem] = useState("");
   const [savingAgent, setSavingAgent] = useState(false);
   const [creatingAgent, setCreatingAgent] = useState(false);
-  const [confirmLoadPlaybook, setConfirmLoadPlaybook] = useState(false);
   const [createFeedback, setCreateFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
   const [agentFeedback, setAgentFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
 
@@ -541,6 +545,22 @@ export function ClaudeSettingsTab({
     }
   };
 
+  const handleSyncToolsOnly = async (): Promise<boolean> => {
+    try {
+      const res = await authFetch("/crm-api/claude/agent", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ syncTools: true }),
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) return false;
+      setStatusData((prev) => (prev ? { ...prev, platformAgent: json.data, platformError: null } : prev));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const handleCreateAgentOnPlatform = async () => {
     if (creatingAgent) return;
     setCreatingAgent(true);
@@ -737,6 +757,8 @@ export function ClaudeSettingsTab({
     badge?: number;
   }> = [
     { id: "overview", label: "Overview & Rules", icon: <ShieldCheck className="w-3.5 h-3.5" /> },
+    { id: "activity", label: "Activity", icon: <Activity className="w-3.5 h-3.5" /> },
+    { id: "skills", label: "Skills", icon: <BookOpen className="w-3.5 h-3.5" /> },
     { id: "sandbox", label: "Test Sandbox", icon: <Sparkles className="w-3.5 h-3.5" /> },
     {
       id: "leads",
@@ -744,7 +766,7 @@ export function ClaudeSettingsTab({
       icon: <Users className="w-3.5 h-3.5" />,
       badge: leadCounts.totalAssigned,
     },
-    { id: "studio", label: "Behavior & Branches", icon: <Layers className="w-3.5 h-3.5" /> },
+    { id: "studio", label: "Prompt & Branches", icon: <Layers className="w-3.5 h-3.5" /> },
   ];
 
   const isSetupComplete = connection.hasApiKey && connection.hasAgentId;
@@ -771,7 +793,7 @@ export function ClaudeSettingsTab({
                 key={item.id}
                 type="button"
                 onClick={() => handleSelectSubTab(item.id)}
-                className="inline-flex items-center gap-1.5 min-h-[38px] px-3.5 rounded-lg text-[12px] font-semibold transition-colors cursor-pointer"
+                className="inline-flex items-center gap-1.5 min-h-[44px] sm:min-h-[38px] px-3.5 rounded-lg text-[12px] font-semibold transition-colors cursor-pointer"
                 style={
                   active
                     ? { background: "var(--bg-banner)", color: "#fff" }
@@ -1245,7 +1267,26 @@ export function ClaudeSettingsTab({
         </div>
       )}
 
-      {/* ── SUB-TAB 2: Claude / ChatGPT-Style Sandbox Playground ─────────────── */}
+      {/* ── SUB-TAB 2: Live Agent Activity Monitor ───────────────────────────── */}
+      {subTab === "activity" && (
+        <ClaudeActivityPanel
+          onOpenLeadChat={(senderId) =>
+            onOpenLeadChat ? onOpenLeadChat(senderId) : openChat(senderId)
+          }
+          onOpenSkillsTab={() => handleSelectSubTab("skills")}
+        />
+      )}
+
+      {/* ── SUB-TAB 3: Modular CRM Skills Trainer ───────────────────────────── */}
+      {subTab === "skills" && (
+        <ClaudeSkillsPanel
+          platformAgent={platformAgent}
+          hasAgentId={connection.hasAgentId}
+          onSyncTools={handleSyncToolsOnly}
+        />
+      )}
+
+      {/* ── SUB-TAB 4: Claude / ChatGPT-Style Sandbox Playground ─────────────── */}
       {subTab === "sandbox" && (
         <ClaudeSandboxPanel
           hasAgentId={connection.hasAgentId}
@@ -1618,59 +1659,16 @@ export function ClaudeSettingsTab({
                 </div>
               )}
 
-              <div>
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
-                  <label htmlFor="claude-system-prompt" className="text-[11px] font-medium" style={{ color: "var(--text-secondary)" }}>
-                    Instructions (Adham Playbook)
-                  </label>
-                  {!confirmLoadPlaybook ? (
-                    <button
-                      type="button"
-                      onClick={() => setConfirmLoadPlaybook(true)}
-                      className="text-[11px] font-medium hover:underline cursor-pointer"
-                      style={{ color: "var(--bg-banner)" }}
-                    >
-                      Reset to default Playbook
-                    </button>
-                  ) : (
-                    <div className="flex items-center gap-2 text-[11px]">
-                      <span style={{ color: "var(--text-secondary)" }}>Replace current text?</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAgentName(playbookDefaults.name);
-                          setAgentSystem(playbookDefaults.system);
-                          setConfirmLoadPlaybook(false);
-                        }}
-                        className="font-semibold cursor-pointer hover:underline"
-                        style={{ color: "var(--bg-banner)" }}
-                      >
-                        Yes, reset
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setConfirmLoadPlaybook(false)}
-                        className="cursor-pointer"
-                        style={{ color: "var(--text-muted)" }}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  )}
-                </div>
-                <textarea
-                  id="claude-system-prompt"
-                  rows={14}
-                  value={agentSystem}
-                  onChange={(e) => setAgentSystem(e.target.value)}
-                  className="w-full p-3 text-[16px] sm:text-[12px] leading-relaxed rounded-lg outline-none font-mono"
-                  style={{
-                    background: "var(--bg-input)",
-                    border: "1px solid var(--border-input)",
-                    color: "var(--text-primary)",
-                  }}
-                />
-              </div>
+              <ClaudePromptEditor
+                value={agentSystem}
+                onChange={setAgentSystem}
+                defaultPrompt={playbookDefaults.system}
+                defaultName={playbookDefaults.name}
+                onResetToDefaults={(name, system) => {
+                  setAgentName(name);
+                  setAgentSystem(system);
+                }}
+              />
 
               {/* Collapsed Developer & Sync Details */}
               <details

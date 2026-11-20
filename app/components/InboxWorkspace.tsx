@@ -28,6 +28,7 @@ import {
   Archive,
   ArchiveRestore,
   RotateCcw,
+  Users,
   Tag,
 } from "lucide-react";
 import { useBranches } from "../lib/branches";
@@ -66,6 +67,7 @@ import {
   matchesInboxFilter,
   getInboxBucketCounts,
   getFilterBucketTotal,
+  getGroupConversationCount,
   buildMarkAsDonePatch,
   buildReopenDonePatch,
   buildArchivePatch,
@@ -189,6 +191,7 @@ const isRealPhone = (p?: string): boolean => {
 
 const extractPhoneFromConversation = (conv?: any | null): string => {
   if (!conv) return "";
+  if (conv.isGroup || /^(?:op_)?grp_/i.test(String(conv.id || conv.senderId || ""))) return "";
   if (isRealPhone(conv.phone)) return conv.phone;
   if (conv.formPhone && isRealPhone(conv.formPhone)) return `+${String(conv.formPhone).replace(/\D/g, "")}`;
   if (conv.formAnswers && isRealPhone((conv.formAnswers as any).phone)) {
@@ -415,9 +418,13 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
   }, [inboxToast]);
 
   const bucketCounts = useMemo(() => getInboxBucketCounts(conversations), [conversations]);
+  const groupCount = useMemo(
+    () => (isOperationInbox ? getGroupConversationCount(conversations) : 0),
+    [isOperationInbox, conversations]
+  );
   const activeBucketTotal = useMemo(
-    () => getFilterBucketTotal(bucketCounts, activeFilter),
-    [bucketCounts, activeFilter]
+    () => (activeFilter === "Groups" ? groupCount : getFilterBucketTotal(bucketCounts, activeFilter)),
+    [bucketCounts, activeFilter, groupCount]
   );
 
   const labelMap = useMemo(() => new Map(labels.map((l) => [l.id, l])), [labels]);
@@ -1616,6 +1623,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   ? bucketCounts.done
                   : filter === "Archived"
                   ? bucketCounts.archived
+                  : filter === "Groups"
+                  ? groupCount
                   : null;
               return (
                 <button
@@ -1655,6 +1664,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   <CheckCircle2 className="w-5 h-5 opacity-50" style={{ color: "var(--text-secondary)" }} />
                 ) : activeFilter === "Archived" ? (
                   <Archive className="w-5 h-5 opacity-50" style={{ color: "var(--text-secondary)" }} />
+                ) : activeFilter === "Groups" ? (
+                  <Users className="w-5 h-5 opacity-50" style={{ color: "var(--text-secondary)" }} />
                 ) : (
                   <Search className="w-5 h-5 opacity-40" style={{ color: "var(--text-secondary)" }} />
                 )}
@@ -1664,6 +1675,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   ? isOperationInbox
                     ? "No conversations found"
                     : "No leads found"
+                  : activeFilter === "Groups"
+                  ? "No WhatsApp groups"
                   : activeFilter === "DONE"
                   ? "No done conversations"
                   : activeFilter === "Archived"
@@ -1681,6 +1694,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   ? `No conversations in ${activeFilter} with ${labelFilterDisplayText}`
                   : isDateFiltered
                   ? `No conversations in ${activeFilter} for ${dateFilterDisplayLabel}`
+                  : activeFilter === "Groups"
+                  ? "WhatsApp groups connected to Operation WhatsApp appear here."
                   : activeFilter === "DONE"
                   ? "Conversations you mark as done appear here and leave the main list."
                   : activeFilter === "Archived"
@@ -1763,7 +1778,12 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
             filteredConversations.map((conv) => {
               const isActive = conv.id === activeChatId;
               const timeStr = formatLastMessageTime(conv.lastMessageAt);
-              const showLeadTimer = Boolean(timeStr) && isLastMessageFromLead(conv);
+              const hasGroupActivity = Boolean(
+                (conv.lastMessageText && conv.lastMessageText.trim()) ||
+                Number(conv.unreadCount) > 0 ||
+                (Array.isArray(conv.messages) && conv.messages.length > 0)
+              );
+              const showLeadTimer = Boolean(timeStr) && (!conv.isGroup || hasGroupActivity) && isLastMessageFromLead(conv);
               const convDone = isConversationDone(conv);
               const convArchived = isConversationArchived(conv);
               return (
@@ -1777,11 +1797,30 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   }}
                 >
                   <div className="min-w-0 pr-2 flex-1">
-                    <h3 className="text-[13px] font-semibold leading-tight mb-0.5 truncate" style={{ color: "var(--text-primary)" }}>
-                      {conv.name}
+                    <h3 className="text-[13px] font-semibold leading-tight mb-0.5 truncate flex items-center gap-1" style={{ color: "var(--text-primary)" }}>
+                      {conv.isGroup && (
+                        <svg
+                          className="w-3.5 h-3.5 shrink-0 opacity-75"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-label="WhatsApp Group"
+                        >
+                          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                          <circle cx="9" cy="7" r="4" />
+                          <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+                          <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                        </svg>
+                      )}
+                      <span className="truncate">{conv.name}</span>
                     </h3>
                     <p className="text-[11px] truncate" style={{ color: isActive ? "#0066FF" : "var(--text-secondary)" }}>
-                      {conv.leadName && conv.leadName !== conv.name
+                      {conv.isGroup
+                        ? `Group · ${conv.agent}`
+                        : conv.leadName && conv.leadName !== conv.name
                         ? `${conv.leadName} · ${conv.agent}`
                         : conv.phone && isRealPhone(conv.phone) && conv.phone !== conv.name
                         ? `${conv.phone} · ${conv.agent}`
@@ -1841,7 +1880,11 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                           color: isActive ? "#0066FF" : "var(--text-secondary)",
                         }}
                       >
-                        {conv.metaChannel ? `${conv.channel} · ${conv.metaChannel}` : conv.channel}
+                        {conv.isGroup
+                          ? "WA Group"
+                          : conv.metaChannel
+                          ? `${conv.channel} · ${conv.metaChannel}`
+                          : conv.channel}
                       </span>
                     </div>
                     <div className="flex items-center gap-1.5 mt-auto">
@@ -1956,16 +1999,37 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   <ArrowLeft className="w-5 h-5" />
                 </button>
                 <div className="min-w-0">
-                  <h2 className="text-[15px] font-bold truncate" style={{ color: "var(--text-primary)" }}>
-                    {activeConv.name}
-                    {activeConv.leadName && activeConv.leadName !== activeConv.name
-                      ? ` · ${activeConv.leadName}`
-                      : ""}
+                  <h2 className="text-[15px] font-bold truncate flex items-center gap-1.5" style={{ color: "var(--text-primary)" }}>
+                    {activeConv.isGroup && (
+                      <svg
+                        className="w-4 h-4 shrink-0 text-[#0066FF]"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-label="WhatsApp Group"
+                      >
+                        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                        <circle cx="9" cy="7" r="4" />
+                        <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+                        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                      </svg>
+                    )}
+                    <span className="truncate">
+                      {activeConv.name}
+                      {!activeConv.isGroup && activeConv.leadName && activeConv.leadName !== activeConv.name
+                        ? ` · ${activeConv.leadName}`
+                        : ""}
+                    </span>
                   </h2>
                   <div className="flex items-center text-[11px] mt-0.5 min-w-0" style={{ color: "var(--text-secondary)" }}>
                     <span className="truncate">
                       {activeConv.channel === "WA"
-                        ? activeConv.metaChannel === "FB"
+                        ? activeConv.isGroup
+                          ? "WhatsApp Group"
+                          : activeConv.metaChannel === "FB"
                           ? "WhatsApp · Facebook Form"
                           : activeConv.metaChannel === "IG"
                           ? "WhatsApp · Instagram Form"
@@ -1974,7 +2038,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                         ? "Instagram"
                         : "Messenger"}
                     </span>
-                    {isRealPhone(activeConv.phone) && activeConv.phone !== activeConv.name && (
+                    {!activeConv.isGroup && isRealPhone(activeConv.phone) && activeConv.phone !== activeConv.name && (
                       <>
                         <span className="mx-1.5 shrink-0">•</span>
                         <span className="truncate">{activeConv.phone}</span>
@@ -2172,7 +2236,9 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                         : activeConv.name}
                     </p>
                     <p className="text-[12px] leading-relaxed" style={{ color: "var(--text-secondary)" }}>
-                      No messages in this conversation yet. Send a WhatsApp message below to start chatting with this lead.
+                      {activeConv.isGroup
+                        ? "No messages synced in this group yet. Send a message below, or new group messages will appear here live."
+                        : "No messages in this conversation yet. Send a WhatsApp message below to start chatting with this lead."}
                     </p>
                     {activeConv.notes && (
                       <div
@@ -2300,6 +2366,14 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                       } ${groupedReactions.length > 0 ? "mb-2" : ""}`}
                       title={canReplyToThisMessage ? "Double-click row to reply" : undefined}
                     >
+                      {activeConv.isGroup && msg.isIncoming && (
+                        <span
+                          className="text-[11px] font-semibold mb-1 px-1.5"
+                          style={{ color: "#0066FF" }}
+                        >
+                          {msg.senderName || "Group Member"}
+                        </span>
+                      )}
                       {!msg.isIncoming && msg.senderName && (
                         <span
                           className="text-[11px] font-medium mb-1 px-1.5"
@@ -2410,10 +2484,13 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                                 msg.replyTo.senderName !== "You" &&
                                 msg.replyTo.senderName !== "Staff";
 
+                            const incomingFallbackAuthor = activeConv.isGroup
+                              ? "Group Member"
+                              : activeConv.leadName || activeConv.profileName || activeConv.name || "Customer";
                             const authorName = isQuotingIncoming
                               ? (referencedMsg
-                                  ? referencedMsg.senderName || activeConv.leadName || activeConv.profileName || activeConv.name || "Customer"
-                                  : msg.replyTo.senderName || activeConv.leadName || activeConv.profileName || activeConv.name || "Customer")
+                                  ? referencedMsg.senderName || incomingFallbackAuthor
+                                  : msg.replyTo.senderName || incomingFallbackAuthor)
                               : "You";
                             const quoteText =
                               msg.replyTo.text && msg.replyTo.text !== "Attachment"
@@ -2744,6 +2821,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                                 realDeletedBy ||
                                 (!msg.isIncoming
                                   ? realSenderName || user?.name || "Staff"
+                                  : activeConv.isGroup
+                                  ? realSenderName || "Group Member"
                                   : activeConv.leadName ||
                                     activeConv.profileName ||
                                     activeConv.name ||
@@ -3145,17 +3224,19 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
 
             {isOperationInbox && (
               <>
-                {/* Phone display */}
+                {/* Phone / Chat Type display */}
                 <div className="mb-5">
                   <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">
-                    Phone
+                    {activeConv.isGroup ? "Chat Type" : "Phone"}
                   </h3>
                   <div
                     className="rounded-[6px] p-2.5 flex items-center justify-between gap-2"
                     style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)" }}
                   >
                     <span className="text-[12px] font-mono font-medium truncate" style={{ color: "var(--text-primary)" }}>
-                      {isRealPhone(activeConv.phone)
+                      {activeConv.isGroup
+                        ? "WhatsApp Group"
+                        : isRealPhone(activeConv.phone)
                         ? activeConv.phone
                         : extractPhoneFromConversation(activeConv) || "Not available"}
                     </span>

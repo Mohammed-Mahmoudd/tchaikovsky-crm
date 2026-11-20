@@ -133,6 +133,36 @@ describe("resolveConversationLeadNames", () => {
     });
     assert.equal(opUnedited.name, "+201001234567");
   });
+
+  it("preserves WhatsApp group subject names instead of showing group JID digits or phone numbers", () => {
+    const groupConv = resolveConversationLeadNames({
+      channel: "WA",
+      isGroup: true,
+      name: "Piano Students & Parents - Riyadh",
+      senderId: "op_grp_120363012345678901",
+      phone: null,
+      source: "direct",
+    });
+
+    assert.equal(groupConv.name, "Piano Students & Parents - Riyadh");
+    assert.equal(groupConv.profileName, undefined);
+
+    const shortIdGroup = resolveConversationLeadNames({
+      channel: "WA",
+      name: "Faculty Coordination",
+      senderId: "op_grp_1234567890",
+      phone: "",
+    });
+    assert.equal(shortIdGroup.name, "Faculty Coordination");
+
+    const unnamedGroup = resolveConversationLeadNames({
+      channel: "WA",
+      isGroup: true,
+      name: "",
+      senderId: "op_grp_120363999888777666",
+    });
+    assert.equal(unnamedGroup.name, "WhatsApp Group");
+  });
 });
 
 describe("getEditableLeadDisplayName", () => {

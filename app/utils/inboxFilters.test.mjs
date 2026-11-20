@@ -10,10 +10,12 @@ import {
   computeInboxUnreadBadge,
   filterConversationsByInbox,
   getFilterBucketTotal,
+  getGroupConversationCount,
   getInboxBucketCounts,
   isConversationArchived,
   isConversationDone,
   isConversationInMainInbox,
+  isGroupConversation,
   matchesInboxFilter,
   resolveConvInboxMode,
 } from "./inboxFilters.ts";
@@ -165,6 +167,7 @@ describe("inboxFilters", () => {
       "Unassigned",
       "Open",
       "Resolved",
+      "Groups",
       "DONE",
       "Archived",
     ]);
@@ -183,6 +186,51 @@ describe("inboxFilters", () => {
     assert.equal(op.length, 1);
     assert.equal(computeInboxUnreadBadge(adm), 2);
     assert.equal(computeInboxUnreadBadge(op), 4);
+  });
+
+  it("routes WhatsApp groups exclusively into operation inbox and excludes them from admissions", () => {
+    const groupConv = {
+      id: "op_grp_120363012345678901",
+      channel: "WA",
+      isGroup: true,
+      unreadCount: 3,
+      isDone: false,
+      isArchived: false,
+    };
+    const admLead = {
+      id: "201001234567",
+      channel: "WA",
+      unreadCount: 1,
+      isDone: false,
+      isArchived: false,
+    };
+
+    assert.equal(isGroupConversation(groupConv), true);
+    assert.equal(isGroupConversation(admLead), false);
+    assert.equal(isGroupConversation("120363012345678901@g.us"), true);
+    assert.equal(resolveConvInboxMode(groupConv), "operation");
+    assert.equal(resolveConvInboxMode({ id: "grp_999", inbox: "admissions", isGroup: true }), "operation");
+
+    const list = [groupConv, admLead];
+    assert.deepEqual(
+      filterConversationsByInbox(list, "admissions").map((c) => c.id),
+      ["201001234567"]
+    );
+    assert.deepEqual(
+      filterConversationsByInbox(list, "operation").map((c) => c.id),
+      ["op_grp_120363012345678901"]
+    );
+
+    const opMixed = [
+      { id: "op_grp_120363012345678901", channel: "WA", isGroup: true, isDone: false, isArchived: false },
+      { id: "op_201001234567", channel: "WA", isGroup: false, isDone: false, isArchived: false },
+      { id: "op_grp_999888777", channel: "WA", isGroup: true, isDone: true, isArchived: false },
+    ];
+    assert.deepEqual(
+      opMixed.filter((c) => matchesInboxFilter(c, "Groups", "Omar")).map((c) => c.id),
+      ["op_grp_120363012345678901"]
+    );
+    assert.equal(getGroupConversationCount(opMixed), 1);
   });
 });
 
