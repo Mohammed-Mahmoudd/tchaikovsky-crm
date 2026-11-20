@@ -312,6 +312,12 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
   const [mobileView, setMobileView] = useState<MobileView>("list");
   const [showDetailsPanel, setShowDetailsPanel] = useState(false);
   const [inboxToast, setInboxToast] = useState<InboxToastState | null>(null);
+  const [syncingGroupHistory, setSyncingGroupHistory] = useState(false);
+  const [groupHistoryNotice, setGroupHistoryNotice] = useState<{
+    convId: string;
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
   const { isReadOnly, user, token, authFetch } = useAuth();
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -3242,6 +3248,107 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                     </span>
                   </div>
                 </div>
+
+                {/* Group History On-Demand Sync (WhatsApp Groups in Right Sidebar Only) */}
+                {activeConv.isGroup && (
+                  <div className="mb-5">
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase">
+                        Group History Sync
+                      </h3>
+                      <span
+                        className="text-[10px] font-semibold"
+                        style={{
+                          color:
+                            activeConv.messages.length > 0 ? "#34C759" : "var(--text-secondary)",
+                        }}
+                      >
+                        {activeConv.messages.length > 0 ? "Anchor ready" : "Waiting for 1st msg"}
+                      </span>
+                    </div>
+                    <div
+                      className="rounded-[6px] p-2.5 space-y-2"
+                      style={{
+                        background: "var(--bg-input)",
+                        border: "1px solid var(--border-input)",
+                      }}
+                    >
+                      <p
+                        className="text-[11px] leading-relaxed"
+                        style={{ color: "var(--text-secondary)" }}
+                      >
+                        {activeConv.messages.length > 0
+                          ? "Pull up to 50 earlier messages from the linked Operation phone using the oldest message in this group."
+                          : "WhatsApp requires at least 1 message in this group to anchor earlier history. Once 1 message is sent or received, earlier history is requested automatically."}
+                      </p>
+                      {!isReadOnly && (
+                        <button
+                          type="button"
+                          disabled={syncingGroupHistory || activeConv.messages.length === 0}
+                          onClick={async () => {
+                            if (syncingGroupHistory || activeConv.messages.length === 0) return;
+                            const targetConvId = activeConv.id;
+                            setSyncingGroupHistory(true);
+                            setGroupHistoryNotice(null);
+                            try {
+                              const res = await authFetch(
+                                `/api/messages/${encodeURIComponent(targetConvId)}/sync-history`,
+                                {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ count: 50 }),
+                                }
+                              );
+                              const json = await res.json().catch(() => null);
+                              if (!res.ok || !json?.success) {
+                                throw new Error(
+                                  json?.error || "Could not request earlier group messages."
+                                );
+                              }
+                              setGroupHistoryNotice({
+                                convId: targetConvId,
+                                type: "success",
+                                message:
+                                  "Requested earlier messages from WhatsApp. Any available messages will appear here in a few seconds.",
+                              });
+                            } catch (err: any) {
+                              setGroupHistoryNotice({
+                                convId: targetConvId,
+                                type: "error",
+                                message:
+                                  err?.message || "Could not request earlier group messages.",
+                              });
+                            } finally {
+                              setSyncingGroupHistory(false);
+                            }
+                          }}
+                          className="w-full py-1.5 px-2.5 rounded-md text-[11px] font-semibold bg-[#0066FF] hover:bg-[#0055D6] text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer flex items-center justify-center gap-1.5"
+                        >
+                          <RotateCcw
+                            className={`w-3 h-3 shrink-0 ${syncingGroupHistory ? "animate-spin" : ""}`}
+                          />
+                          <span>
+                            {syncingGroupHistory
+                              ? "Requesting from WhatsApp..."
+                              : activeConv.messages.length > 0
+                              ? "Fetch Earlier Messages"
+                              : "Waiting for 1st Message"}
+                          </span>
+                        </button>
+                      )}
+                      {groupHistoryNotice && groupHistoryNotice.convId === activeConv.id && (
+                        <p
+                          className="text-[10px] leading-snug"
+                          style={{
+                            color: groupHistoryNotice.type === "error" ? "#FF3B30" : "#34C759",
+                          }}
+                        >
+                          {groupHistoryNotice.message}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {/* Branch selector */}
                 <div className="mb-5">

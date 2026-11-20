@@ -305,8 +305,14 @@ type CRMContextType = {
       claudePaused?: boolean;
       reason?: string;
       resetSession?: boolean;
+      triggerReply?: boolean;
     }
-  ) => Promise<{ ok: boolean; error?: string }>;
+  ) => Promise<{
+    ok: boolean;
+    error?: string;
+    autoReplyTriggered?: boolean;
+    autoReplySkippedReason?: string | null;
+  }>;
   createManualLead: (input: CreateManualLeadInput) => Promise<CreateManualLeadResult>;
   markConversationAsRead: (id: string) => Promise<void>;
   refresh: () => Promise<void>;
@@ -3498,8 +3504,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         claudePaused?: boolean;
         reason?: string;
         resetSession?: boolean;
+        triggerReply?: boolean;
       }
-    ): Promise<{ ok: boolean; error?: string }> => {
+    ): Promise<{
+      ok: boolean;
+      error?: string;
+      autoReplyTriggered?: boolean;
+      autoReplySkippedReason?: string | null;
+    }> => {
       if (isReadOnly) {
         return { ok: false, error: "View-only account: modifications are disabled." };
       }
@@ -3542,7 +3554,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             return next;
           });
         }
-        return { ok: true };
+        return {
+          ok: true,
+          autoReplyTriggered: Boolean(json.autoReplyTriggered),
+          autoReplySkippedReason:
+            typeof json.autoReplySkippedReason === "string" ? json.autoReplySkippedReason : null,
+        };
       } catch {
         return { ok: false, error: "Network error while updating Claude status." };
       }

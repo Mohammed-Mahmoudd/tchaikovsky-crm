@@ -175,7 +175,11 @@ export default function ClaudeLeadsAssignmentPage() {
       payload: { claudeEnabled?: boolean; claudePaused?: boolean }
     ) => {
       setBusyIds((prev) => new Set(prev).add(id));
-      const res = await updateConversationClaude(id, payload);
+      const shouldTrigger = payload.claudeEnabled === true || payload.claudePaused === false;
+      const res = await updateConversationClaude(id, {
+        ...payload,
+        ...(shouldTrigger ? { triggerReply: true } : {}),
+      });
       setBusyIds((prev) => {
         const next = new Set(prev);
         next.delete(id);

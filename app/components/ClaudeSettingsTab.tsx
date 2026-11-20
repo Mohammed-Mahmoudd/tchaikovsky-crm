@@ -664,7 +664,11 @@ export function ClaudeSettingsTab({
   ) => {
     if (leadBusyId) return;
     setLeadBusyId(senderId);
-    const res = await updateConversationClaude(senderId, payload);
+    const shouldTrigger = payload.claudeEnabled === true || payload.claudePaused === false;
+    const res = await updateConversationClaude(senderId, {
+      ...payload,
+      ...(shouldTrigger ? { triggerReply: true } : {}),
+    });
     setLeadBusyId(null);
     if (res.ok) {
       await fetchClaudeLeads();

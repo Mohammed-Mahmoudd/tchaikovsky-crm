@@ -51,20 +51,37 @@ function LeadClaudeToggleSectionInner({
     claudePausedReason,
   });
 
+  const formatActivationNote = (
+    verb: "Enabled" | "Resumed",
+    res: { autoReplyTriggered?: boolean; autoReplySkippedReason?: string | null }
+  ): string => {
+    if (res.autoReplyTriggered) {
+      return `${verb}. Adham is reading the chat and replying now.`;
+    }
+    if (res.autoReplySkippedReason === "global_disabled") {
+      return `${verb} for this lead (Global Auto-Reply is OFF in Settings).`;
+    }
+    return `${verb} for this lead.`;
+  };
+
   const handleToggleEnabled = async () => {
     if (isReadOnly || busy) return;
+    const nextEnabled = !claudeEnabled;
     setBusy(true);
     setErrorMsg(null);
     setStatusNote(null);
     const res = await updateConversationClaude(conversationId, {
-      claudeEnabled: !claudeEnabled,
+      claudeEnabled: nextEnabled,
+      ...(nextEnabled ? { triggerReply: true } : {}),
     });
     setBusy(false);
     if (!res.ok) {
       setErrorMsg(res.error || "Could not update Claude auto-reply.");
       return;
     }
-    setStatusNote(!claudeEnabled ? "Enabled for this lead." : "Turned off for this lead.");
+    setStatusNote(
+      nextEnabled ? formatActivationNote("Enabled", res) : "Turned off for this lead."
+    );
   };
 
   const handleResume = async () => {
@@ -74,13 +91,14 @@ function LeadClaudeToggleSectionInner({
     setStatusNote(null);
     const res = await updateConversationClaude(conversationId, {
       claudePaused: false,
+      triggerReply: true,
     });
     setBusy(false);
     if (!res.ok) {
       setErrorMsg(res.error || "Could not resume Claude.");
       return;
     }
-    setStatusNote("Resumed for this lead.");
+    setStatusNote(formatActivationNote("Resumed", res));
   };
 
   const handleResetSession = async () => {

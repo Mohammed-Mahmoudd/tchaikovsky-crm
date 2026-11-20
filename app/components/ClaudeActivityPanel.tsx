@@ -8,7 +8,6 @@ import {
   MessageSquare,
   RefreshCw,
   Search,
-  Wrench,
   X,
 } from "lucide-react";
 import { useAuth } from "./AuthProvider";
@@ -17,7 +16,6 @@ import {
   type ClaudeActivityOutcome,
   type ClaudeActivitySummary,
   formatDurationLabel,
-  formatToolTraceTitle,
   getActivityOutcomeMeta,
 } from "../utils/claudeAgent";
 import { formatLastMessageTime } from "../utils/time";
@@ -131,7 +129,7 @@ export function ClaudeActivityPanel({
               Live Agent Activity
             </h3>
             <p className="text-[11.5px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
-              Review every live turn Adham handled, including CRM tool calls, skills loaded, bookings, and escalations.
+              Review every live reply Adham handled, including bookings, escalations, and skills used.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -304,7 +302,6 @@ export function ClaudeActivityPanel({
             const tsNum = item.createdAt ? new Date(item.createdAt).getTime() : 0;
             const timeLabel = tsNum ? formatLastMessageTime(tsNum) : "";
             const latencyLabel = formatDurationLabel(item.durationMs);
-            const traces = Array.isArray(item.toolTraces) ? item.toolTraces : [];
             const skillsUsed = Array.isArray(item.skillsUsed) ? item.skillsUsed : [];
 
             return (
@@ -398,73 +395,6 @@ export function ClaudeActivityPanel({
                     )}
                   </div>
                 </div>
-
-                {/* Expandable CRM Tool Traces */}
-                {traces.length > 0 && (
-                  <details
-                    className="rounded-lg overflow-hidden text-[11.5px]"
-                    style={{
-                      background: "var(--bg-panel)",
-                      border: "1px solid var(--border-main)",
-                    }}
-                  >
-                    <summary className="px-3 py-2 cursor-pointer flex items-center justify-between gap-2 font-medium select-none hover:bg-[var(--bg-hover)]">
-                      <span className="inline-flex items-center gap-1.5" style={{ color: "var(--text-primary)" }}>
-                        <Wrench className="w-3.5 h-3.5" style={{ color: "var(--bg-banner)" }} />
-                        <span>Tools used ({traces.length})</span>
-                      </span>
-                      <span className="text-[11px] truncate max-w-[55%]" style={{ color: "var(--text-muted)" }}>
-                        {traces.map((t) => t.name).join(", ")}
-                      </span>
-                    </summary>
-                    <div
-                      className="p-3 space-y-2.5 font-mono text-[11px]"
-                      style={{
-                        borderTop: "1px solid var(--border-main)",
-                        background: "var(--bg-card)",
-                        color: "var(--text-secondary)",
-                      }}
-                    >
-                      {traces.map((trace, idx) => (
-                        <div
-                          key={`${item._id}-trace-${idx}`}
-                          className="rounded-md p-2.5 space-y-1.5"
-                          style={{
-                            background: "var(--bg-panel)",
-                            border: `1px solid ${trace.isError ? "var(--label-red-border)" : "var(--border-main)"}`,
-                          }}
-                        >
-                          <div className="flex items-center justify-between gap-2 font-sans">
-                            <span className="font-semibold" style={{ color: "var(--text-primary)" }}>
-                              {formatToolTraceTitle(trace.name)}
-                            </span>
-                            <span className="font-mono text-[10px]" style={{ color: "var(--text-muted)" }}>
-                              {trace.name}
-                            </span>
-                          </div>
-                          <div>
-                            <span className="font-sans text-[10px] font-semibold uppercase" style={{ color: "var(--text-muted)" }}>
-                              Input
-                            </span>
-                            <pre className="whitespace-pre-wrap break-all mt-0.5">
-                              {JSON.stringify(trace.input, null, 2)}
-                            </pre>
-                          </div>
-                          <div>
-                            <span className="font-sans text-[10px] font-semibold uppercase" style={{ color: "var(--text-muted)" }}>
-                              Output
-                            </span>
-                            <pre className="whitespace-pre-wrap break-all mt-0.5">
-                              {typeof trace.output === "string"
-                                ? trace.output
-                                : JSON.stringify(trace.output, null, 2)}
-                            </pre>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                )}
               </article>
             );
           })}
