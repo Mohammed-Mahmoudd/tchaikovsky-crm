@@ -1,94 +1,279 @@
 "use client";
 
-import React from "react";
-import { Archive, ArchiveRestore, CheckCircle2, RotateCcw } from "lucide-react";
+import React, { useEffect, useId, useRef, useState } from "react";
+import {
+  Archive,
+  ArchiveRestore,
+  CheckCircle2,
+  ChevronDown,
+  Download,
+  Loader2,
+  RotateCcw,
+} from "lucide-react";
 
 export type InboxBucketAction = "done" | "reopen" | "archive" | "unarchive";
 
 interface InboxBucketActionsProps {
+  conversationId: string;
   isDone: boolean;
   isArchived: boolean;
+  canManageBuckets?: boolean;
+  isDownloading?: boolean;
   onAction: (action: InboxBucketAction) => void;
-  variant: "header" | "mobile-bar" | "panel";
+  onDownload: () => void;
 }
 
-const VARIANT_CLASSES: Record<InboxBucketActionsProps["variant"], string> = {
-  header: "px-2.5 py-1 text-[12px] rounded-[6px]",
-  "mobile-bar": "flex-1 min-h-[44px] px-3 text-[12px] rounded-lg",
-  panel: "flex-1 min-h-[44px] lg:min-h-[32px] px-2.5 py-1.5 text-[11px] rounded-[6px]",
-};
+/**
+ * Dropdown menu combining conversation bucket actions (Mark as done / Archive)
+ * and instant conversation transcript export at the bottom.
+ * Keyed by `conversationId` so switching conversations resets menu state cleanly.
+ */
+export function InboxBucketActions(props: InboxBucketActionsProps) {
+  return <InboxBucketActionsInner key={props.conversationId} {...props} />;
+}
 
-export function InboxBucketActions({
+function InboxBucketActionsInner({
   isDone,
   isArchived,
+  canManageBuckets = true,
+  isDownloading = false,
   onAction,
-  variant,
+  onDownload,
 }: InboxBucketActionsProps) {
-  const sizeClasses = VARIANT_CLASSES[variant];
-  const secondaryBg = variant === "panel" ? "var(--bg-input)" : "var(--bg-pill)";
-  const iconSize = variant === "mobile-bar" ? "w-4 h-4 shrink-0" : "w-3.5 h-3.5 shrink-0";
+  const [open, setOpen] = useState(false);
+  const menuId = useId();
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const handlePointerDown = (e: MouseEvent | TouchEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown, { passive: true });
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  const focusMenuItem = (index: number) => {
+    const items = menuRef.current?.querySelectorAll<HTMLButtonElement>(
+      '[role="menuitem"]:not(:disabled)'
+    );
+    if (!items || items.length === 0) return;
+    const bounded = ((index % items.length) + items.length) % items.length;
+    items[bounded]?.focus();
+  };
+
+  const handleTriggerKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!open) {
+        setOpen(true);
+        requestAnimationFrame(() => {
+          focusMenuItem(e.key === "ArrowUp" ? -1 : 0);
+        });
+      } else {
+        focusMenuItem(e.key === "ArrowUp" ? -1 : 0);
+      }
+    }
+  };
+
+  const handleMenuKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const items = menuRef.current?.querySelectorAll<HTMLButtonElement>(
+      '[role="menuitem"]:not(:disabled)'
+    );
+    if (!items || items.length === 0) return;
+    const list = Array.from(items);
+    const activeIndex = list.indexOf(document.activeElement as HTMLButtonElement);
+
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      focusMenuItem(activeIndex < 0 ? 0 : activeIndex + 1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      focusMenuItem(activeIndex < 0 ? list.length - 1 : activeIndex - 1);
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      focusMenuItem(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      focusMenuItem(list.length - 1);
+    }
+  };
+
+  const handleBucketSelect = (action: InboxBucketAction) => {
+    setOpen(false);
+    onAction(action);
+  };
+
+  const handleDownloadSelect = () => {
+    if (isDownloading) return;
+    setOpen(false);
+    onDownload();
+  };
+
+  const menuItemClass =
+    "w-full min-h-[44px] sm:min-h-[34px] px-2.5 py-2 sm:py-1.5 rounded-lg text-[12px] font-medium flex items-center gap-2.5 text-start transition-colors cursor-pointer hover:bg-[var(--bg-hover)] disabled:opacity-50 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--bg-banner)]";
 
   return (
-    <>
-      {isDone ? (
-        <button
-          type="button"
-          onClick={() => onAction("reopen")}
-          className={`inline-flex items-center justify-center gap-1.5 font-semibold transition-colors cursor-pointer hover:opacity-90 ${sizeClasses}`}
-          style={{
-            background: secondaryBg,
-            border: "1px solid var(--border-input)",
-            color: "var(--text-primary)",
-          }}
-          title="Move conversation back to main Inbox"
-        >
-          <RotateCcw className={iconSize} />
-          <span>Reopen</span>
-        </button>
-      ) : (
-        <button
-          type="button"
-          onClick={() => onAction("done")}
-          className={`inline-flex items-center justify-center gap-1.5 font-semibold text-white bg-[#0066FF] hover:bg-[#0055D6] transition-colors cursor-pointer ${sizeClasses}`}
-          title="Mark conversation as Done"
-        >
-          <CheckCircle2 className={iconSize} />
-          <span>Mark as done</span>
-        </button>
-      )}
+    <div ref={containerRef} className="relative inline-block">
+      <button
+        ref={triggerRef}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        onClick={() => setOpen((prev) => !prev)}
+        onKeyDown={handleTriggerKeyDown}
+        title="Conversation actions"
+        className="min-h-[44px] sm:min-h-[27px] px-2.5 py-1 rounded-[6px] text-[12px] font-medium inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--bg-banner)]"
+        style={{
+          background: open ? "var(--bg-selected)" : "var(--bg-input)",
+          border: open
+            ? "1px solid var(--bg-banner)"
+            : "1px solid var(--border-input)",
+          color: "var(--text-primary)",
+        }}
+      >
+        <span>Actions</span>
+        <ChevronDown
+          className={`w-3.5 h-3.5 opacity-75 shrink-0 transition-transform duration-150 ${
+            open ? "rotate-180" : ""
+          }`}
+        />
+      </button>
 
-      {isArchived ? (
-        <button
-          type="button"
-          onClick={() => onAction("unarchive")}
-          className={`inline-flex items-center justify-center gap-1.5 font-semibold transition-colors cursor-pointer hover:opacity-90 ${sizeClasses}`}
+      {open && (
+        <div
+          ref={menuRef}
+          id={menuId}
+          role="menu"
+          aria-label="Conversation actions"
+          onKeyDown={handleMenuKeyDown}
+          className="absolute end-0 top-[calc(100%+6px)] z-50 w-56 max-w-[calc(100vw-1.5rem)] rounded-xl p-1.5 shadow-2xl flex flex-col gap-0.5"
           style={{
-            background: secondaryBg,
-            border: "1px solid var(--border-input)",
-            color: "var(--text-primary)",
+            background: "var(--bg-card)",
+            border: "1px solid var(--border-main)",
           }}
-          title="Restore conversation to main Inbox"
         >
-          <ArchiveRestore className={iconSize} />
-          <span>Unarchive</span>
-        </button>
-      ) : (
-        <button
-          type="button"
-          onClick={() => onAction("archive")}
-          className={`inline-flex items-center justify-center gap-1.5 font-medium transition-colors cursor-pointer hover:opacity-90 ${sizeClasses}`}
-          style={{
-            background: secondaryBg,
-            border: "1px solid var(--border-input)",
-            color: "var(--text-secondary)",
-          }}
-          title="Archive conversation"
-        >
-          <Archive className={iconSize} />
-          <span>Archive</span>
-        </button>
+          {canManageBuckets && (
+            <>
+              {isDone ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => handleBucketSelect("reopen")}
+                  className={menuItemClass}
+                  style={{ color: "var(--text-primary)" }}
+                  title="Move conversation back to main Inbox"
+                >
+                  <RotateCcw
+                    className="w-3.5 h-3.5 shrink-0"
+                    style={{ color: "var(--text-secondary)" }}
+                  />
+                  <span className="truncate">Reopen</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => handleBucketSelect("done")}
+                  className={menuItemClass}
+                  style={{ color: "var(--text-primary)" }}
+                  title="Mark conversation as Done"
+                >
+                  <CheckCircle2
+                    className="w-3.5 h-3.5 shrink-0"
+                    style={{ color: "var(--bg-banner)" }}
+                  />
+                  <span className="truncate">Mark as done</span>
+                </button>
+              )}
+
+              {isArchived ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => handleBucketSelect("unarchive")}
+                  className={menuItemClass}
+                  style={{ color: "var(--text-primary)" }}
+                  title="Restore conversation to main Inbox"
+                >
+                  <ArchiveRestore
+                    className="w-3.5 h-3.5 shrink-0"
+                    style={{ color: "var(--text-secondary)" }}
+                  />
+                  <span className="truncate">Unarchive</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => handleBucketSelect("archive")}
+                  className={menuItemClass}
+                  style={{ color: "var(--text-primary)" }}
+                  title="Archive conversation"
+                >
+                  <Archive
+                    className="w-3.5 h-3.5 shrink-0"
+                    style={{ color: "var(--text-secondary)" }}
+                  />
+                  <span className="truncate">Archive</span>
+                </button>
+              )}
+
+              <div
+                role="separator"
+                className="my-1 border-t"
+                style={{ borderColor: "var(--border-main)" }}
+              />
+            </>
+          )}
+
+          <button
+            type="button"
+            role="menuitem"
+            disabled={isDownloading}
+            onClick={handleDownloadSelect}
+            className={menuItemClass}
+            style={{ color: "var(--text-primary)" }}
+            title="Download full conversation transcript (.txt)"
+          >
+            {isDownloading ? (
+              <Loader2
+                className="w-3.5 h-3.5 shrink-0 animate-spin"
+                style={{ color: "var(--bg-banner)" }}
+              />
+            ) : (
+              <Download
+                className="w-3.5 h-3.5 shrink-0"
+                style={{ color: "var(--text-secondary)" }}
+              />
+            )}
+            <span className="truncate">
+              {isDownloading ? "Downloading..." : "Download conversation"}
+            </span>
+          </button>
+        </div>
       )}
-    </>
+    </div>
   );
 }
-

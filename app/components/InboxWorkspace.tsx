@@ -39,6 +39,12 @@ import { EmojiPicker, WHATSAPP_QUICK_REACTIONS, recordRecentEmoji } from "./Emoj
 import { formatMetaErrorMessage, ParsedMetaError } from "../utils/errorParser";
 import EditableLeadName from "./EditableLeadName";
 import { InboxBucketActions, type InboxBucketAction } from "./InboxBucketActions";
+import {
+  buildConversationExportFilename,
+  formatConversationTranscript,
+  triggerTextFileDownload,
+  type ExportConversationInput,
+} from "../utils/conversationExport";
 import { LeadLabelBadges } from "./LeadLabelBadges";
 import LeadLabelsSection from "./LeadLabelsSection";
 import LeadClaudeToggleSection from "./LeadClaudeToggleSection";
@@ -122,7 +128,7 @@ type Conversation = {
 
 // Removed dummy data
 
-import { useCRM, isLastMessageFromLead } from "../context/CRMContext";
+import { useCRM, isLastMessageFromLead, type Conversation as CRMConversation } from "../context/CRMContext";
 import {
   useAuth,
   canAccessRoute,
@@ -312,6 +318,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
   const [mobileView, setMobileView] = useState<MobileView>("list");
   const [showDetailsPanel, setShowDetailsPanel] = useState(false);
   const [inboxToast, setInboxToast] = useState<InboxToastState | null>(null);
+  const [downloadingConvId, setDownloadingConvId] = useState<string | null>(null);
   const [syncingGroupHistory, setSyncingGroupHistory] = useState(false);
   const [groupHistoryNotice, setGroupHistoryNotice] = useState<{
     convId: string;
@@ -1213,6 +1220,70 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
       });
     },
     [isReadOnly, conversations, user?.name, activeChatId, activeFilter, setActiveChatId, patchConversation]
+  );
+
+  const handleDownloadConversation = useCallback(
+    async (targetConv: CRMConversation) => {
+      if (!targetConv || downloadingConvId === targetConv.id) return;
+
+      let exportTarget: ExportConversationInput = targetConv;
+      const hasLoadedMessages =
+        Array.isArray(targetConv.messages) && targetConv.messages.length > 0;
+
+      if (!hasLoadedMessages) {
+        setDownloadingConvId(targetConv.id);
+        try {
+          const encodedId = encodeURIComponent(targetConv.id);
+          let res = await authFetch(`/api/messages/${encodedId}`, {
+            cache: "no-store",
+          }).catch(() => null);
+          if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+            res = await authFetch(
+              `https://api.tchaikovskyschool.com/crm-api/messages/${encodedId}`,
+              { cache: "no-store" }
+            ).catch(() => null);
+          }
+          if (!res || !res.ok) {
+            throw new Error("Could not load conversation messages.");
+          }
+          const json = await res.json().catch(() => null);
+          if (!json?.success || !json?.data) {
+            throw new Error("Could not load conversation messages.");
+          }
+          const remoteData = json.data as Record<string, unknown>;
+          exportTarget = {
+            ...(remoteData as ExportConversationInput),
+            ...targetConv,
+            messages: Array.isArray(remoteData.messages)
+              ? (remoteData.messages as ExportConversationInput["messages"])
+              : targetConv.messages,
+          };
+        } catch {
+          setInboxToast({
+            type: "error",
+            message: "Could not download conversation. Please try again.",
+          });
+          setDownloadingConvId((prev) => (prev === targetConv.id ? null : prev));
+          return;
+        }
+        setDownloadingConvId((prev) => (prev === targetConv.id ? null : prev));
+      }
+
+      const transcript = formatConversationTranscript(exportTarget, {
+        labels,
+        inboxMode,
+        origin: typeof window !== "undefined" ? window.location.origin : "",
+      });
+      const filename = buildConversationExportFilename(exportTarget);
+      triggerTextFileDownload(filename, transcript);
+
+      const displayLabel = targetConv.leadName || targetConv.name || "Conversation";
+      setInboxToast({
+        type: "success",
+        message: `Downloaded conversation for ${displayLabel}`,
+      });
+    },
+    [authFetch, downloadingConvId, inboxMode, labels]
   );
 
   return (
@@ -2138,17 +2209,16 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   </select>
                 </div>
 
-                {/* Mark as Done & Archive actions (sm+) */}
-                {!isReadOnly && (
-                  <div className="hidden sm:flex items-center gap-1.5">
-                    <InboxBucketActions
-                      isDone={isConversationDone(activeConv)}
-                      isArchived={isConversationArchived(activeConv)}
-                      onAction={(action) => applyInboxBucketChange(activeConv.id, action)}
-                      variant="header"
-                    />
-                  </div>
-                )}
+                {/* Conversation Actions Dropdown (Mark as done, Archive, Download conversation) */}
+                <InboxBucketActions
+                  conversationId={activeConv.id}
+                  isDone={isConversationDone(activeConv)}
+                  isArchived={isConversationArchived(activeConv)}
+                  canManageBuckets={!isReadOnly}
+                  isDownloading={downloadingConvId === activeConv.id}
+                  onAction={(action) => applyInboxBucketChange(activeConv.id, action)}
+                  onDownload={() => void handleDownloadConversation(activeConv)}
+                />
 
                 {/* Details toggle button — mobile & tablet */}
                 <button
@@ -2162,18 +2232,6 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   <Info className="w-4 h-4" />
                 </button>
               </div>
-
-              {/* Mobile Action Bar (labeled 44px touch targets) */}
-              {!isReadOnly && (
-                <div className="flex sm:hidden items-center gap-2 w-full pt-1">
-                  <InboxBucketActions
-                    isDone={isConversationDone(activeConv)}
-                    isArchived={isConversationArchived(activeConv)}
-                    onAction={(action) => applyInboxBucketChange(activeConv.id, action)}
-                    variant="mobile-bar"
-                  />
-                </div>
-              )}
             </div>
 
             {/* Done / Archived State Strip */}
