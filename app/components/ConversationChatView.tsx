@@ -18,11 +18,22 @@ import {
   Trash2,
   UploadCloud,
   SmilePlus,
+  Users,
+  ChevronRight,
 } from "lucide-react";
 import { useCRM, Message, Conversation } from "../context/CRMContext";
-import { useAuth, isDirectorOrChairmanRole, isAdmissionRole } from "./AuthProvider";
+import {
+  useAuth,
+  isDirectorOrChairmanRole,
+  isAdmissionRole,
+  canAccessInbox,
+  canSendChatMessagesRole,
+} from "./AuthProvider";
+import { resolveConvInboxMode } from "../utils/inboxFilters";
 import { ChatInputBar, OutgoingAttachmentPayload, formatFileSize } from "./ChatInputBar";
+import { GroupInfoPanel } from "./GroupInfoPanel";
 import { renderWhatsAppText } from "../utils/messageFormatting";
+import type { MessageMention } from "../utils/groupMentions";
 import { EmojiPicker, WHATSAPP_QUICK_REACTIONS, recordRecentEmoji } from "./EmojiPicker";
 import { formatMetaErrorMessage, ParsedMetaError } from "../utils/errorParser";
 import MessageTemplate, { parseTemplateAttachment } from "./MessageTemplate";
@@ -165,6 +176,7 @@ export const ConversationChatView = React.memo(function ConversationChatView({
 }: ConversationChatViewProps) {
   const {
     conversations,
+    operationConversations,
     setActiveChatId,
     fetchChatMessages,
     patchConversation,
@@ -175,6 +187,10 @@ export const ConversationChatView = React.memo(function ConversationChatView({
     addOptimisticMessages,
     finalizeOptimisticMessages,
     openChat,
+    fetchGroupParticipants,
+    fetchGroupMemberProfile,
+    fetchGroupMemberAvatars,
+    openGroupMemberChat,
   } = useCRM();
 
   const { user, token, authFetch, isReadOnly } = useAuth();
@@ -191,13 +207,26 @@ export const ConversationChatView = React.memo(function ConversationChatView({
   const isChairman = isDirectorOrChairmanRole(user?.role);
   const isAdmission = isAdmissionRole(user?.role);
   const isAssignedToOther = isAssigned && !isAssignedToMe;
-  const canSendMessages = !isReadOnly;
+  const canSendMessages = !isReadOnly && canSendChatMessagesRole(user?.role);
+  const canOpenFullInbox = activeConv ? canAccessInbox(user?.role, resolveConvInboxMode(activeConv)) : false;
+  const chatViewOnlyReason = isReadOnly
+    ? "View-only mode (Marketing role)"
+    : !canSendMessages
+    ? "View-only chat · Enrollment Director cannot send messages"
+    : undefined;
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const chatScrollContainerRef = useRef<HTMLDivElement | null>(null);
 
   const [sendError, setSendError] = useState<ParsedMetaError | null>(null);
-  const [editingMessage, setEditingMessage] = useState<{ id: string; text: string } | null>(null);
+  const [isLoadingParticipants, setIsLoadingParticipants] = useState(false);
+  const [groupInfoModalOpen, setGroupInfoModalOpen] = useState(false);
+  const [editingMessage, setEditingMessage] = useState<{
+    id: string;
+    text: string;
+    mentions?: MessageMention[];
+    mentionAll?: boolean;
+  } | null>(null);
   const [unsendingMessage, setUnsendingMessage] = useState<{
     id: string;
     text: string;
@@ -399,11 +428,22 @@ export const ConversationChatView = React.memo(function ConversationChatView({
   }, [replyingTo]);
 
   // Sending reply with 0ms optimistic message insertion & server sync
+  const handleRefreshParticipants = useCallback(async () => {
+    if (!activeConv || !activeConv.isGroup || activeConv.channel !== "WA") return;
+    setIsLoadingParticipants(true);
+    try {
+      await fetchGroupParticipants(activeConv.id, { forceRefresh: true });
+    } finally {
+      setIsLoadingParticipants(false);
+    }
+  }, [activeConv, fetchGroupParticipants]);
+
   const handleSendReply = useCallback(
     async (
       textToSend: string,
       attachments?: OutgoingAttachmentPayload[],
-      replyTo?: { id: string; text: string; senderName?: string; isIncoming?: boolean }
+      replyTo?: { id: string; text: string; senderName?: string; isIncoming?: boolean },
+      mentionPayload?: { mentions?: MessageMention[]; mentionAll?: boolean }
     ): Promise<boolean> => {
       const hasText = Boolean(textToSend && textToSend.trim());
       const hasAttachments = Boolean(attachments && attachments.length > 0);
@@ -473,6 +513,8 @@ export const ConversationChatView = React.memo(function ConversationChatView({
             isIncoming: false,
             status: "pending" as const,
             senderName: user?.name || "Staff",
+            mentions: idx === 0 ? mentionPayload?.mentions : undefined,
+            mentionAll: idx === 0 ? Boolean(mentionPayload?.mentionAll) : undefined,
             replyTo: idx === 0 && resolvedReplyTo ? resolvedReplyTo : undefined,
           };
         });
@@ -490,6 +532,8 @@ export const ConversationChatView = React.memo(function ConversationChatView({
             isIncoming: false,
             status: "pending" as const,
             senderName: user?.name || "Staff",
+            mentions: mentionPayload?.mentions,
+            mentionAll: Boolean(mentionPayload?.mentionAll),
             replyTo: resolvedReplyTo || undefined,
           },
         ]);
@@ -514,6 +558,8 @@ export const ConversationChatView = React.memo(function ConversationChatView({
             channel: activeConv.channel,
             attachments: serverAttachments,
             replyTo: resolvedReplyTo || undefined,
+            mentions: mentionPayload?.mentions,
+            mentionAll: Boolean(mentionPayload?.mentionAll),
           }),
         });
         if (res.ok) {
@@ -562,11 +608,15 @@ export const ConversationChatView = React.memo(function ConversationChatView({
   );
 
   const handleSaveEditMessage = useCallback(
-    async (messageId: string, newText: string): Promise<boolean> => {
-      if (!activeConv || isReadOnly) return false;
+    async (
+      messageId: string,
+      newText: string,
+      mentionPayload?: { mentions?: MessageMention[]; mentionAll?: boolean }
+    ): Promise<boolean> => {
+      if (!activeConv || !canSendMessages) return false;
       setEditingMessage(null);
       setSendError(null);
-      const res = await editMessage(activeConv.id, messageId, newText);
+      const res = await editMessage(activeConv.id, messageId, newText, mentionPayload);
       if (!res.ok) {
         setSendError({
           title: "Could not edit message",
@@ -576,11 +626,11 @@ export const ConversationChatView = React.memo(function ConversationChatView({
       }
       return true;
     },
-    [activeConv, isReadOnly, editMessage]
+    [activeConv, canSendMessages, editMessage]
   );
 
   const handleConfirmUnsendMessage = useCallback(async () => {
-    if (!activeConv || !unsendingMessage || isReadOnly || isUnsending) return;
+    if (!activeConv || !unsendingMessage || !canSendMessages || isUnsending) return;
     const targetId = unsendingMessage.id;
     setIsUnsending(true);
     setSendError(null);
@@ -599,17 +649,17 @@ export const ConversationChatView = React.memo(function ConversationChatView({
     } finally {
       setIsUnsending(false);
     }
-  }, [activeConv, unsendingMessage, isReadOnly, isUnsending, editingMessage?.id, replyingTo?.id, unsendMessage]);
+  }, [activeConv, unsendingMessage, canSendMessages, isUnsending, editingMessage?.id, replyingTo?.id, unsendMessage]);
 
   const handleReactToMessage = useCallback(
     async (messageId: string, emoji: string) => {
-      if (!activeConv || isReadOnly) return;
+      if (!activeConv || !canSendMessages) return;
       setActiveReactionMenu(null);
       setFullEmojiMenu(null);
       if (emoji) recordRecentEmoji(emoji);
       await reactToMessage(activeConv.id, messageId, emoji);
     },
-    [activeConv, isReadOnly, reactToMessage]
+    [activeConv, canSendMessages, reactToMessage]
   );
 
   const handleCopyMessage = useCallback((messageId: string, text: string) => {
@@ -751,43 +801,82 @@ export const ConversationChatView = React.memo(function ConversationChatView({
           )}
 
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h2 className="text-[14px] sm:text-[15px] font-bold truncate" style={{ color: "var(--text-primary)" }}>
-                {activeConv.name}
-                {activeConv.leadName && activeConv.leadName !== activeConv.name ? ` · ${activeConv.leadName}` : ""}
-              </h2>
-            </div>
-            <div className="flex items-center text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
-              <span className="truncate">
-                {activeConv.channel === "WA"
-                  ? activeConv.metaChannel === "FB"
-                    ? "WhatsApp · Facebook Form"
-                    : activeConv.metaChannel === "IG"
-                    ? "WhatsApp · Instagram Form"
-                    : "WhatsApp"
-                  : activeConv.channel === "IG"
-                  ? "Instagram"
-                  : "Messenger"}
-              </span>
-              {convPhone && (
-                <>
-                  <span className="mx-1 shrink-0">•</span>
-                  <span className="truncate font-medium">{convPhone}</span>
-                </>
-              )}
-              {activeConv.channel === "WA" && activeConv.windowLeft && (
-                <>
-                  <span className="mx-1 shrink-0">•</span>
-                  <span
-                    className={`shrink-0 ${
-                      activeConv.windowLeft === "Closed" ? "text-[#FF9500]" : "text-[#34C759]"
-                    }`}
+            {activeConv.isGroup && activeConv.channel === "WA" ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setGroupInfoModalOpen(true);
+                  if (!activeConv.groupParticipants || activeConv.groupParticipants.length === 0) {
+                    handleRefreshParticipants();
+                  }
+                }}
+                title="View group info and members"
+                className="text-left min-w-0 max-w-full rounded-lg px-1.5 py-0.5 -mx-1.5 hover:bg-[var(--bg-hover)] transition-colors cursor-pointer group"
+              >
+                <div className="flex items-center gap-1.5">
+                  <Users className="w-4 h-4 shrink-0 text-[#0066FF]" aria-label="WhatsApp Group" />
+                  <h2
+                    className="text-[14px] sm:text-[15px] font-bold truncate group-hover:underline"
+                    style={{ color: "var(--text-primary)" }}
                   >
-                    {activeConv.windowLeft === "Closed" ? "Window closed" : `${activeConv.windowLeft}`}
+                    {activeConv.name}
+                  </h2>
+                  <ChevronRight
+                    className="w-3.5 h-3.5 shrink-0 opacity-60 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all"
+                    style={{ color: "var(--text-secondary)" }}
+                  />
+                </div>
+                <div className="flex items-center text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
+                  <span className="truncate">
+                    WhatsApp Group
+                    {(activeConv.groupParticipants?.length || activeConv.groupMeta?.size || 0) > 0
+                      ? ` · ${activeConv.groupParticipants?.length || activeConv.groupMeta?.size} members`
+                      : ""}
+                    {" · Tap for members"}
                   </span>
-                </>
-              )}
-            </div>
+                </div>
+              </button>
+            ) : (
+              <>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-[14px] sm:text-[15px] font-bold truncate" style={{ color: "var(--text-primary)" }}>
+                    {activeConv.name}
+                    {activeConv.leadName && activeConv.leadName !== activeConv.name ? ` · ${activeConv.leadName}` : ""}
+                  </h2>
+                </div>
+                <div className="flex items-center text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
+                  <span className="truncate">
+                    {activeConv.channel === "WA"
+                      ? activeConv.metaChannel === "FB"
+                        ? "WhatsApp · Facebook Form"
+                        : activeConv.metaChannel === "IG"
+                        ? "WhatsApp · Instagram Form"
+                        : "WhatsApp"
+                      : activeConv.channel === "IG"
+                      ? "Instagram"
+                      : "Messenger"}
+                  </span>
+                  {convPhone && (
+                    <>
+                      <span className="mx-1 shrink-0">•</span>
+                      <span className="truncate font-medium">{convPhone}</span>
+                    </>
+                  )}
+                  {activeConv.channel === "WA" && activeConv.windowLeft && (
+                    <>
+                      <span className="mx-1 shrink-0">•</span>
+                      <span
+                        className={`shrink-0 ${
+                          activeConv.windowLeft === "Closed" ? "text-[#FF9500]" : "text-[#34C759]"
+                        }`}
+                      >
+                        {activeConv.windowLeft === "Closed" ? "Window closed" : `${activeConv.windowLeft}`}
+                      </span>
+                    </>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -795,18 +884,20 @@ export const ConversationChatView = React.memo(function ConversationChatView({
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           {extraHeaderActions}
 
-          {/* Optional Open in full inbox link */}
-          <button
-            type="button"
-            onClick={() => {
-              isNavigatingToFullChatRef.current = true;
-              openChat(activeConv.id);
-            }}
-            title="Open full conversation in Inbox"
-            className="p-1.5 rounded-md text-[var(--text-secondary)] hover:text-[#0066FF] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
-          >
-            <ExternalLink className="w-4 h-4" />
-          </button>
+          {/* Optional Open in full inbox link (hidden for roles without Inbox access) */}
+          {canOpenFullInbox && (
+            <button
+              type="button"
+              onClick={() => {
+                isNavigatingToFullChatRef.current = true;
+                openChat(activeConv.id);
+              }}
+              title="Open full conversation in Inbox"
+              className="p-1.5 rounded-md text-[var(--text-secondary)] hover:text-[#0066FF] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
+            >
+              <ExternalLink className="w-4 h-4" />
+            </button>
+          )}
 
           {onClose && (
             <button
@@ -908,21 +999,21 @@ export const ConversationChatView = React.memo(function ConversationChatView({
           const FORTY_EIGHT_HOURS_MS = 48 * 60 * 60 * 1000;
           const isDeletedMsg = Boolean(msg.isDeleted);
           const canEditThisMessage =
-            !isReadOnly &&
+            canSendMessages &&
             !isDeletedMsg &&
             !msg.isIncoming &&
             showPlainText &&
             activeConv.channel === "WA" &&
             (!msg.timestamp || Date.now() - msg.timestamp <= FIFTEEN_MINUTES_MS);
           const canUnsendThisMessage =
-            !isReadOnly &&
+            canSendMessages &&
             !isDeletedMsg &&
             !msg.isIncoming &&
             !msg.id.startsWith("temp_") &&
             activeConv.channel === "WA" &&
             (!msg.timestamp || Date.now() - msg.timestamp <= FORTY_EIGHT_HOURS_MS);
-          const canReplyToThisMessage = !isReadOnly && !isDeletedMsg;
-          const canReactToThisMessage = !isReadOnly && !isDeletedMsg && activeConv.channel === "WA";
+          const canReplyToThisMessage = canSendMessages && !isDeletedMsg;
+          const canReactToThisMessage = canSendMessages && !isDeletedMsg && activeConv.channel === "WA";
           const isEditingThis = editingMessage?.id === msg.id;
           const isReplyingToThis = replyingTo?.id === msg.id;
           const isReactionOpen = activeReactionMenu?.msgId === msg.id;
@@ -1126,7 +1217,13 @@ export const ConversationChatView = React.memo(function ConversationChatView({
                           }}
                           dir="auto"
                         >
-                          {quoteText}
+                          {activeConv.channel === "WA" && activeConv.isGroup
+                            ? renderWhatsAppText(quoteText, {
+                                mentions: referencedMsg?.mentions,
+                                mentionAll: referencedMsg?.mentionAll,
+                                participants: activeConv.groupParticipants,
+                              })
+                            : quoteText}
                         </p>
                       </div>
                     );
@@ -1316,17 +1413,42 @@ export const ConversationChatView = React.memo(function ConversationChatView({
 
                       {/* Plain Text Message */}
                       {showPlainText && (
-                        <p
-                          className="text-[13px] sm:text-[14px] leading-relaxed break-words whitespace-pre-wrap select-text"
-                          style={{
-                            color: msg.isIncoming ? "var(--text-chat-incoming)" : "var(--text-chat-outgoing)",
-                          }}
-                          dir="auto"
-                        >
-                          {activeConv.channel === "WA"
-                            ? renderWhatsAppText(msg.text)
-                            : msg.text}
-                        </p>
+                        <>
+                          {msg.mentionAll && !/@(?:all|everyone|الكل|الجميع)(?=$|[\s.,!?:;،؛)\]"'»])/i.test(msg.text || "") && (
+                            <div className="mb-1">
+                              <span
+                                className="inline-block text-[10.5px] font-semibold px-1.5 py-0.5 rounded border"
+                                style={{
+                                  background: "var(--label-amber-bg)",
+                                  color: "var(--label-amber-text)",
+                                  borderColor: "var(--label-amber-border)",
+                                }}
+                              >
+                                @all
+                              </span>
+                            </div>
+                          )}
+                          <p
+                            className="text-[13px] sm:text-[14px] leading-relaxed break-words whitespace-pre-wrap select-text"
+                            style={{
+                              color: msg.isIncoming ? "var(--text-chat-incoming)" : "var(--text-chat-outgoing)",
+                            }}
+                            dir="auto"
+                          >
+                            {activeConv.channel === "WA"
+                              ? renderWhatsAppText(
+                                  msg.text,
+                                  activeConv.isGroup
+                                    ? {
+                                        mentions: msg.mentions,
+                                        mentionAll: msg.mentionAll,
+                                        participants: activeConv.groupParticipants,
+                                      }
+                                    : undefined
+                                )
+                              : msg.text}
+                          </p>
+                        </>
                       )}
                     </>
                   )}
@@ -1474,7 +1596,12 @@ export const ConversationChatView = React.memo(function ConversationChatView({
                       onClick={(e) => {
                         e.stopPropagation();
                         setReplyingTo(null);
-                        setEditingMessage({ id: msg.id, text: msg.text });
+                        setEditingMessage({
+                          id: msg.id,
+                          text: msg.text,
+                          mentions: msg.mentions,
+                          mentionAll: msg.mentionAll,
+                        });
                       }}
                       title="Edit message (within 15m)"
                       className="p-1.5 rounded-full border border-transparent hover:border-[#0066FF] transition-colors cursor-pointer"
@@ -1567,15 +1694,21 @@ export const ConversationChatView = React.memo(function ConversationChatView({
       <ChatInputBar
         chatId={activeConv.id}
         channel={activeConv.channel}
+        isGroup={Boolean(activeConv.isGroup)}
+        groupParticipants={activeConv.groupParticipants}
+        groupMeta={activeConv.groupMeta}
+        isLoadingParticipants={isLoadingParticipants}
+        onRefreshParticipants={handleRefreshParticipants}
         token={token}
         isReadOnly={isReadOnly}
         canSendMessages={canSendMessages}
+        readOnlyReason={chatViewOnlyReason}
         isAssignedToOther={isAssignedToOther}
         assignedAgent={activeConv.agent}
         userName={user?.name}
         windowLeft={activeConv.windowLeft}
         isUnassigned={!isAssigned}
-        isAdmission={isAdmission || isChairman}
+        isAdmission={(isAdmission || isChairman) && canSendMessages}
         onAssignToMe={user?.name ? () => patchConversation(activeConv.id, { agent: user.name }) : undefined}
         onSendMessage={handleSendReply}
         editingMessage={editingMessage}
@@ -1690,6 +1823,36 @@ export const ConversationChatView = React.memo(function ConversationChatView({
             </div>
           </div>
         </div>
+      )}
+      {groupInfoModalOpen && activeConv.isGroup && activeConv.channel === "WA" && (
+        <aside
+          aria-label="WhatsApp Group Info"
+          className="absolute inset-y-0 right-0 z-30 w-full sm:w-[360px] shadow-2xl border-l flex flex-col overflow-hidden animate-in slide-in-from-right-4 duration-150"
+          style={{
+            background: "var(--bg-panel)",
+            borderColor: "var(--border-main)",
+          }}
+        >
+          <GroupInfoPanel
+            groupConv={activeConv}
+            allInboxConversations={operationConversations}
+            isLoadingParticipants={isLoadingParticipants}
+            isReadOnly={isReadOnly}
+            onClose={() => setGroupInfoModalOpen(false)}
+            onRefreshParticipants={handleRefreshParticipants}
+            onFetchMemberProfile={fetchGroupMemberProfile}
+            onFetchMemberAvatars={fetchGroupMemberAvatars}
+            onOpenMemberChat={(member) =>
+              openGroupMemberChat(activeConv.id, member, activeConv.name)
+            }
+            onSelectConversation={(targetConvId) => {
+              setGroupInfoModalOpen(false);
+              isNavigatingToFullChatRef.current = true;
+              openChat(targetConvId);
+              onClose?.();
+            }}
+          />
+        </aside>
       )}
     </div>
   );

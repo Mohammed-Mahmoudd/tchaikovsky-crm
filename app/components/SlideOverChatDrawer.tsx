@@ -111,6 +111,7 @@ export interface SlideOverChatDrawerProps {
   onInteraction?: () => void;
   extraHeaderActions?: React.ReactNode;
   onOpenBookingModal?: () => void;
+  hideDetailsToggle?: boolean;
 }
 
 /**
@@ -130,6 +131,7 @@ export function SlideOverChatDrawer({
   onInteraction,
   extraHeaderActions,
   onOpenBookingModal,
+  hideDetailsToggle = false,
 }: SlideOverChatDrawerProps) {
   const { conversations } = useCRM();
 
@@ -192,28 +194,32 @@ export function SlideOverChatDrawer({
               conversationId={chatId}
               onClose={onClose}
               extraHeaderActions={
-                <div className="flex items-center gap-1.5">
-                  {extraHeaderActions}
-                  <button
-                    type="button"
-                    aria-pressed={showDetails}
-                    onClick={onToggleDetails}
-                    className={`px-2.5 py-1 text-xs font-semibold rounded-[6px] active:scale-95 transition-all duration-150 cursor-pointer select-none ${
-                      showDetails
-                        ? "bg-[#0066FF] text-white shadow-xs"
-                        : "hover:bg-[var(--bg-hover)] text-[var(--text-secondary)]"
-                    }`}
-                    style={{
-                      border: showDetails
-                        ? "1px solid #0066FF"
-                        : "1px solid var(--border-input)",
-                      background: showDetails ? "#0066FF" : "var(--bg-pill)",
-                    }}
-                    title={showDetails ? "Hide lead details" : "View lead details"}
-                  >
-                    Details
-                  </button>
-                </div>
+                hideDetailsToggle ? (
+                  extraHeaderActions ? <div className="flex items-center gap-1.5">{extraHeaderActions}</div> : undefined
+                ) : (
+                  <div className="flex items-center gap-1.5">
+                    {extraHeaderActions}
+                    <button
+                      type="button"
+                      aria-pressed={showDetails}
+                      onClick={onToggleDetails}
+                      className={`px-2.5 py-1 text-xs font-semibold rounded-[6px] active:scale-95 transition-all duration-150 cursor-pointer select-none ${
+                        showDetails
+                          ? "bg-[#0066FF] text-white shadow-xs"
+                          : "hover:bg-[var(--bg-hover)] text-[var(--text-secondary)]"
+                      }`}
+                      style={{
+                        border: showDetails
+                          ? "1px solid #0066FF"
+                          : "1px solid var(--border-input)",
+                        background: showDetails ? "#0066FF" : "var(--bg-pill)",
+                      }}
+                      title={showDetails ? "Hide lead details" : "View lead details"}
+                    >
+                      Details
+                    </button>
+                  </div>
+                )
               }
             />
           </div>

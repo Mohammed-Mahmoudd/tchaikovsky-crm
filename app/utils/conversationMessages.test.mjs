@@ -64,6 +64,29 @@ describe("conversationMessages", () => {
       ]),
       2
     );
+
+    // Operation lastReadAt cutoff stops counting opened messages while counting newer incoming ones
+    assert.equal(
+      computeUnreadFromMessages(
+        [
+          { text: "Old", isIncoming: true, timestamp: 1000 },
+          { text: "Also read", isIncoming: true, timestamp: 2000 },
+        ],
+        2000
+      ),
+      0
+    );
+    assert.equal(
+      computeUnreadFromMessages(
+        [
+          { text: "Old", isIncoming: true, timestamp: 1000 },
+          { text: "Opened earlier", isIncoming: true, timestamp: 2000 },
+          { text: "Arrived after open", isIncoming: true, timestamp: 3500 },
+        ],
+        2000
+      ),
+      1
+    );
   });
 
   it("identifies whether last message was from the lead across loaded and slim conversations", () => {

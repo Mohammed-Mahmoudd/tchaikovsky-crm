@@ -2,6 +2,7 @@ export interface MessageLike {
   text?: string;
   senderName?: string;
   isIncoming: boolean;
+  timestamp?: number;
   attachments?: ReadonlyArray<unknown>;
 }
 
@@ -9,6 +10,7 @@ export interface ConversationMessageState {
   messages?: ReadonlyArray<MessageLike>;
   lastMessageDirection?: "incoming" | "outgoing";
   unreadCount?: number;
+  lastReadAt?: number;
 }
 
 interface TemplateAttachmentShape {
@@ -66,17 +68,26 @@ export function isAutomatedTemplateMsg(m: MessageLike): boolean {
 }
 
 /**
- * Counts consecutive incoming messages after the last human staff reply,
+ * Counts consecutive incoming messages after the last human staff reply
+ * (and strictly after `lastReadAt` when provided for Operation inbox),
  * ignoring automated Meta form-confirmation templates.
  */
-export function computeUnreadFromMessages(messages?: ReadonlyArray<MessageLike>): number {
+export function computeUnreadFromMessages(
+  messages?: ReadonlyArray<MessageLike>,
+  lastReadAt?: number | null
+): number {
   if (!Array.isArray(messages) || messages.length === 0) return 0;
+  const cutoff = Number(lastReadAt) || 0;
   let count = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (!m) continue;
     if (isAutomatedTemplateMsg(m)) continue;
     if (!m.isIncoming) {
+      break;
+    }
+    const msgTs = Number(m.timestamp) || 0;
+    if (cutoff > 0 && msgTs > 0 && msgTs <= cutoff) {
       break;
     }
     count++;
@@ -123,6 +134,16 @@ const MESSAGE_STATUS_RANK: Record<string, number> = {
   read: 3,
 };
 
+export interface ConfirmedReplyMention {
+  jid?: string;
+  userId?: string;
+  phone?: string;
+  displayName: string;
+  token?: string;
+  isSelf?: boolean;
+  isGroupMention?: boolean;
+}
+
 export interface ConfirmedReplyMessageInput {
   message_id?: string;
   messageId?: string;
@@ -130,6 +151,8 @@ export interface ConfirmedReplyMessageInput {
   attachments?: unknown[];
   timestamp?: number;
   senderName?: string;
+  mentions?: ConfirmedReplyMention[];
+  mentionAll?: boolean;
   replyTo?: {
     id?: string;
     messageId?: string;
@@ -164,6 +187,8 @@ export interface MergeableChatMessage {
   deletedAt?: number;
   deletedBy?: string;
   reactions?: unknown[];
+  mentions?: ConfirmedReplyMention[];
+  mentionAll?: boolean;
   replyTo?: {
     id: string;
     text: string;
@@ -224,7 +249,7 @@ export function buildConfirmedReplyMessages(
     return [
       {
         ...json.data,
-        text: trimmed || json.data.text || "",
+        text: json.data.text || trimmed || "",
         senderName: resolvePreferredSenderName(json.data.senderName, topSender),
         replyTo: fallbackReplyTo || json.data.replyTo,
       },
@@ -251,6 +276,11 @@ export function mergeExistingMessageFromSse<T extends MergeableChatMessage>(
       ? incoming.reactions
       : existing.reactions;
 
+  const mergedMentions =
+    Array.isArray(incoming.mentions) && incoming.mentions.length > 0
+      ? incoming.mentions
+      : existing.mentions;
+
   return {
     ...existing,
     ...incoming,
@@ -269,6 +299,8 @@ export function mergeExistingMessageFromSse<T extends MergeableChatMessage>(
     deletedAt: incoming.deletedAt ?? existing.deletedAt,
     deletedBy: incoming.deletedBy ?? existing.deletedBy,
     reactions: mergedReactions,
+    mentions: mergedMentions,
+    mentionAll: Boolean(existing.mentionAll || incoming.mentionAll),
     replyTo: incoming.replyTo || existing.replyTo,
   };
 }

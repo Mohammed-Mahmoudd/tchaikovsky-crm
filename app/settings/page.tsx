@@ -5,6 +5,7 @@ import { useAuth, Role, ROLE_OPTIONS, getRoleDisplayName, normalizeRole, canMana
 import { organizeTeamMembersByRole, reconcileMemberPatchResponse } from "../utils/roles";
 import { useCRM } from "../context/CRMContext";
 import { useBranches } from "../lib/branches";
+import { BranchSelect } from "../components/BranchSelect";
 import { ClaudeSettingsTab } from "../components/ClaudeSettingsTab";
 import { SlideOverChatDrawer, useSlideOverChatDrawer } from "../components/SlideOverChatDrawer";
 import { ChevronDown, Check, Trash2, Search, X, AlertTriangle, Bell, BellOff } from "lucide-react";
@@ -14,6 +15,7 @@ interface TeamMember {
   name: string;
   email: string;
   role: Role;
+  branch?: string;
   avatar?: string;
   active: boolean;
 }
@@ -126,6 +128,7 @@ export default function SettingsPage() {
   const [newEmail, setNewEmail] = useState("");
   const [newMemberPw, setNewMemberPw] = useState("");
   const [newRole, setNewRole] = useState<Role>("admission_officer");
+  const [newBranch, setNewBranch] = useState("");
   const [addingUser, setAddingUser] = useState(false);
   const [addStatus, setAddStatus] = useState<{ ok: boolean; msg: string } | null>(null);
   const [teamStatus, setTeamStatus] = useState<{ ok: boolean; msg: string } | null>(null);
@@ -136,6 +139,8 @@ export default function SettingsPage() {
   const [editName, setEditName] = useState("");
   const [editEmail, setEditEmail] = useState("");
   const [editRole, setEditRole] = useState<Role>("admission_officer");
+  const [editBranch, setEditBranch] = useState("");
+  const [editNeedsBranchPrompt, setEditNeedsBranchPrompt] = useState(false);
   const [editActive, setEditActive] = useState(true);
   const [editAvatar, setEditAvatar] = useState("");
   const [editPassword, setEditPassword] = useState("");
@@ -622,6 +627,7 @@ export default function SettingsPage() {
       const reconciled = reconcileMemberPatchResponse({
         previousMember,
         requestedRole: updates.role,
+        requestedBranch: updates.branch,
         resOk: res.ok,
         payload: data,
       });
@@ -638,6 +644,7 @@ export default function SettingsPage() {
           name: reconciled.member.name,
           email: reconciled.member.email,
           role: reconciled.member.role,
+          branch: reconciled.member.branch,
           avatar: reconciled.member.avatar,
         });
       }
@@ -667,11 +674,18 @@ export default function SettingsPage() {
   };
 
   // Open edit modal
-  const handleOpenEdit = (member: TeamMember) => {
+  const handleOpenEdit = (
+    member: TeamMember,
+    overrideRole?: Role,
+    requireBranchPrompt = false
+  ) => {
+    const resolvedRole = overrideRole ?? normalizeRole(member.role);
     setEditingMember(member);
     setEditName(member.name);
     setEditEmail(member.email);
-    setEditRole(normalizeRole(member.role));
+    setEditRole(resolvedRole);
+    setEditBranch(resolvedRole === "enrollment_director" ? member.branch || "" : "");
+    setEditNeedsBranchPrompt(requireBranchPrompt);
     setEditActive(member.active);
     setEditAvatar(member.avatar || "");
     setEditPassword("");
@@ -686,6 +700,7 @@ export default function SettingsPage() {
 
     const trimmedName = editName.trim();
     const trimmedEmail = editEmail.trim().toLowerCase();
+    const trimmedBranch = editRole === "enrollment_director" ? editBranch.trim() : "";
 
     if (!trimmedName) {
       setEditError("Name is required.");
@@ -693,6 +708,10 @@ export default function SettingsPage() {
     }
     if (!trimmedEmail || !trimmedEmail.includes("@")) {
       setEditError("A valid email address is required.");
+      return;
+    }
+    if (editRole === "enrollment_director" && !trimmedBranch) {
+      setEditError("Please select which branch this Enrollment Director handles.");
       return;
     }
     if (editPassword && editPassword.length < 6) {
@@ -712,6 +731,7 @@ export default function SettingsPage() {
         name: string;
         email: string;
         role: Role;
+        branch: string;
         active: boolean;
         password?: string;
         avatar?: string;
@@ -719,6 +739,7 @@ export default function SettingsPage() {
         name: trimmedName,
         email: trimmedEmail,
         role: editRole,
+        branch: trimmedBranch,
         active: editActive,
         avatar: editAvatar,
       };
@@ -736,6 +757,7 @@ export default function SettingsPage() {
       const reconciled = reconcileMemberPatchResponse({
         previousMember: editingMember,
         requestedRole: editRole,
+        requestedBranch: editRole === "enrollment_director" ? trimmedBranch : undefined,
         resOk: res.ok,
         payload: data,
       });
@@ -752,6 +774,7 @@ export default function SettingsPage() {
             name: persisted.name,
             email: persisted.email,
             role: persisted.role,
+            branch: persisted.branch,
             avatar: persisted.avatar,
           });
         }
@@ -878,6 +901,12 @@ export default function SettingsPage() {
       return;
     }
 
+    const trimmedNewBranch = newRole === "enrollment_director" ? newBranch.trim() : "";
+    if (newRole === "enrollment_director" && !trimmedNewBranch) {
+      setAddStatus({ ok: false, msg: "Please select which branch this Enrollment Director handles." });
+      return;
+    }
+
     const passwordToSend = addMode === "password" ? newMemberPw : "tempPass123!";
     if (addMode === "password" && (!newMemberPw || newMemberPw.length < 6)) {
       setAddStatus({ ok: false, msg: "Password must be at least 6 characters." });
@@ -894,15 +923,20 @@ export default function SettingsPage() {
           email: newEmail.trim().toLowerCase(),
           password: passwordToSend,
           role: newRole,
+          branch: trimmedNewBranch,
         }),
       });
       const data = await res.json();
       if (data.success && data.user) {
         setTeam((prev) => [...prev, { ...data.user, active: true }]);
-        setAddStatus({ ok: true, msg: `User ${newName} added as ${newRole}!` });
+        setAddStatus({
+          ok: true,
+          msg: `User ${newName} added as ${getRoleDisplayName(newRole)}${trimmedNewBranch ? ` (${trimmedNewBranch})` : ""}!`,
+        });
         setNewName("");
         setNewEmail("");
         setNewMemberPw("");
+        setNewBranch("");
         setTimeout(() => setAddStatus(null), 4000);
       } else {
         setAddStatus({ ok: false, msg: data.error || "Failed to add user." });
@@ -1335,7 +1369,7 @@ export default function SettingsPage() {
       {!isOperation && (
         <>
       <div
-        className="rounded-xl p-5 shadow-sm overflow-hidden mb-5"
+        className="rounded-xl p-5 shadow-sm mb-5"
         style={{ background: "var(--bg-card)", border: "1px solid var(--border-main)" }}
       >
         <div className="flex items-center justify-between mb-3">
@@ -1458,6 +1492,17 @@ export default function SettingsPage() {
                     </div>
                     <p className="text-[11px] truncate mt-0.5" style={{ color: "var(--text-secondary)" }}>
                       {member.email} · <span>{getRoleDisplayName(member.role)}</span>
+                      {normMemberRole === "enrollment_director" && (
+                        <>
+                          {" · "}
+                          <span
+                            className="font-medium"
+                            style={{ color: member.branch ? "var(--text-primary)" : "#FF9500" }}
+                          >
+                            {member.branch || "No branch assigned"}
+                          </span>
+                        </>
+                      )}
                     </p>
                   </div>
                 </div>
@@ -1469,7 +1514,17 @@ export default function SettingsPage() {
                   <select
                     disabled={!canEditThisMember || Boolean(updatingMemberIds[member.id])}
                     value={normMemberRole}
-                    onChange={(e) => handleUpdateMember(member.id, { role: e.target.value as Role })}
+                    onChange={(e) => {
+                      const nextRole = e.target.value as Role;
+                      if (nextRole === "enrollment_director" && !(member.branch || "").trim()) {
+                        handleOpenEdit(member, nextRole, true);
+                        return;
+                      }
+                      handleUpdateMember(member.id, {
+                        role: nextRole,
+                        branch: nextRole === "enrollment_director" ? member.branch : "",
+                      });
+                    }}
                     className={`h-[26px] text-[11px] rounded-[6px] px-2 outline-none shrink-0 w-[155px] transition-colors ${
                       updatingMemberIds[member.id] ? "opacity-60 cursor-wait" : ""
                     }`}
@@ -1688,7 +1743,13 @@ export default function SettingsPage() {
                 <select
                   disabled={isSeatLimitReached}
                   value={newRole}
-                  onChange={(e) => setNewRole(e.target.value as Role)}
+                  onChange={(e) => {
+                    const nextRole = e.target.value as Role;
+                    setNewRole(nextRole);
+                    if (nextRole !== "enrollment_director") {
+                      setNewBranch("");
+                    }
+                  }}
                   className={`h-[28px] text-[11px] rounded-[6px] px-2 outline-none flex-1 sm:flex-none sm:w-[155px] ${
                     isSeatLimitReached ? "opacity-60 cursor-not-allowed" : ""
                   }`}
@@ -1711,6 +1772,31 @@ export default function SettingsPage() {
                 </button>
               </div>
             </div>
+
+            {newRole === "enrollment_director" && (
+              <div
+                className="mt-3 p-3 rounded-lg flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3"
+                style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)" }}
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-[11px] font-semibold" style={{ color: "var(--text-primary)" }}>
+                    Assigned branch *
+                  </p>
+                  <p className="text-[10.5px]" style={{ color: "var(--text-secondary)" }}>
+                    This Enrollment Director will only see auditions booked in the selected branch.
+                  </p>
+                </div>
+                <div className="w-full sm:w-[240px] shrink-0">
+                  <BranchSelect
+                    value={newBranch}
+                    onChange={setNewBranch}
+                    branchGroups={branchGroups}
+                    placeholder="Select branch…"
+                    disabled={isSeatLimitReached}
+                  />
+                </div>
+              </div>
+            )}
 
             {addStatus && (
               <p className={`text-[11px] mt-2 font-medium ${addStatus.ok ? "text-green-600" : "text-[#FF3B30]"}`}>
@@ -1766,7 +1852,7 @@ export default function SettingsPage() {
               <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Operation</span> — dedicated access to Operation Inbox (Operation WhatsApp account), Profile, and personal Settings (account &amp; notifications).
             </li>
             <li>
-              <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Enrollment Director</span> — access to auditions only: schedule auditions, manage applicants, and track attendance.
+              <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Enrollment Director</span> — branch-scoped auditions access: manage auditions for their assigned branch and view read-only conversation history from Auditions without Inbox page access or chat downloads.
             </li>
             <li>
               <span className="font-semibold" style={{ color: "var(--text-primary)" }}>Finance</span> — access to pipeline and reports: financial tracking, campaign analytics, and conversion metrics.
@@ -2292,7 +2378,14 @@ export default function SettingsPage() {
                 </label>
                 <select
                   value={editRole}
-                  onChange={(e) => setEditRole(e.target.value as Role)}
+                  onChange={(e) => {
+                    const nextRole = e.target.value as Role;
+                    setEditRole(nextRole);
+                    if (nextRole !== "enrollment_director") {
+                      setEditBranch("");
+                      setEditNeedsBranchPrompt(false);
+                    }
+                  }}
                   disabled={editSaving}
                   className="w-full h-[30px] px-2.5 text-[12px] rounded-[6px] outline-none transition-colors focus:border-[#0066FF] disabled:opacity-60"
                   style={{
@@ -2306,6 +2399,33 @@ export default function SettingsPage() {
                   ))}
                 </select>
               </div>
+
+              {/* Assigned branch (Enrollment Director only) */}
+              {editRole === "enrollment_director" && (
+                <div>
+                  <label className="block text-[11px] font-medium mb-1" style={{ color: "var(--text-primary)" }}>
+                    Assigned branch *
+                  </label>
+                  <BranchSelect
+                    value={editBranch}
+                    onChange={(b) => {
+                      setEditBranch(b);
+                      setEditNeedsBranchPrompt(false);
+                    }}
+                    branchGroups={branchGroups}
+                    placeholder="Select branch this director handles…"
+                    disabled={editSaving}
+                  />
+                  <p
+                    className="text-[10.5px] mt-1"
+                    style={{ color: editNeedsBranchPrompt && !editBranch ? "#FF9500" : "var(--text-secondary)" }}
+                  >
+                    {editNeedsBranchPrompt && !editBranch
+                      ? "Choose which branch this Enrollment Director is in charge of before saving."
+                      : "Only auditions booked in this branch will be visible to this user."}
+                  </p>
+                </div>
+              )}
 
               {/* Active status toggle */}
               <div

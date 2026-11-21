@@ -101,7 +101,7 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
     if (e.key === 'Enter') {
       if (sidebarMatches.length > 0) {
         handleSelectLead(sidebarMatches[0].id);
-      } else if (pathname !== defaultInboxPath) {
+      } else if (pathname !== defaultInboxPath && canAccessRoute(user?.role, defaultInboxPath)) {
         markTeamSidebarNavigation();
         router.push(defaultInboxPath);
         setIsDropdownOpen(false);

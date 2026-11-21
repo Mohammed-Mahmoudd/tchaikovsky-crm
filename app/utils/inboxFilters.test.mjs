@@ -11,6 +11,7 @@ import {
   filterConversationsByInbox,
   getFilterBucketTotal,
   getGroupConversationCount,
+  getUnreadConversationCount,
   getInboxBucketCounts,
   isConversationArchived,
   isConversationDone,
@@ -163,6 +164,7 @@ describe("inboxFilters", () => {
   it("partitions conversations and filters cleanly between admissions and operation inboxes", () => {
     assert.deepEqual(OPERATION_INBOX_FILTERS, [
       "All",
+      "Unread",
       "Mine",
       "Unassigned",
       "Open",
@@ -171,6 +173,7 @@ describe("inboxFilters", () => {
       "DONE",
       "Archived",
     ]);
+    assert.equal(INBOX_FILTERS.includes("Unread"), false);
 
     const mixed = [
       { id: "201001234567", channel: "WA", unreadCount: 2, isDone: false, isArchived: false },
@@ -231,6 +234,21 @@ describe("inboxFilters", () => {
       ["op_grp_120363012345678901"]
     );
     assert.equal(getGroupConversationCount(opMixed), 1);
+  });
+
+  it("filters and counts Unread conversations strictly in main inbox", () => {
+    const opList = [
+      { id: "op_20101", unreadCount: 3, isDone: false, isArchived: false },
+      { id: "op_20102", unreadCount: 0, isDone: false, isArchived: false },
+      { id: "op_grp_1", isGroup: true, unreadCount: 2, isDone: false, isArchived: false },
+      { id: "op_20103", unreadCount: 5, isDone: true, isArchived: false },
+      { id: "op_20104", unreadCount: 4, isDone: false, isArchived: true },
+    ];
+    assert.deepEqual(
+      opList.filter((c) => matchesInboxFilter(c, "Unread", "Omar")).map((c) => c.id),
+      ["op_20101", "op_grp_1"]
+    );
+    assert.equal(getUnreadConversationCount(opList), 2);
   });
 });
 

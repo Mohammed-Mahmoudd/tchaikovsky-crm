@@ -13,6 +13,7 @@ export const INBOX_FILTERS = [
 
 export const OPERATION_INBOX_FILTERS = [
   "All",
+  "Unread",
   "Mine",
   "Unassigned",
   "Open",
@@ -157,6 +158,8 @@ export function matchesInboxFilter(
       return conv.status === "Resolved";
     case "Groups":
       return isGroupConversation(conv);
+    case "Unread":
+      return (Number(conv.unreadCount) || 0) > 0;
     case "WA":
       return conv.channel === "WA";
     case "IG":
@@ -208,6 +211,20 @@ export function getGroupConversationCount(
     }
   }
   return groups;
+}
+
+/** Counts non-archived, non-DONE conversations with unread messages (`unreadCount > 0`). */
+export function getUnreadConversationCount(
+  conversations: ReadonlyArray<InboxConversationLike>
+): number {
+  let count = 0;
+  for (let i = 0; i < conversations.length; i++) {
+    const conv = conversations[i];
+    if (isConversationInMainInbox(conv) && (Number(conv.unreadCount) || 0) > 0) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 /**

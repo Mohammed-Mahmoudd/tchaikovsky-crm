@@ -4,14 +4,17 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { usePathname, useRouter } from "next/navigation";
 import {
   useAuth,
+  normalizeRole,
   isAssignableRole,
   isAssignableForInbox,
   isOperationRole,
   canAccessInbox,
+  canAccessConversationInboxData,
   canAccessRoute,
   type InboxScope,
   type LogoutReason,
 } from "../components/AuthProvider";
+import { canUserViewConversationInStore } from "../utils/branchScope";
 import { formatMetaErrorMessage } from "../utils/errorParser";
 import {
   computeUnreadFromMessages,
@@ -32,6 +35,17 @@ import {
   isGroupConversation,
   resolveConvInboxMode,
 } from "../utils/inboxFilters";
+import {
+  findExistingDmForParticipant,
+  getParticipantLabel,
+  getParticipantPhoneDigits,
+  type GroupMemberProfileInfo,
+  type GroupMetaInfo,
+  type GroupParticipant,
+  type MessageMention,
+} from "../utils/groupMentions";
+
+export type { GroupMemberProfileInfo, GroupMetaInfo, GroupParticipant, MessageMention };
 import {
   type LeadLabel,
   type LeadLabelColor,
@@ -102,6 +116,8 @@ export type Message = {
   deletedBy?: string;
   reactions?: MessageReaction[];
   replyTo?: MessageReplyTo;
+  mentions?: MessageMention[];
+  mentionAll?: boolean;
 };
 
 export type Conversation = {
@@ -122,6 +138,7 @@ export type Conversation = {
   inbox?: InboxScope;
   whatsappAccount?: InboxScope;
   isGroup?: boolean;
+  profilePic?: string | null;
   status: "Open" | "Pending" | "Resolved";
   isArchived?: boolean;
   archivedAt?: string;
@@ -183,7 +200,10 @@ export type Conversation = {
   lastMessageText?: string;
   lastMessageDirection?: "incoming" | "outgoing";
   lastOutgoingAt?: number;
+  lastReadAt?: number;
   lastSeenAt?: number;
+  groupParticipants?: GroupParticipant[];
+  groupMeta?: GroupMetaInfo;
 };
 
 export type ActivityLogEntry = {
@@ -322,12 +342,38 @@ type CRMContextType = {
   setSearchQuery: (query: string) => void;
   deleteConversation: (id: string) => Promise<void>;
   clearWhatsAppConversations: (inbox?: InboxScope) => Promise<void>;
-  editMessage: (chatId: string, messageId: string, newText: string) => Promise<{ ok: boolean; error?: string }>;
+  editMessage: (
+    chatId: string,
+    messageId: string,
+    newText: string,
+    options?: { mentions?: MessageMention[]; mentionAll?: boolean }
+  ) => Promise<{ ok: boolean; error?: string }>;
   unsendMessage: (chatId: string, messageId: string) => Promise<{ ok: boolean; error?: string }>;
   reactToMessage: (chatId: string, messageId: string, emoji: string) => Promise<boolean>;
   addOptimisticMessages: (chatId: string, msgs: Message[]) => void;
   finalizeOptimisticMessages: (chatId: string, tempIds: string[], confirmedRawMessages?: any[]) => void;
   fetchChatMessages: (chatId: string) => Promise<void>;
+  fetchGroupParticipants: (
+    chatId: string,
+    options?: { forceRefresh?: boolean }
+  ) => Promise<{ participants: GroupParticipant[]; groupMeta?: GroupMetaInfo | null }>;
+  fetchGroupMemberProfile: (
+    groupId: string,
+    participant: GroupParticipant
+  ) => Promise<GroupMemberProfileInfo | null>;
+  fetchGroupMemberAvatars: (
+    groupId: string,
+    participants: GroupParticipant[]
+  ) => Promise<Record<string, { avatarUrl: string | null; about: string | null; aboutSetAt: number | null }>>;
+  fetchConversationAvatar: (
+    chatId: string,
+    options?: { forceRefresh?: boolean }
+  ) => Promise<string | null>;
+  openGroupMemberChat: (
+    groupId: string,
+    participant: GroupParticipant,
+    groupName?: string
+  ) => Promise<{ ok: boolean; conversationId?: string; existed?: boolean; error?: string }>;
   pushSupported: boolean;
   pushEnabled: boolean;
   pushPermission: BrowserNotificationPermission;
@@ -505,7 +551,9 @@ function slimConversationsForStorage(convs: Conversation[], limit?: number): Con
     }
     if (c.lastMessageDirection) item.lastMessageDirection = c.lastMessageDirection;
     if (c.lastOutgoingAt) item.lastOutgoingAt = c.lastOutgoingAt;
+    if (c.lastReadAt) item.lastReadAt = c.lastReadAt;
     if (c.lastSeenAt) item.lastSeenAt = c.lastSeenAt;
+    if (c.profilePic) item.profilePic = c.profilePic;
     return item as Conversation;
   });
 }
@@ -703,7 +751,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     const cached = getCachedConversations();
     const roleFiltered =
       typeof window !== "undefined" && user?.role
-        ? cached.filter((c) => canAccessInbox(user.role, resolveConvInboxMode(c)))
+        ? cached.filter(
+            (c) =>
+              canAccessConversationInboxData(user.role, resolveConvInboxMode(c)) &&
+              (normalizeRole(user.role) !== "enrollment_director" ||
+                canUserViewConversationInStore(c, user))
+          )
         : cached;
     if (typeof window !== "undefined" && user?.email?.toLowerCase().trim() === "test@meta.com") {
       return roleFiltered.filter(isReviewerAllowedConversation);
@@ -715,14 +768,17 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     setConversations((prev) => {
       let next = prev;
       if (user?.role) {
-        next = next.filter((c) => canAccessInbox(user.role, resolveConvInboxMode(c)));
+        next = next.filter((c) => canAccessConversationInboxData(user.role, resolveConvInboxMode(c)));
+        if (normalizeRole(user.role) === "enrollment_director") {
+          next = next.filter((c) => canUserViewConversationInStore(c, user));
+        }
       }
       if (isMetaReviewer) {
         next = next.filter(isReviewerAllowedConversation);
       }
       return next.length === prev.length ? prev : next;
     });
-  }, [isMetaReviewer, user?.role]);
+  }, [isMetaReviewer, user]);
   const [loading, setLoading] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
     try {
@@ -894,7 +950,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     loadConversationsFromIDB().then((idbConvs) => {
       if (cancelled || !idbConvs || idbConvs.length === 0) return;
       const authorizedIdb = user?.role
-        ? idbConvs.filter((c) => canAccessInbox(user.role, resolveConvInboxMode(c)))
+        ? idbConvs.filter(
+            (c) =>
+              canAccessConversationInboxData(user.role, resolveConvInboxMode(c)) &&
+              (normalizeRole(user.role) !== "enrollment_director" ||
+                canUserViewConversationInStore(c, user))
+          )
         : idbConvs;
       if (authorizedIdb.length === 0) return;
       // Only apply IDB snapshot if live server fetch hasn't already populated full activityLog data
@@ -1188,20 +1249,30 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     [isReadOnly, authFetch]
   );
 
-  // ── Messages cache: lives outside React state so slim polls never touch it ──
+  // ── Messages, avatars & group participant caches: live outside React state so slim polls never wipe them ──
   const messagesCacheRef = useRef<Map<string, Message[]>>(new Map());
+  const profilePicCacheRef = useRef<Map<string, string>>(new Map());
+  const lastReadAtRef = useRef<Map<string, number>>(new Map());
+  const groupParticipantsCacheRef = useRef<
+    Map<string, { participants: GroupParticipant[]; groupMeta?: GroupMetaInfo }>
+  >(new Map());
 
   // Normalize raw API data to CRM Conversation model (without messages)
   const normalizeConversationMeta = useCallback((c: any): Omit<Conversation, "messages"> => {
     const resolvedNames = resolveConversationLeadNames(c);
     const resolvedInbox = resolveConvInboxMode(c);
     const groupConv = isGroupConversation(c);
+    const rawProfilePic =
+      typeof c.profilePic === "string" && /^https?:\/\//i.test(c.profilePic.trim())
+        ? c.profilePic.trim()
+        : undefined;
     return {
       id: c.senderId,
       _id: c._id ? String(c._id) : undefined,
       inbox: resolvedInbox,
       whatsappAccount: resolvedInbox,
       isGroup: groupConv,
+      profilePic: rawProfilePic,
       name: resolvedNames.name,
       profileName: resolvedNames.profileName,
       leadName: resolvedNames.leadName,
@@ -1330,6 +1401,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       lastMessageText: c.lastMessageText ? String(c.lastMessageText) : undefined,
       lastMessageDirection: c.lastMessageDirection === "outgoing" ? "outgoing" : c.lastMessageDirection === "incoming" ? "incoming" : undefined,
       lastOutgoingAt: c.lastOutgoingAt ? Number(c.lastOutgoingAt) : undefined,
+      lastReadAt: c.lastReadAt ? Number(c.lastReadAt) : undefined,
       lastSeenAt: c.lastSeenAt,
       claudeEnabled: Boolean(c.claudeEnabled),
       claudePaused: Boolean(c.claudePaused),
@@ -1337,6 +1409,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       claudePausedAt: c.claudePausedAt ? String(c.claudePausedAt) : null,
       claudeLastRepliedAt: c.claudeLastRepliedAt ? String(c.claudeLastRepliedAt) : null,
       claudeLastError: typeof c.claudeLastError === "string" ? c.claudeLastError : "",
+      groupParticipants: Array.isArray(c.groupParticipants) ? c.groupParticipants : undefined,
+      groupMeta: c.groupMeta || undefined,
     };
   }, []);
 
@@ -1367,6 +1441,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           ? m.senderName
           : m.deletedBy) || undefined,
       reactions: Array.isArray(m.reactions) ? m.reactions : [],
+      mentions: Array.isArray(m.mentions) ? m.mentions : undefined,
+      mentionAll: Boolean(m.mentionAll),
       replyTo: m.replyTo
         ? {
             id: String(m.replyTo.id || m.replyTo.messageId),
@@ -1427,6 +1503,33 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           .map((c: any) => {
             const meta = normalizeConversationMeta(c);
             let cachedMessages = messagesCacheRef.current.get(meta.id) || [];
+            if (meta.groupParticipants && meta.groupParticipants.length > 0) {
+              groupParticipantsCacheRef.current.set(meta.id, {
+                participants: meta.groupParticipants,
+                groupMeta: meta.groupMeta,
+              });
+            }
+            if (meta.profilePic) {
+              profilePicCacheRef.current.set(meta.id, meta.profilePic);
+            }
+            const preservedProfilePic =
+              meta.profilePic ?? profilePicCacheRef.current.get(meta.id);
+            const isOpConv = resolveConvInboxMode(meta) === "operation";
+            if (isOpConv && meta.lastReadAt) {
+              const prevReadRef = lastReadAtRef.current.get(meta.id) || 0;
+              if (meta.lastReadAt > prevReadRef) {
+                lastReadAtRef.current.set(meta.id, meta.lastReadAt);
+              }
+            }
+            const effectiveReadAt = isOpConv
+              ? Math.max(meta.lastReadAt || 0, lastReadAtRef.current.get(meta.id) || 0) || undefined
+              : undefined;
+            const cachedGroup = groupParticipantsCacheRef.current.get(meta.id);
+            const preservedParticipants = meta.groupParticipants ?? cachedGroup?.participants;
+            const preservedGroupMeta =
+              meta.groupMeta && !meta.groupMeta.avatarUrl && cachedGroup?.groupMeta?.avatarUrl
+                ? { ...meta.groupMeta, avatarUrl: cachedGroup.groupMeta.avatarUrl }
+                : meta.groupMeta ?? cachedGroup?.groupMeta;
             // Evict stale cached messages for inactive chats if the server has a newer message timestamp
             if (cachedMessages.length > 0 && meta.id !== activeChatIdRef.current) {
               const lastCachedTs = cachedMessages[cachedMessages.length - 1]?.timestamp || 0;
@@ -1444,6 +1547,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               const mergedMeta = {
                 ...meta,
                 ...pending.updates,
+                profilePic: preservedProfilePic,
+                lastReadAt: effectiveReadAt,
+                groupParticipants: preservedParticipants,
+                groupMeta: preservedGroupMeta,
                 lastMessageAt: Math.max(meta.lastMessageAt || 0, pending.updates.lastMessageAt || 0),
                 messages: cachedMessages,
               } as Conversation;
@@ -1453,10 +1560,16 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             // Always preserve valid cached messages — slim poll NEVER wipes them
             const resolvedUnread =
               cachedMessages.length > 0
-                ? computeUnreadFromMessages(cachedMessages)
+                ? computeUnreadFromMessages(cachedMessages, effectiveReadAt)
+                : effectiveReadAt && (!meta.lastMessageAt || meta.lastMessageAt <= effectiveReadAt)
+                ? 0
                 : meta.unreadCount;
             return {
               ...meta,
+              profilePic: preservedProfilePic,
+              lastReadAt: effectiveReadAt,
+              groupParticipants: preservedParticipants,
+              groupMeta: preservedGroupMeta,
               unreadCount: resolvedUnread,
               messages: cachedMessages,
             } as Conversation;
@@ -1524,10 +1637,19 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         // Keep conversations ordered newest-first after applying optimistic lastMessageAt updates
         parsed.sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
 
+        const scopedParsed = user?.role
+          ? parsed.filter(
+              (c) =>
+                canAccessConversationInboxData(user.role, resolveConvInboxMode(c)) &&
+                (normalizeRole(user.role) !== "enrollment_director" ||
+                  canUserViewConversationInStore(c, user))
+            )
+          : parsed;
+
         setConversations((prev) => {
           if (prev.length === 0) {
-            if (!isMetaReviewer) persistConversationsCache(parsed);
-            return parsed;
+            if (!isMetaReviewer) persistConversationsCache(scopedParsed);
+            return scopedParsed;
           }
 
           const prevById = new Map<string, Conversation>();
@@ -1537,17 +1659,24 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
           // Preserve any conversation from `prev` that is currently active or has an active optimistic guard
           // if an in-flight poll resolved with a slightly older snapshot
-          const parsedIds = new Set(parsed.map((c) => c.id));
+          const parsedIds = new Set(scopedParsed.map((c) => c.id));
           const currentActive = activeChatIdRef.current;
           for (let i = 0; i < prev.length; i++) {
             const oldC = prev[i];
             if (parsedIds.has(oldC.id) || deletedIdsRef.current.has(oldC.id)) continue;
+            if (
+              user?.role &&
+              normalizeRole(user.role) === "enrollment_director" &&
+              !canUserViewConversationInStore(oldC, user)
+            ) {
+              continue;
+            }
             const hasRecentGuard =
               (recentlyCreatedRef.current.get(oldC.id)?.expiresAt || 0) > now ||
               (pendingPatchesRef.current.get(oldC.id)?.expiresAt || 0) > now ||
               oldC.id === currentActive;
             if (hasRecentGuard) {
-              parsed.unshift({
+              scopedParsed.unshift({
                 ...oldC,
                 messages: messagesCacheRef.current.get(oldC.id) || oldC.messages || [],
               });
@@ -1567,12 +1696,28 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             if (prev[idx]?.id !== nextConv.id) {
               anyChanged = true;
             }
+            if (!nextConv.profilePic && oldConv.profilePic) {
+              nextConv.profilePic = oldConv.profilePic;
+              profilePicCacheRef.current.set(nextConv.id, oldConv.profilePic);
+            }
+            if (!nextConv.groupParticipants && oldConv.groupParticipants) {
+              nextConv.groupParticipants = oldConv.groupParticipants;
+              nextConv.groupMeta =
+                nextConv.groupMeta && !nextConv.groupMeta.avatarUrl && oldConv.groupMeta?.avatarUrl
+                  ? { ...nextConv.groupMeta, avatarUrl: oldConv.groupMeta.avatarUrl }
+                  : nextConv.groupMeta || oldConv.groupMeta;
+              groupParticipantsCacheRef.current.set(nextConv.id, {
+                participants: oldConv.groupParticipants,
+                groupMeta: nextConv.groupMeta,
+              });
+            }
             const isSame =
               oldConv.updatedAt === nextConv.updatedAt &&
               oldConv.lastMessageAt === nextConv.lastMessageAt &&
               oldConv.lastMessageText === nextConv.lastMessageText &&
               oldConv.lastMessageDirection === nextConv.lastMessageDirection &&
               oldConv.lastOutgoingAt === nextConv.lastOutgoingAt &&
+              oldConv.lastReadAt === nextConv.lastReadAt &&
               oldConv.lastSeenAt === nextConv.lastSeenAt &&
               oldConv.unreadCount === nextConv.unreadCount &&
               oldConv.pipeline === nextConv.pipeline &&
@@ -1608,6 +1753,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               (oldConv.activityLog?.length || 0) === (nextConv.activityLog?.length || 0) &&
               oldConv.cashIn === nextConv.cashIn &&
               oldConv.notes === nextConv.notes &&
+              oldConv.profilePic === nextConv.profilePic &&
+              oldConv.groupParticipants === nextConv.groupParticipants &&
+              oldConv.groupMeta?.avatarUrl === nextConv.groupMeta?.avatarUrl &&
+              oldConv.groupMeta?.participantsSyncedAt === nextConv.groupMeta?.participantsSyncedAt &&
+              oldConv.groupMeta?.size === nextConv.groupMeta?.size &&
+              oldConv.groupMeta?.fetchedAt === nextConv.groupMeta?.fetchedAt &&
               oldConv.messages === nextConv.messages;
 
             if (isSame) {
@@ -1685,14 +1836,33 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const newMessages =
           inFlightOptimistic.length > 0 ? [...serverMessages, ...inFlightOptimistic] : serverMessages;
 
-        // Update the messages cache
+        // Update the messages & group participants caches
         messagesCacheRef.current.set(chatId, newMessages);
-        const computedUnread = computeUnreadFromMessages(newMessages);
+        if (Array.isArray(json.data.groupParticipants)) {
+          groupParticipantsCacheRef.current.set(chatId, {
+            participants: json.data.groupParticipants,
+            groupMeta: json.data.groupMeta || undefined,
+          });
+        }
+        const pending = pendingPatchesRef.current.get(chatId);
+        const normActive = normalizeConversationMeta(json.data);
+        if (normActive.profilePic) {
+          profilePicCacheRef.current.set(chatId, normActive.profilePic);
+        }
+        const isOpActive = resolveConvInboxMode(normActive) === "operation";
+        if (isOpActive && normActive.lastReadAt) {
+          const prevRef = lastReadAtRef.current.get(chatId) || 0;
+          if (normActive.lastReadAt > prevRef) {
+            lastReadAtRef.current.set(chatId, normActive.lastReadAt);
+          }
+        }
+        const effectiveActiveReadAt = isOpActive
+          ? Math.max(normActive.lastReadAt || 0, lastReadAtRef.current.get(chatId) || 0) || undefined
+          : undefined;
+        const computedUnread = computeUnreadFromMessages(newMessages, effectiveActiveReadAt);
         const computedDirection = getLastRealMessageDirection(newMessages);
         const lastMsgTs =
           newMessages.length > 0 ? newMessages[newMessages.length - 1]?.timestamp || 0 : 0;
-        const pending = pendingPatchesRef.current.get(chatId);
-        const normActive = normalizeConversationMeta(json.data);
         const { keepOptimistic: hasActivePending, shouldEvict } = resolvePendingPatchState(
           pending,
           normActive.updatedAt
@@ -1850,6 +2020,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               claudePausedAt: normActive.claudePausedAt,
               claudeLastRepliedAt: normActive.claudeLastRepliedAt,
               claudeLastError: normActive.claudeLastError,
+              lastReadAt: isOpActive
+                ? Math.max(effectiveActiveReadAt || 0, c.lastReadAt || 0) || undefined
+                : c.lastReadAt,
+              profilePic: normActive.profilePic ?? profilePicCacheRef.current.get(chatId) ?? c.profilePic,
+              groupParticipants: Array.isArray(json.data.groupParticipants)
+                ? json.data.groupParticipants
+                : c.groupParticipants,
+              groupMeta: json.data.groupMeta || c.groupMeta,
             };
             if (
               mergedConv.pipeline !== c.pipeline ||
@@ -1859,7 +2037,11 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               mergedConv.followUpNote !== c.followUpNote ||
               mergedConv.branch !== c.branch ||
               mergedConv.notes !== c.notes ||
-              mergedConv.cashIn !== c.cashIn
+              mergedConv.cashIn !== c.cashIn ||
+              mergedConv.lastReadAt !== c.lastReadAt ||
+              mergedConv.profilePic !== c.profilePic ||
+              mergedConv.groupParticipants !== c.groupParticipants ||
+              mergedConv.groupMeta?.avatarUrl !== c.groupMeta?.avatarUrl
             ) {
               metaChanged = true;
             }
@@ -1871,7 +2053,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           return next;
         });
 
-        if (!isReadOnly && (json.data?.unreadCount || 0) !== computedUnread) {
+        const pendingLocalReadSync =
+          isOpActive &&
+          (lastReadAtRef.current.get(chatId) || 0) > (Number(json.data?.lastReadAt) || 0);
+        if (!isReadOnly && !pendingLocalReadSync && (json.data?.unreadCount || 0) !== computedUnread) {
           authFetch(`${API}/messages/${chatId}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
@@ -1883,6 +2068,246 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       console.warn("CRMContext: failed to fetch active chat", err);
     }
   }, [normalizeMessages, isMetaReviewer, authFetch, isReadOnly]);
+
+  const fetchGroupParticipants = useCallback(
+    async (chatId: string, options?: { forceRefresh?: boolean }) => {
+      if (!chatId) return { participants: [], groupMeta: null };
+      try {
+        const qs = options?.forceRefresh ? "?refresh=1" : "";
+        let res = await authFetch(`${API}/messages/${chatId}/participants${qs}`, {
+          cache: "no-store",
+        }).catch(() => null);
+        if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+          res = await authFetch(`${DIRECT_API}/messages/${chatId}/participants${qs}`, {
+            cache: "no-store",
+          }).catch(() => null);
+        }
+        if (!res || !res.ok) {
+          const cached = groupParticipantsCacheRef.current.get(chatId);
+          return { participants: cached?.participants || [], groupMeta: cached?.groupMeta || null };
+        }
+        const json = await res.json().catch(() => null);
+        const participants: GroupParticipant[] = Array.isArray(json?.data?.participants)
+          ? json.data.participants
+          : [];
+        const groupMeta: GroupMetaInfo | undefined = json?.data?.groupMeta || undefined;
+        groupParticipantsCacheRef.current.set(chatId, { participants, groupMeta });
+        setConversations((prev) =>
+          prev.map((c) =>
+            c.id === chatId
+              ? { ...c, groupParticipants: participants, groupMeta: groupMeta || c.groupMeta }
+              : c
+          )
+        );
+        return { participants, groupMeta: groupMeta || null };
+      } catch {
+        const cached = groupParticipantsCacheRef.current.get(chatId);
+        return { participants: cached?.participants || [], groupMeta: cached?.groupMeta || null };
+      }
+    },
+    [authFetch]
+  );
+
+  const memberProfileClientCacheRef = useRef<
+    Map<string, { data: GroupMemberProfileInfo; expiresAt: number }>
+  >(new Map());
+
+  const fetchGroupMemberProfile = useCallback(
+    async (groupId: string, participant: GroupParticipant): Promise<GroupMemberProfileInfo | null> => {
+      if (!groupId || !participant?.jid) return null;
+      const cacheKey = `${groupId}:${participant.jid}`;
+      const cached = memberProfileClientCacheRef.current.get(cacheKey);
+      const now = Date.now();
+      // Keep WhatsApp avatar/about hot for 45s in browser while still letting existingConversation match live
+      const params = new URLSearchParams();
+      if (participant.jid) params.set("jid", participant.jid);
+      if (participant.lid) params.set("lid", participant.lid);
+      if (participant.userId) params.set("userId", participant.userId);
+      const cleanDigits = getParticipantPhoneDigits(participant);
+      if (cleanDigits) params.set("phone", cleanDigits);
+      const label = getParticipantLabel(participant);
+      if (label) params.set("name", label);
+
+      if (cached && now < cached.expiresAt) {
+        const localExisting = findExistingDmForParticipant(conversationsRef.current, participant, "operation");
+        if (localExisting && !cached.data.existingConversation) {
+          return {
+            ...cached.data,
+            existingConversation: {
+              senderId: localExisting.id,
+              name: localExisting.leadName || localExisting.name,
+              phone: localExisting.phone || null,
+              agent: localExisting.agent,
+              status: localExisting.status,
+              pipeline: localExisting.pipeline,
+              branch: localExisting.branch,
+              labels: localExisting.labels,
+              notes: localExisting.notes,
+              followUpDate: localExisting.followUpDate || null,
+              followUpNote: localExisting.followUpNote,
+              unreadCount: localExisting.unreadCount,
+              isDone: localExisting.isDone,
+              isArchived: localExisting.isArchived,
+              lastMessageAt: localExisting.lastMessageAt || null,
+              lastMessageText: localExisting.lastMessageText,
+              lastMessageDirection: localExisting.lastMessageDirection,
+            },
+          };
+        }
+        return cached.data;
+      }
+
+      try {
+        const qs = params.toString();
+        let res = await authFetch(`${API}/messages/${encodeURIComponent(groupId)}/member-info?${qs}`, {
+          cache: "no-store",
+        }).catch(() => null);
+        if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+          res = await authFetch(
+            `${DIRECT_API}/messages/${encodeURIComponent(groupId)}/member-info?${qs}`,
+            { cache: "no-store" }
+          ).catch(() => null);
+        }
+        if (!res || !res.ok) return null;
+        const json = await res.json().catch(() => null);
+        const profile: GroupMemberProfileInfo | null = json?.success && json?.data ? json.data : null;
+        if (!profile) return null;
+
+        memberProfileClientCacheRef.current.set(cacheKey, {
+          data: profile,
+          expiresAt: Date.now() + 45000,
+        });
+
+        // If server resolved a phone or better name for this participant, enrich our cached group snapshot immediately
+        if (profile.phone || profile.phoneDigits) {
+          const cachedGroup = groupParticipantsCacheRef.current.get(groupId);
+          if (cachedGroup?.participants) {
+            const enrichedList = cachedGroup.participants.map((p) =>
+              p.jid === participant.jid
+                ? {
+                    ...p,
+                    phone: profile.phone || p.phone,
+                    phoneDigits: profile.phoneDigits || p.phoneDigits,
+                    displayName: profile.displayName || p.displayName,
+                  }
+                : p
+            );
+            groupParticipantsCacheRef.current.set(groupId, {
+              ...cachedGroup,
+              participants: enrichedList,
+            });
+            setConversations((prev) =>
+              prev.map((c) => (c.id === groupId ? { ...c, groupParticipants: enrichedList } : c))
+            );
+          }
+        }
+        return profile;
+      } catch {
+        return null;
+      }
+    },
+    [authFetch]
+  );
+
+  const memberAvatarsCacheRef = useRef<
+    Map<
+      string,
+      { data: Record<string, { avatarUrl: string | null; about: string | null; aboutSetAt: number | null }>; expiresAt: number }
+    >
+  >(new Map());
+
+  const fetchGroupMemberAvatars = useCallback(
+    async (
+      groupId: string,
+      participants: GroupParticipant[]
+    ): Promise<Record<string, { avatarUrl: string | null; about: string | null; aboutSetAt: number | null }>> => {
+      if (!groupId || !Array.isArray(participants) || participants.length === 0) return {};
+      const now = Date.now();
+      const cached = memberAvatarsCacheRef.current.get(groupId);
+      if (cached && now < cached.expiresAt && Object.keys(cached.data).length >= Math.min(participants.length, 20)) {
+        return cached.data;
+      }
+
+      const payloadMembers = participants.slice(0, 28).map((p) => ({
+        jid: p.jid,
+        phoneDigits: getParticipantPhoneDigits(p) || undefined,
+      }));
+      try {
+        let res = await authFetch(`${API}/messages/${encodeURIComponent(groupId)}/member-avatars`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ members: payloadMembers }),
+        }).catch(() => null);
+        if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+          res = await authFetch(
+            `${DIRECT_API}/messages/${encodeURIComponent(groupId)}/member-avatars`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ members: payloadMembers }),
+            }
+          ).catch(() => null);
+        }
+        if (!res || !res.ok) return cached?.data || {};
+        const json = await res.json().catch(() => null);
+        const avatars =
+          json?.success && json?.data?.avatars && typeof json.data.avatars === "object"
+            ? (json.data.avatars as Record<
+                string,
+                { avatarUrl: string | null; about: string | null; aboutSetAt: number | null }
+              >)
+            : {};
+        const merged = { ...(cached?.data || {}), ...avatars };
+        memberAvatarsCacheRef.current.set(groupId, {
+          data: merged,
+          expiresAt: Date.now() + 2 * 60 * 1000,
+        });
+        return merged;
+      } catch {
+        return cached?.data || {};
+      }
+    },
+    [authFetch]
+  );
+
+  const fetchConversationAvatar = useCallback(
+    async (chatId: string, options?: { forceRefresh?: boolean }): Promise<string | null> => {
+      if (!chatId) return null;
+      const forceRefresh = Boolean(options?.forceRefresh);
+      if (!forceRefresh) {
+        const memUrl = profilePicCacheRef.current.get(chatId);
+        if (memUrl) return memUrl;
+      }
+      try {
+        const qs = forceRefresh ? "?refresh=1" : "";
+        let res = await authFetch(`${API}/messages/${encodeURIComponent(chatId)}/avatar${qs}`, {
+          cache: "no-store",
+        }).catch(() => null);
+        if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+          res = await authFetch(
+            `${DIRECT_API}/messages/${encodeURIComponent(chatId)}/avatar${qs}`,
+            { cache: "no-store" }
+          ).catch(() => null);
+        }
+        if (!res || !res.ok) return null;
+        const json = await res.json().catch(() => null);
+        const profilePic =
+          typeof json?.data?.profilePic === "string" && /^https?:\/\//i.test(json.data.profilePic.trim())
+            ? json.data.profilePic.trim()
+            : null;
+        if (profilePic) {
+          profilePicCacheRef.current.set(chatId, profilePic);
+          setConversations((prev) =>
+            prev.map((c) => (c.id === chatId ? { ...c, profilePic } : c))
+          );
+        }
+        return profilePic;
+      } catch {
+        return null;
+      }
+    },
+    [authFetch]
+  );
 
   // ── Reset state when auth token changes (e.g. after sign-out → sign-in) ──
   // Without this, remounting after login can leave stale empty data if the
@@ -1905,6 +2330,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         }
         lastServerRevRef.current = 0;
         messagesCacheRef.current.clear();
+        profilePicCacheRef.current.clear();
+        lastReadAtRef.current.clear();
         pendingPatchesRef.current.clear();
         recentlyCreatedRef.current.clear();
         deletedIdsRef.current.clear();
@@ -1917,6 +2344,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         setActiveChatId(null);
         lastServerRevRef.current = 0;
         messagesCacheRef.current.clear();
+        profilePicCacheRef.current.clear();
+        lastReadAtRef.current.clear();
         pendingPatchesRef.current.clear();
         recentlyCreatedRef.current.clear();
         deletedIdsRef.current.clear();
@@ -1932,6 +2361,16 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       }
     }
   }, [token, fetchConversations, fetchLabels, conversations.length]);
+
+  const prevUserScopeKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const scopeKey = token ? `${user?.role || ""}|${user?.branch || ""}` : null;
+    if (prevUserScopeKeyRef.current !== null && scopeKey !== null && prevUserScopeKeyRef.current !== scopeKey) {
+      lastServerRevRef.current = 0;
+      fetchConversations();
+    }
+    prevUserScopeKeyRef.current = scopeKey;
+  }, [token, user?.role, user?.branch, fetchConversations]);
 
   // ── Real-Time Server-Sent Events (SSE) Stream ──
   // Instant (< 30ms) reflection when messages arrive or someone replies in Meta Inbox
@@ -1992,6 +2431,16 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               }
             }
 
+            if (payload.type === "session_updated" && payload.data) {
+              verifySession({ force: true, fallbackReason: "deactivated" }).then((stillValid) => {
+                if (!isCancelled && stillValid) {
+                  lastServerRevRef.current = 0;
+                  fetchConversations();
+                }
+              });
+              return;
+            }
+
             if (payload.type === "session_revoked") {
               isCancelled = true;
               if (eventSource) {
@@ -2049,6 +2498,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   deletedAt: message.deletedAt || undefined,
                   deletedBy: message.deletedBy || undefined,
                   reactions: Array.isArray(message.reactions) ? message.reactions : [],
+                  mentions: Array.isArray(message.mentions) ? message.mentions : undefined,
+                  mentionAll: Boolean(message.mentionAll),
                   replyTo: formattedReplyTo,
                 };
 
@@ -2108,15 +2559,29 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
                 if (idx >= 0) {
                   const existing = prev[idx];
+                  const isOpSse = resolveConvInboxMode(existing) === "operation";
+                  const opReadCutoff = isOpSse
+                    ? Math.max(
+                        existing.lastReadAt || 0,
+                        normRemote?.lastReadAt || 0,
+                        lastReadAtRef.current.get(conversationId) || 0
+                      ) || undefined
+                    : undefined;
+                  const msgTs = Number(message?.timestamp) || 0;
+                  const isCoveredByOpRead = Boolean(
+                    isOpSse && !isOutgoing && opReadCutoff && msgTs > 0 && msgTs <= opReadCutoff
+                  );
                   const fallbackUnread = isOutgoing
                     ? 0
-                    : remoteConv?.unreadCount && remoteConv.unreadCount > 0
+                    : isCoveredByOpRead
+                    ? existing.unreadCount || 0
+                    : remoteConv?.unreadCount !== undefined && remoteConv.unreadCount >= 0
                     ? remoteConv.unreadCount
                     : (existing.unreadCount || 0) + 1;
                   const targetUnread = updatedMessagesForConv
                     ? isOutgoing
                       ? 0
-                      : computeUnreadFromMessages(updatedMessagesForConv)
+                      : computeUnreadFromMessages(updatedMessagesForConv, opReadCutoff)
                     : fallbackUnread;
 
                   const pendingPatch = pendingPatchesRef.current.get(conversationId);
@@ -2293,22 +2758,49 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 const nextList = prev.map((c) => {
                   if (c.id !== conversationId) return c;
                   const norm = normalizeConversationMeta(remoteConv);
+                  if (norm.profilePic) {
+                    profilePicCacheRef.current.set(conversationId, norm.profilePic);
+                  }
+                  const preservedPic =
+                    norm.profilePic ?? profilePicCacheRef.current.get(conversationId) ?? c.profilePic;
                   const cachedMsgs = messagesCacheRef.current.get(conversationId) || c.messages || [];
                   if (typeof window !== "undefined" && !hasPending && remoteConv.cashIn !== undefined) {
                     try {
                       localStorage.setItem(`crm_cash_${conversationId}`, String(Number(norm.cashIn) || 0));
                     } catch {}
                   }
+                  const isOpUpdate = resolveConvInboxMode({ ...c, ...norm }) === "operation";
+                  if (isOpUpdate && norm.lastReadAt) {
+                    const prevRef = lastReadAtRef.current.get(conversationId) || 0;
+                    if (norm.lastReadAt > prevRef) {
+                      lastReadAtRef.current.set(conversationId, norm.lastReadAt);
+                    }
+                  }
+                  const opCutoff = isOpUpdate
+                    ? Math.max(
+                        norm.lastReadAt || 0,
+                        c.lastReadAt || 0,
+                        lastReadAtRef.current.get(conversationId) || 0
+                      ) || undefined
+                    : undefined;
+                  const computedRemoteUnread =
+                    cachedMsgs.length > 0
+                      ? computeUnreadFromMessages(cachedMsgs, opCutoff)
+                      : opCutoff && (!norm.lastMessageAt || norm.lastMessageAt <= opCutoff)
+                      ? 0
+                      : norm.unreadCount;
                   return {
                     ...c,
                     ...norm,
                     ...(hasPending ? pending?.updates : {}),
+                    profilePic: preservedPic,
+                    lastReadAt: isOpUpdate ? opCutoff : c.lastReadAt,
                     lastMessageAt: Math.max(
                       c.lastMessageAt || 0,
                       norm.lastMessageAt || 0,
                       hasPending ? pending?.updates.lastMessageAt || 0 : 0
                     ),
-                    unreadCount: cachedMsgs.length > 0 ? computeUnreadFromMessages(cachedMsgs) : norm.unreadCount,
+                    unreadCount: computedRemoteUnread,
                     messages: cachedMsgs,
                   };
                 });
@@ -2316,16 +2808,29 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 return nextList;
               });
             } else if (payload.type === "marked_read" && payload.data) {
-              const { conversationId } = payload.data;
+              const { conversationId, lastReadAt: remoteReadAt } = payload.data;
               if (conversationId) {
-                setConversations((prev) =>
-                  prev.map((c) => {
+                const numericReadAt = Number(remoteReadAt) || Date.now();
+                lastReadAtRef.current.set(
+                  conversationId,
+                  Math.max(lastReadAtRef.current.get(conversationId) || 0, numericReadAt)
+                );
+                setConversations((prev) => {
+                  const nextList = prev.map((c) => {
                     if (c.id !== conversationId) return c;
                     const cachedMsgs = messagesCacheRef.current.get(conversationId) || c.messages || [];
-                    const computed = cachedMsgs.length > 0 ? computeUnreadFromMessages(cachedMsgs) : 0;
-                    return { ...c, unreadCount: computed };
-                  })
-                );
+                    const isOp = resolveConvInboxMode(c) === "operation";
+                    const cutoff = isOp ? lastReadAtRef.current.get(conversationId) : undefined;
+                    const computed = cachedMsgs.length > 0 ? computeUnreadFromMessages(cachedMsgs, cutoff) : 0;
+                    return {
+                      ...c,
+                      unreadCount: computed,
+                      lastReadAt: isOp ? cutoff : c.lastReadAt,
+                    };
+                  });
+                  persistConversationsCache(nextList, true);
+                  return nextList;
+                });
               }
             } else if (payload.type === "message_status" && payload.data) {
               const { conversationId, messageId, status, seenAt, deliveredAt, lastSeenAt } = payload.data;
@@ -2431,6 +2936,15 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   setActiveChatId(mergedInto || null);
                 }
               }
+            } else if (payload.type === "conversation_scope_removed" && payload.data) {
+              const { conversationId } = payload.data;
+              if (conversationId) {
+                messagesCacheRef.current.delete(conversationId);
+                setConversations((prev) => prev.filter((c) => c.id !== conversationId));
+                if (activeChatIdRef.current === conversationId) {
+                  setActiveChatId(null);
+                }
+              }
             } else if (payload.type === "conversations_purged" && payload.data) {
               if (payload.data.channel === "WA") {
                 const purgedInbox: InboxScope = payload.data.inbox === "operation" ? "operation" : "admissions";
@@ -2445,14 +2959,21 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 }
               }
             } else if (payload.type === "message_edited" && payload.data) {
-              const { conversationId, messageId, text, editedAt } = payload.data;
+              const { conversationId, messageId, text, editedAt, mentions, mentionAll } = payload.data;
               if (!conversationId || !messageId) return;
 
               const cached = messagesCacheRef.current.get(conversationId);
               if (cached) {
                 const updated = cached.map((m) =>
                   m.id === messageId
-                    ? { ...m, text, isEdited: true, editedAt: editedAt || Date.now() }
+                    ? {
+                        ...m,
+                        text,
+                        mentions: Array.isArray(mentions) ? mentions : m.mentions,
+                        mentionAll: mentionAll !== undefined ? Boolean(mentionAll) : m.mentionAll,
+                        isEdited: true,
+                        editedAt: editedAt || Date.now(),
+                      }
                     : m
                 );
                 messagesCacheRef.current.set(conversationId, updated);
@@ -2463,11 +2984,50 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   if (c.id !== conversationId) return c;
                   const updatedMessages = c.messages?.map((m) =>
                     m.id === messageId
-                      ? { ...m, text, isEdited: true, editedAt: editedAt || Date.now() }
+                      ? {
+                          ...m,
+                          text,
+                          mentions: Array.isArray(mentions) ? mentions : m.mentions,
+                          mentionAll: mentionAll !== undefined ? Boolean(mentionAll) : m.mentionAll,
+                          isEdited: true,
+                          editedAt: editedAt || Date.now(),
+                        }
                       : m
                   );
                   return { ...c, messages: updatedMessages || [] };
                 })
+              );
+            } else if (payload.type === "conversation_avatar_updated" && payload.data) {
+              const { conversationId, profilePic } = payload.data;
+              if (
+                !conversationId ||
+                typeof profilePic !== "string" ||
+                !/^https?:\/\//i.test(profilePic.trim())
+              ) {
+                return;
+              }
+              const cleanPic = profilePic.trim();
+              profilePicCacheRef.current.set(conversationId, cleanPic);
+              setConversations((prev) =>
+                prev.map((c) => (c.id === conversationId ? { ...c, profilePic: cleanPic } : c))
+              );
+            } else if (payload.type === "group_participants_updated" && payload.data) {
+              const { conversationId, groupParticipants, groupMeta } = payload.data;
+              if (!conversationId || !Array.isArray(groupParticipants)) return;
+              groupParticipantsCacheRef.current.set(conversationId, {
+                participants: groupParticipants,
+                groupMeta: groupMeta || undefined,
+              });
+              setConversations((prev) =>
+                prev.map((c) =>
+                  c.id === conversationId
+                    ? {
+                        ...c,
+                        groupParticipants,
+                        groupMeta: groupMeta || c.groupMeta,
+                      }
+                    : c
+                )
               );
             } else if (payload.type === "message_deleted" && payload.data) {
               const { conversationId, messageId, text, deletedAt, deletedBy } = payload.data;
@@ -2801,13 +3361,17 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     };
   }, [activeChatId, fetchActiveChat]);
 
-  // Scoped view for Meta Reviewer test account (test@meta.com)
+  // Scoped view for Meta Reviewer test account (test@meta.com) & branch-scoped Enrollment Director
   const visibleConversations = useMemo(() => {
+    let list = conversations;
     if (isMetaReviewer) {
-      return conversations.filter(isReviewerAllowedConversation);
+      list = list.filter(isReviewerAllowedConversation);
     }
-    return conversations;
-  }, [conversations, isMetaReviewer]);
+    if (user && normalizeRole(user.role) === "enrollment_director") {
+      list = list.filter((c) => canUserViewConversationInStore(c, user));
+    }
+    return list;
+  }, [conversations, isMetaReviewer, user]);
 
   // Partitioned inbox views (admissions vs operation) and clean badges per inbox
   const admissionsConversations = useMemo(
@@ -2829,6 +3393,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     let leads = 0;
     let auditions = 0;
     let followUps = 0;
+    const isDirectorUser = user && normalizeRole(user.role) === "enrollment_director";
 
     admissionsConversations.forEach((c) => {
       // 2. Leads badge: newly arrived uncontacted leads
@@ -2836,8 +3401,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         leads += 1;
       }
 
-      // 3. Auditions badge: booked auditions
-      if (c.pipeline === "Audition Booked") {
+      // 3. Auditions badge: booked auditions (branch-scoped for Enrollment Director)
+      if (c.pipeline === "Audition Booked" && (!isDirectorUser || canUserViewConversationInStore(c, user))) {
         auditions += 1;
       }
 
@@ -2859,7 +3424,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     });
 
     return { inbox, operationInbox, leads, auditions, followUps };
-  }, [admissionsConversations, operationConversations]);
+  }, [admissionsConversations, operationConversations, user]);
 
   // Instant optimistic update across all pages + background PATCH
   const patchConversation = useCallback(
@@ -3490,11 +4055,49 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     [isReadOnly, authFetch, normalizeConversationMeta, user?.name, user?.role]
   );
 
-  // Unread count is only cleared when a staff member replies (never on chat selection)
-  const markConversationAsRead = useCallback(async (_id: string) => {
-    // Intentionally a no-op on chat open so entering a conversation by mistake
-    // preserves the blue unread message count until a reply is sent.
-  }, []);
+  // Admissions preserves unread count until staff replies; Operation clears unread immediately when opening the card.
+  const markConversationAsRead = useCallback(
+    async (id: string) => {
+      if (!id || isReadOnly) return;
+      const existing = conversationsRef.current.find((c) => c.id === id);
+      if (resolveConvInboxMode(existing || id) !== "operation") {
+        return;
+      }
+      const readAt = Math.max(Date.now(), existing?.lastMessageAt || 0);
+      const maxKnownRead = Math.max(existing?.lastReadAt || 0, lastReadAtRef.current.get(id) || 0);
+      const alreadyRead =
+        (existing?.unreadCount || 0) <= 0 && maxKnownRead >= (existing?.lastMessageAt || 0);
+      if (alreadyRead) return;
+
+      const nextReadAt = Math.max(maxKnownRead, readAt);
+      lastReadAtRef.current.set(id, nextReadAt);
+
+      setConversations((prev) => {
+        let changed = false;
+        const next = prev.map((c) => {
+          if (c.id !== id) return c;
+          if ((c.unreadCount || 0) === 0 && (c.lastReadAt || 0) >= nextReadAt) return c;
+          changed = true;
+          return { ...c, unreadCount: 0, lastReadAt: nextReadAt };
+        });
+        if (!changed) return prev;
+        persistConversationsCache(next);
+        return next;
+      });
+
+      try {
+        let res = await authFetch(`${API}/messages/${encodeURIComponent(id)}/read`, {
+          method: "POST",
+        }).catch(() => null);
+        if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+          await authFetch(`${DIRECT_API}/messages/${encodeURIComponent(id)}/read`, {
+            method: "POST",
+          }).catch(() => {});
+        }
+      } catch {}
+    },
+    [isReadOnly, authFetch]
+  );
 
   const updateConversationClaude = useCallback(
     async (
@@ -3575,6 +4178,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       setSearchQuery("");
       const existing = conversationsRef.current.find((c) => c.id === id);
       const inboxMode = existing ? resolveConvInboxMode(existing) : resolveConvInboxMode(id);
+      if (inboxMode === "operation") {
+        markConversationAsRead(id);
+      }
       const targetPath = inboxMode === "operation" ? "/operation-inbox" : "/";
       if (canAccessRoute(user?.role, targetPath)) {
         router.push(targetPath);
@@ -3584,7 +4190,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         router.push("/");
       }
     },
-    [router, user?.role]
+    [router, user?.role, markConversationAsRead]
   );
 
   // Open deep-linked conversation from notification click (?chat=<id> or Service Worker postMessage)
@@ -3916,6 +4522,109 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     [isReadOnly, user, conversations, patchConversation, authFetch, normalizeConversationMeta]
   );
 
+  const openGroupMemberChat = useCallback(
+    async (
+      groupId: string,
+      participant: GroupParticipant,
+      groupName?: string
+    ): Promise<{ ok: boolean; conversationId?: string; existed?: boolean; error?: string }> => {
+      if (!groupId || !participant) {
+        return { ok: false, error: "Invalid group participant" };
+      }
+
+      // 1. Instant 0ms match if a 1-on-1 Operation inbox chat already exists in browser memory
+      const existing = findExistingDmForParticipant(conversationsRef.current, participant, "operation");
+      if (existing) {
+        return { ok: true, conversationId: existing.id, existed: true };
+      }
+
+      if (isReadOnly) {
+        return { ok: false, error: "View-only account cannot start new conversations." };
+      }
+
+      const phoneDigits = getParticipantPhoneDigits(participant);
+      const label = getParticipantLabel(participant);
+      const cleanDisplayName = !/^\+?\d{7,}$/.test(label) ? label : undefined;
+
+      // 2. If phone is known, reuse instant 0ms manual lead creation inside Operation Inbox
+      if (phoneDigits) {
+        const res = await createManualLead({
+          phone: phoneDigits,
+          name: cleanDisplayName,
+          inbox: "operation",
+          referralType: groupName ? `Group: ${groupName}` : "Group Member",
+          agent: "Unassigned",
+        });
+        if (!res.ok) {
+          return { ok: false, error: res.error || "Could not open conversation" };
+        }
+        return { ok: true, conversationId: res.conversationId, existed: res.existed };
+      }
+
+      // 3. LID-only privacy member: resolve/create on backend cleanly
+      try {
+        const payload = {
+          jid: participant.jid,
+          lid: participant.lid || undefined,
+          userId: participant.userId || undefined,
+          phone: participant.phone || undefined,
+          displayName: cleanDisplayName,
+        };
+        let res = await authFetch(`${API}/messages/${encodeURIComponent(groupId)}/open-member-chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }).catch(() => null);
+        if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+          res = await authFetch(
+            `${DIRECT_API}/messages/${encodeURIComponent(groupId)}/open-member-chat`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            }
+          ).catch(() => null);
+        }
+        const json = res ? await res.json().catch(() => null) : null;
+        if (!res || !res.ok || !json?.success || !json?.data) {
+          return { ok: false, error: json?.error || "Could not open member conversation" };
+        }
+
+        const confirmed = normalizeConversationMeta(json.data);
+        const cachedMsgs = messagesCacheRef.current.get(confirmed.id) || normalizeMessages(json.data.messages || []);
+        const confirmedConv: Conversation = {
+          ...confirmed,
+          messages: cachedMsgs,
+        };
+
+        const manualMap = getStoredManualLeads();
+        manualMap[confirmed.id] = confirmedConv;
+        persistManualLeads(manualMap);
+
+        recentlyCreatedRef.current.set(confirmed.id, {
+          conv: confirmedConv,
+          expiresAt: Date.now() + 60000,
+        });
+
+        setConversations((prev) => {
+          const rest = prev.filter((c) => c.id !== confirmed.id);
+          const next = [confirmedConv, ...rest];
+          persistConversationsCache(next);
+          return next;
+        });
+
+        return {
+          ok: true,
+          conversationId: confirmed.id,
+          existed: Boolean(json.existed),
+        };
+      } catch (err: any) {
+        return { ok: false, error: err?.message || "Failed to open member conversation" };
+      }
+    },
+    [isReadOnly, createManualLead, authFetch, normalizeConversationMeta, normalizeMessages]
+  );
+
   const deleteConversation = useCallback(
     async (senderId: string) => {
       try {
@@ -3980,18 +4689,34 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
   // 0ms optimistic message edit + server sync
   const editMessage = useCallback(
-    async (chatId: string, messageId: string, newText: string): Promise<{ ok: boolean; error?: string }> => {
+    async (
+      chatId: string,
+      messageId: string,
+      newText: string,
+      options?: { mentions?: MessageMention[]; mentionAll?: boolean }
+    ): Promise<{ ok: boolean; error?: string }> => {
       if (isReadOnly) return { ok: false, error: "View-only mode" };
       const trimmed = newText.trim();
       if (!trimmed) return { ok: false, error: "Message cannot be empty" };
 
       const prevCached = messagesCacheRef.current.get(chatId);
       const editedAt = Date.now();
+      const nextMentions = options?.mentions;
+      const nextMentionAll = options?.mentionAll;
 
       // 1. Instant 0ms optimistic update
       if (prevCached) {
         const nextCached = prevCached.map((m) =>
-          m.id === messageId ? { ...m, text: trimmed, isEdited: true, editedAt } : m
+          m.id === messageId
+            ? {
+                ...m,
+                text: trimmed,
+                mentions: nextMentions !== undefined ? nextMentions : m.mentions,
+                mentionAll: nextMentionAll !== undefined ? nextMentionAll : m.mentionAll,
+                isEdited: true,
+                editedAt,
+              }
+            : m
         );
         messagesCacheRef.current.set(chatId, nextCached);
       }
@@ -4002,7 +4727,16 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           return {
             ...c,
             messages: (c.messages || []).map((m) =>
-              m.id === messageId ? { ...m, text: trimmed, isEdited: true, editedAt } : m
+              m.id === messageId
+                ? {
+                    ...m,
+                    text: trimmed,
+                    mentions: nextMentions !== undefined ? nextMentions : m.mentions,
+                    mentionAll: nextMentionAll !== undefined ? nextMentionAll : m.mentionAll,
+                    isEdited: true,
+                    editedAt,
+                  }
+                : m
             ),
           };
         })
@@ -4013,7 +4747,11 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const res = await authFetch(`${API}/messages/${chatId}/messages/${messageId}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: trimmed }),
+          body: JSON.stringify({
+            text: trimmed,
+            mentions: nextMentions,
+            mentionAll: nextMentionAll,
+          }),
         });
         const json = await res.json().catch(() => null);
         if (!res.ok || !json?.success) {
@@ -4025,6 +4763,27 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             );
           }
           return { ok: false, error: json?.error || "Failed to edit message" };
+        }
+        if (json.data) {
+          const patchFromServer = (m: Message): Message =>
+            m.id === messageId
+              ? {
+                  ...m,
+                  text: json.data.text || trimmed,
+                  mentions: Array.isArray(json.data.mentions) ? json.data.mentions : m.mentions,
+                  mentionAll:
+                    json.data.mentionAll !== undefined ? Boolean(json.data.mentionAll) : m.mentionAll,
+                }
+              : m;
+          const curCached = messagesCacheRef.current.get(chatId);
+          if (curCached) {
+            messagesCacheRef.current.set(chatId, curCached.map(patchFromServer));
+          }
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.id === chatId ? { ...c, messages: (c.messages || []).map(patchFromServer) } : c
+            )
+          );
         }
         return { ok: true };
       } catch (err: any) {
@@ -4274,6 +5033,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           isIncoming: false,
           status: "sent",
           senderName: rm.senderName || undefined,
+          mentions: Array.isArray(rm.mentions) ? rm.mentions : undefined,
+          mentionAll: Boolean(rm.mentionAll),
           replyTo: rm.replyTo
             ? {
                 id: String(rm.replyTo.id || rm.replyTo.messageId),
@@ -4291,6 +5052,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           return {
             ...m,
             replyTo: m.replyTo || match.replyTo,
+            mentions:
+              Array.isArray(match.mentions) && match.mentions.length > 0 ? match.mentions : m.mentions,
+            mentionAll: Boolean(m.mentionAll || match.mentionAll),
             senderName: resolvePreferredSenderName(match.senderName, m.senderName),
           };
         });
@@ -4431,6 +5195,11 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         addOptimisticMessages,
         finalizeOptimisticMessages,
         fetchChatMessages: fetchActiveChat,
+        fetchGroupParticipants,
+        fetchGroupMemberProfile,
+        fetchGroupMemberAvatars,
+        fetchConversationAvatar,
+        openGroupMemberChat,
         pushSupported,
         pushEnabled,
         pushPermission,

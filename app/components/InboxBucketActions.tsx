@@ -18,6 +18,7 @@ interface InboxBucketActionsProps {
   isDone: boolean;
   isArchived: boolean;
   canManageBuckets?: boolean;
+  canDownload?: boolean;
   isDownloading?: boolean;
   onAction: (action: InboxBucketAction) => void;
   onDownload: () => void;
@@ -36,6 +37,7 @@ function InboxBucketActionsInner({
   isDone,
   isArchived,
   canManageBuckets = true,
+  canDownload = true,
   isDownloading = false,
   onAction,
   onDownload,
@@ -240,38 +242,42 @@ function InboxBucketActionsInner({
                 </button>
               )}
 
-              <div
-                role="separator"
-                className="my-1 border-t"
-                style={{ borderColor: "var(--border-main)" }}
-              />
+              {canDownload && (
+                <div
+                  role="separator"
+                  className="my-1 border-t"
+                  style={{ borderColor: "var(--border-main)" }}
+                />
+              )}
             </>
           )}
 
-          <button
-            type="button"
-            role="menuitem"
-            disabled={isDownloading}
-            onClick={handleDownloadSelect}
-            className={menuItemClass}
-            style={{ color: "var(--text-primary)" }}
-            title="Download full conversation transcript (.txt)"
-          >
-            {isDownloading ? (
-              <Loader2
-                className="w-3.5 h-3.5 shrink-0 animate-spin"
-                style={{ color: "var(--bg-banner)" }}
-              />
-            ) : (
-              <Download
-                className="w-3.5 h-3.5 shrink-0"
-                style={{ color: "var(--text-secondary)" }}
-              />
-            )}
-            <span className="truncate">
-              {isDownloading ? "Downloading..." : "Download conversation"}
-            </span>
-          </button>
+          {canDownload && (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={isDownloading}
+              onClick={handleDownloadSelect}
+              className={menuItemClass}
+              style={{ color: "var(--text-primary)" }}
+              title="Download full conversation transcript (.txt)"
+            >
+              {isDownloading ? (
+                <Loader2
+                  className="w-3.5 h-3.5 shrink-0 animate-spin"
+                  style={{ color: "var(--bg-banner)" }}
+                />
+              ) : (
+                <Download
+                  className="w-3.5 h-3.5 shrink-0"
+                  style={{ color: "var(--text-secondary)" }}
+                />
+              )}
+              <span className="truncate">
+                {isDownloading ? "Downloading..." : "Download conversation"}
+              </span>
+            </button>
+          )}
         </div>
       )}
     </div>

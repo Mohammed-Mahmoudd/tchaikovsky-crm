@@ -123,6 +123,56 @@ export function canAccessInbox(role?: string, inbox: InboxScope = "admissions"):
   );
 }
 
+/** Returns true if this role accesses the Inbox strictly in view-only mode (cannot message or mutate Inbox state). */
+export function isInboxViewOnlyRole(role?: string): boolean {
+  const norm = normalizeRole(role);
+  return norm === "marketing" || norm === "enrollment_director";
+}
+
+/** Returns true if users with this role can receive CRM conversation data for the given inbox. */
+export function canAccessConversationInboxData(role?: string, inbox: InboxScope = "admissions"): boolean {
+  const norm = normalizeRole(role);
+  if (norm === "chairman") return true;
+  if (norm === "operation") return inbox === "operation";
+  return inbox === "admissions";
+}
+
+/** Returns true if this role may send, edit, unsend, react to, or sync chat messages. */
+export function canSendChatMessagesRole(role?: string): boolean {
+  const norm = normalizeRole(role);
+  return norm !== "marketing" && norm !== "enrollment_director";
+}
+
+/** Returns true if this role may export or download full chat transcripts from the Inbox (Chairman roles only). */
+export function canDownloadChatRole(role?: string): boolean {
+  return Boolean(role) && normalizeRole(role) === "chairman";
+}
+
+/** Returns true if this role sees Agent Name and Branch pills inside Audition calendar cards. */
+export function shouldShowAuditionCardAgentAndBranch(role?: string): boolean {
+  return normalizeRole(role) !== "enrollment_director";
+}
+
+/** Returns true if this role sees and can edit Assigned Agent controls inside Audition modals and forms. */
+export function canAssignAuditionAgentRole(role?: string): boolean {
+  return normalizeRole(role) !== "enrollment_director";
+}
+
+/** Returns true if this role sees and can open conversation chat from Audition cards and modals. */
+export function canOpenAuditionChatRole(role?: string): boolean {
+  return normalizeRole(role) !== "enrollment_director";
+}
+
+/** Returns true if this role sees and can filter the Auditions calendar by agent. */
+export function canFilterAuditionsByAgentRole(role?: string): boolean {
+  return normalizeRole(role) !== "enrollment_director";
+}
+
+/** Returns true if this role can choose or edit a lead's branch inside the Audition details modal. */
+export function canEditAuditionBranchRole(role?: string): boolean {
+  return normalizeRole(role) !== "enrollment_director";
+}
+
 /** Returns true if users with this role should appear in assignment dropdowns for Admissions. */
 export function isAssignableRole(role?: string): boolean {
   return isDirectorOrChairmanRole(role) || isAdmissionRole(role);
@@ -285,6 +335,7 @@ export interface PatchableTeamMember {
   name: string;
   email: string;
   role: Role;
+  branch?: string;
   avatar?: string;
   active: boolean;
 }
@@ -297,6 +348,7 @@ export interface MemberPatchResponsePayload {
     name?: string;
     email?: string;
     role?: string;
+    branch?: string;
     avatar?: string;
     active?: boolean;
   };
@@ -313,11 +365,13 @@ export type ReconcileMemberPatchResult<T extends PatchableTeamMember> =
 export function reconcileMemberPatchResponse<T extends PatchableTeamMember>({
   previousMember,
   requestedRole,
+  requestedBranch,
   resOk,
   payload,
 }: {
   previousMember: T;
   requestedRole?: Role;
+  requestedBranch?: string;
   resOk: boolean;
   payload: MemberPatchResponsePayload | null | undefined;
 }): ReconcileMemberPatchResult<T> {
@@ -330,11 +384,18 @@ export function reconcileMemberPatchResponse<T extends PatchableTeamMember>({
   }
 
   const persistedRole = normalizeRole(payload.user.role || previousMember.role);
+  const persistedBranch =
+    persistedRole === "enrollment_director"
+      ? typeof payload.user.branch === "string"
+        ? payload.user.branch.trim()
+        : previousMember.branch || ""
+      : "";
   const persistedMember: T = {
     ...previousMember,
     name: typeof payload.user.name === "string" ? payload.user.name : previousMember.name,
     email: typeof payload.user.email === "string" ? payload.user.email : previousMember.email,
     role: persistedRole,
+    branch: persistedBranch,
     avatar: payload.user.avatar !== undefined ? payload.user.avatar : previousMember.avatar,
     active: payload.user.active !== undefined ? Boolean(payload.user.active) : previousMember.active,
   };
@@ -344,6 +405,18 @@ export function reconcileMemberPatchResponse<T extends PatchableTeamMember>({
       ok: false,
       member: persistedMember,
       error: `Role did not change to "${getRoleDisplayName(requestedRole)}" (server kept "${getRoleDisplayName(persistedRole)}"). Ensure the latest backend is deployed.`,
+    };
+  }
+
+  if (
+    requestedBranch !== undefined &&
+    persistedRole === "enrollment_director" &&
+    persistedBranch !== requestedBranch.trim()
+  ) {
+    return {
+      ok: false,
+      member: persistedMember,
+      error: `Branch did not change to "${requestedBranch.trim()}" (server kept "${persistedBranch || "Unassigned"}").`,
     };
   }
 

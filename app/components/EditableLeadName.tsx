@@ -11,6 +11,7 @@ export type LeadNameSaveResult = { ok: boolean; error?: string } | void;
 
 export interface EditableLeadNameProps {
   conversationId: string;
+  label?: string;
   displayName: string;
   secondaryText?: string;
   isNameCustomized?: boolean;
@@ -28,6 +29,7 @@ export default function EditableLeadName(props: EditableLeadNameProps) {
 }
 
 function EditableLeadNameInner({
+  label = "Lead Name",
   displayName,
   secondaryText,
   isNameCustomized = true,
@@ -181,7 +183,7 @@ function EditableLeadNameInner({
             htmlFor={isEditing ? inputId : undefined}
             className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase shrink-0"
           >
-            Lead Name
+            {label}
           </label>
           {savedVisible && !isEditing && !error && (
             <span

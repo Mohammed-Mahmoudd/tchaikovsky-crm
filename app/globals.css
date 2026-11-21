@@ -451,6 +451,23 @@ select option:disabled {
 .wa-ed-quote {
   color: var(--text-secondary);
 }
+/* Width-neutral mention highlights inside the composer overlay (.wa-ed-mirror)
+   so cursor/caret alignment in the transparent textarea stays exact. */
+.wa-ed-mention {
+  color: var(--label-blue-text);
+  background: var(--label-blue-bg);
+  border-radius: 3px;
+}
+.wa-ed-mention-all {
+  color: var(--label-amber-text);
+  background: var(--label-amber-bg);
+  border-radius: 3px;
+}
+.wa-ed-mention-self {
+  color: var(--label-green-text);
+  background: var(--label-green-bg);
+  border-radius: 3px;
+}
 
 /* Smooth pulse highlight when jumping/scrolling to a quoted message */
 @keyframes msg-jump-pulse {

@@ -3,10 +3,21 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect, useSyncExternalStore, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useCRM } from '../context/CRMContext';
-import { useAuth } from '../components/AuthProvider';
+import {
+  useAuth,
+  normalizeRole,
+  canAccessInbox,
+  shouldShowAuditionCardAgentAndBranch,
+  canAssignAuditionAgentRole,
+  canOpenAuditionChatRole,
+  canFilterAuditionsByAgentRole,
+  canEditAuditionBranchRole,
+} from '../components/AuthProvider';
 import { MessageSquare, Calendar, ChevronLeft, ChevronRight, X, MapPin, ChevronDown, Search, Lock, Unlock, User, Clock, Check, ArrowLeft, Trash2, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { useBranches, LegacyBranchGroup } from '../lib/branches';
 import { BranchSelect } from '../components/BranchSelect';
+import { SlideOverChatDrawer, useSlideOverChatDrawer } from '../components/SlideOverChatDrawer';
+import { matchesAssignedBranch } from '../utils/branchScope';
 import { getTeamReturnBannerInfo, navigateBackToTeamActivities } from '../utils/teamAuditNav';
 import {
   buildRemoveAuditionPatch,
@@ -216,20 +227,16 @@ function matchesBranch(slotBranch: string | undefined, filter: string): boolean 
       return (
         b.includes('dumai') ||
         b.includes('online') ||
-        (!b.includes('riyadh') && !b.includes('jeddah') && !b.includes('khobar'))
+        (!b.includes('riyadh') && !b.includes('jeddah') && !b.includes('khobar') && !b.includes('alkhobar'))
       );
+    }
+    if (region === 'khobar') {
+      return b.includes('khobar') || b.includes('alkhobar') || b.includes('ajdan walk');
     }
     return b.includes(region);
   }
 
-  const target = filter.toLowerCase().trim();
-  if (b === target) return true;
-  const cleanTarget = target.replace(/\s*\([^)]*\)/g, '').trim();
-  const cleanB = b.replace(/\s*\([^)]*\)/g, '').trim();
-  if (cleanTarget && cleanB && (cleanB.includes(cleanTarget) || cleanTarget.includes(cleanB))) {
-    return true;
-  }
-  return false;
+  return matchesAssignedBranch(slotBranch, filter);
 }
 
 function getBranchDisplayLabel(b: string): string {
@@ -949,8 +956,26 @@ function AgentFilterPopover({
 const subscribeNoop = () => () => {};
 
 function AuditionsPageInner() {
-  const { admissionsConversations: conversations, patchConversation, openChat, assignableAgents } = useCRM();
+  const { admissionsConversations: conversations, patchConversation, assignableAgents } = useCRM();
   const { isReadOnly, user } = useAuth();
+  const isEnrollmentDirector = normalizeRole(user?.role) === 'enrollment_director';
+  const hideAuditionCardAgentAndBranch = !shouldShowAuditionCardAgentAndBranch(user?.role);
+  const canAssignAuditionAgent = canAssignAuditionAgentRole(user?.role);
+  const canOpenAuditionChat = canOpenAuditionChatRole(user?.role);
+  const canFilterByAgent = canFilterAuditionsByAgentRole(user?.role);
+  const canEditAuditionBranch = canEditAuditionBranchRole(user?.role);
+  const assignedDirectorBranch = isEnrollmentDirector ? (user?.branch || '').trim() : '';
+  const hasInboxAccess = canAccessInbox(user?.role, 'admissions');
+  const {
+    chatId: drawerChatId,
+    showDetails: drawerShowDetails,
+    setShowDetails: setDrawerShowDetails,
+    isClosing: isDrawerClosing,
+    panelRef: drawerPanelRef,
+    open: openChatDrawer,
+    close: closeChatDrawer,
+    handleAnimationEnd: handleDrawerAnimationEnd,
+  } = useSlideOverChatDrawer();
   const { branchGroups, legacyBranchGroups } = useBranches();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -992,7 +1017,7 @@ function AuditionsPageInner() {
       localStorage.setItem('audition_view_mode', mode);
     } catch {}
   }, []);
-  const [selectedBranch, setSelectedBranch] = useState<string>(() => {
+  const [selectedBranchState, setSelectedBranchState] = useState<string>(() => {
     if (typeof window === 'undefined') return 'ALL';
     try {
       return localStorage.getItem('audition_selected_branch') || 'ALL';
@@ -1001,15 +1026,33 @@ function AuditionsPageInner() {
     }
   });
 
-  const handleSelectBranch = useCallback((b: string) => {
-    setSelectedBranch(b);
-    try {
-      localStorage.setItem('audition_selected_branch', b);
-    } catch {}
-  }, []);
+  const selectedBranch = isEnrollmentDirector
+    ? assignedDirectorBranch || '__UNASSIGNED_DIRECTOR_BRANCH__'
+    : selectedBranchState;
+
+  const handleSelectBranch = useCallback(
+    (b: string) => {
+      if (isEnrollmentDirector) return;
+      setSelectedBranchState(b);
+      try {
+        localStorage.setItem('audition_selected_branch', b);
+      } catch {}
+    },
+    [isEnrollmentDirector]
+  );
+
+  const handleOpenConversationChat = useCallback(
+    (convId: string) => {
+      if (!convId || !canOpenAuditionChat) return;
+      openChatDrawer(convId);
+    },
+    [canOpenAuditionChat, openChatDrawer]
+  );
+
+  const chatButtonTitle = hasInboxAccess ? 'Open Chat' : 'View conversation (Read-only)';
 
   const urlAgent = searchParams.get('agent');
-  const [selectedAgent, setSelectedAgent] = useState<string>(() => {
+  const [selectedAgentState, setSelectedAgentState] = useState<string>(() => {
     if (urlAgent) return urlAgent;
     if (typeof window === 'undefined') return 'ALL';
     try {
@@ -1019,12 +1062,18 @@ function AuditionsPageInner() {
     }
   });
 
-  const handleSelectAgent = useCallback((agent: string) => {
-    setSelectedAgent(agent);
-    try {
-      localStorage.setItem('audition_selected_agent', agent);
-    } catch {}
-  }, []);
+  const selectedAgent = canFilterByAgent ? selectedAgentState : 'ALL';
+
+  const handleSelectAgent = useCallback(
+    (agent: string) => {
+      if (!canFilterByAgent) return;
+      setSelectedAgentState(agent);
+      try {
+        localStorage.setItem('audition_selected_agent', agent);
+      } catch {}
+    },
+    [canFilterByAgent]
+  );
   const [customSlots, setCustomSlots] = useState<DaySlots>(() => {
     if (typeof window === 'undefined') return {};
     try {
@@ -1052,6 +1101,7 @@ function AuditionsPageInner() {
   const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [panelComment, setPanelComment] = useState('');
   const [panelAgent, setPanelAgent] = useState('Unassigned');
+  const [panelBranch, setPanelBranch] = useState('');
   const [panelStatus, setPanelStatus] = useState<SlotStatus>('booked');
   const [panelFollowUpDate, setPanelFollowUpDate] = useState('');
 
@@ -1329,12 +1379,18 @@ function AuditionsPageInner() {
     };
   }, []);
 
-  // Filter CRM conversations for live auditions using reconciled caches
+  // Filter CRM conversations for live auditions using reconciled caches (plus strict director branch scope)
   const liveAuditionConvs = useMemo(() => {
-    return conversations.filter(c =>
-      isLiveAuditionConversation(c, reconciledCaches.statusOverrides, reconciledCaches.auditionDates)
-    );
-  }, [conversations, reconciledCaches]);
+    return conversations.filter((c) => {
+      if (!isLiveAuditionConversation(c, reconciledCaches.statusOverrides, reconciledCaches.auditionDates)) {
+        return false;
+      }
+      if (isEnrollmentDirector) {
+        return Boolean(assignedDirectorBranch) && matchesAssignedBranch(c.branch, assignedDirectorBranch);
+      }
+      return true;
+    });
+  }, [conversations, reconciledCaches, isEnrollmentDirector, assignedDirectorBranch]);
 
   // Merge live CRM pipeline cards into calendar schedule with real stored values taking priority
   const slots = useMemo<DaySlots>(() => {
@@ -1374,8 +1430,13 @@ function AuditionsPageInner() {
     });
 
     Object.keys(customSlots).forEach(dateKey => {
+      const rawCustom = (customSlots[dateKey] || []).filter(s => {
+        if (!isEnrollmentDirector) return true;
+        return Boolean(assignedDirectorBranch) && matchesAssignedBranch(s.branch, assignedDirectorBranch);
+      });
+      if (rawCustom.length === 0) return;
       if (!result[dateKey]) result[dateKey] = [];
-      const daySlots = (customSlots[dateKey] || []).map(s => {
+      const daySlots = rawCustom.map(s => {
         if (closedSlots[String(s.id)] || closedDays[dateKey]) {
           return { ...s, status: 'closed' as AuditionStatus };
         }
@@ -1385,7 +1446,7 @@ function AuditionsPageInner() {
     });
 
     return result;
-  }, [liveAuditionConvs, customSlots, todayIso, reconciledCaches, closedSlots, closedDays]);
+  }, [liveAuditionConvs, customSlots, todayIso, reconciledCaches, closedSlots, closedDays, isEnrollmentDirector, assignedDirectorBranch]);
 
   const weekStart = useMemo(() => getWeekStart(currentDate), [currentDate]);
   const weekDays = useMemo(() => {
@@ -1432,11 +1493,11 @@ function AuditionsPageInner() {
       if (!inCurrentPeriod && /^\d{4}-\d{2}-\d{2}$/.test(matchedDateKey)) {
         setCurrentDate(new Date(`${matchedDateKey}T12:00:00`));
       }
-      if (!matchesBranch(matchedSlot.branch, selectedBranch)) {
-        setSelectedBranch('ALL');
+      if (!isEnrollmentDirector && !matchesBranch(matchedSlot.branch, selectedBranch)) {
+        setSelectedBranchState('ALL');
       }
-      if (selectedAgent && selectedAgent !== 'ALL' && !matchesAgent(matchedSlot.agent, selectedAgent, user?.name)) {
-        setSelectedAgent('ALL');
+      if (canFilterByAgent && selectedAgent && selectedAgent !== 'ALL' && !matchesAgent(matchedSlot.agent, selectedAgent, user?.name)) {
+        setSelectedAgentState('ALL');
       }
       setHighlightConvId(urlHighlightId);
     });
@@ -1444,7 +1505,7 @@ function AuditionsPageInner() {
     return () => {
       cancelled = true;
     };
-  }, [urlHighlightId, slots, activePeriodDays, selectedBranch, selectedAgent, user?.name]);
+  }, [urlHighlightId, slots, activePeriodDays, selectedBranch, selectedAgent, user?.name, isEnrollmentDirector, canFilterByAgent]);
 
   const handlePrev = useCallback(() => {
     setCurrentDate(d => {
@@ -1481,22 +1542,25 @@ function AuditionsPageInner() {
 
   const confirmAddSlot = () => {
     if (!addingSlot) return;
+    if (isEnrollmentDirector && !assignedDirectorBranch) return;
     const formattedTime = formatTime12(addingSlot.time || '17:00');
-    const branchToAssign =
-      selectedBranch && selectedBranch !== 'ALL' && !selectedBranch.startsWith('REGION:')
-        ? selectedBranch
-        : undefined;
-    const filterDefaultAgent =
-      selectedAgent === 'MINE'
-        ? user?.name || 'Jwana'
-        : selectedAgent && selectedAgent !== 'ALL' && selectedAgent !== 'UNASSIGNED'
-        ? selectedAgent
-        : 'Jwana';
+    const branchToAssign = isEnrollmentDirector
+      ? assignedDirectorBranch
+      : selectedBranch && selectedBranch !== 'ALL' && !selectedBranch.startsWith('REGION:')
+      ? selectedBranch
+      : undefined;
+    const filterDefaultAgent = !canAssignAuditionAgent
+      ? user?.name || 'Unassigned'
+      : selectedAgent === 'MINE'
+      ? user?.name || 'Jwana'
+      : selectedAgent && selectedAgent !== 'ALL' && selectedAgent !== 'UNASSIGNED'
+      ? selectedAgent
+      : 'Jwana';
     const newSlot: Slot = {
       id: `custom-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       time: formattedTime,
       status: 'free',
-      agent: addingSlot.agent.trim() || filterDefaultAgent,
+      agent: (canAssignAuditionAgent ? addingSlot.agent.trim() : '') || filterDefaultAgent,
       branch: branchToAssign,
       dateKey: addingSlot.dateKey,
     };
@@ -1524,10 +1588,11 @@ function AuditionsPageInner() {
 
   const openBooking = (slotId: string | number, dateKey: string, time: string, day: Date) => {
     setBookingModal({ slotId, dateKey, time, dayLabel: formatDayLabel(day) });
-    const prefillBranch =
-      selectedBranch && selectedBranch !== 'ALL' && !selectedBranch.startsWith('REGION:')
-        ? selectedBranch
-        : '';
+    const prefillBranch = isEnrollmentDirector
+      ? assignedDirectorBranch
+      : selectedBranch && selectedBranch !== 'ALL' && !selectedBranch.startsWith('REGION:')
+      ? selectedBranch
+      : '';
     const existingSlot = (slots[dateKey] || []).find(s => s.id === slotId);
     setBookForm({
       branch: prefillBranch,
@@ -1535,7 +1600,11 @@ function AuditionsPageInner() {
       type: 'Adult',
       age: '',
       instrument: '',
-      agent: existingSlot?.agent && existingSlot.agent !== 'Unassigned' ? existingSlot.agent : (user?.name || 'Unassigned'),
+      agent: !canAssignAuditionAgent
+        ? user?.name || 'Unassigned'
+        : existingSlot?.agent && existingSlot.agent !== 'Unassigned'
+        ? existingSlot.agent
+        : user?.name || 'Unassigned',
     });
   };
 
@@ -1611,6 +1680,7 @@ function AuditionsPageInner() {
     setSlotPanel({ slotId, dateKey });
     setPanelComment(stripNoResponseTag(slot.comment || ''));
     setPanelAgent(slot.agent || 'Unassigned');
+    setPanelBranch(slot.branch || '');
     const currentStatus: SlotStatus =
       slot.status !== 'free' && slot.status !== 'booked'
         ? slot.status
@@ -1647,8 +1717,13 @@ function AuditionsPageInner() {
           auditionOutcome: panelStatus,
         };
 
-        if (panelAgent && panelAgent !== (currentSlot.agent || 'Unassigned')) {
+        if (canAssignAuditionAgent && panelAgent && panelAgent !== (currentSlot.agent || 'Unassigned')) {
           patch.agent = panelAgent;
+        }
+
+        const cleanPanelBranch = panelBranch.trim();
+        if (canEditAuditionBranch && cleanPanelBranch && cleanPanelBranch !== (currentSlot.branch || '').trim()) {
+          patch.branch = cleanPanelBranch;
         }
 
         // Handle follow-up date for schedule-followup and joining-later
@@ -1685,14 +1760,15 @@ function AuditionsPageInner() {
               ...s,
               comment: stripNoResponseTag(panelComment),
               status: panelStatus === 'booked' ? 'booked' : panelStatus,
-              agent: panelAgent || s.agent,
+              agent: canAssignAuditionAgent ? (panelAgent || s.agent) : s.agent,
+              branch: canEditAuditionBranch ? (panelBranch.trim() || s.branch) : s.branch,
             }
             : s
         ),
       }));
     }
     setSlotPanel(null);
-  }, [slotPanel, slots, panelComment, panelStatus, panelFollowUpDate, panelAgent, isReadOnly, patchConversation, updateStatusOverride, saveAuditionDate, updateCustomSlotsState]);
+  }, [slotPanel, slots, panelComment, panelStatus, panelFollowUpDate, panelAgent, panelBranch, canAssignAuditionAgent, canEditAuditionBranch, isReadOnly, patchConversation, updateStatusOverride, saveAuditionDate, updateCustomSlotsState]);
 
   const panelSlot = slotPanel ? (slots[slotPanel.dateKey] || []).find(s => s.id === slotPanel.slotId) : null;
   const isCurrentSlotClosed = panelSlot ? Boolean(closedSlots[String(panelSlot.id)] || panelSlot.status === 'closed') : false;
@@ -1904,21 +1980,23 @@ function AuditionsPageInner() {
               color: 'var(--text-primary)',
             }}
           />
-          <input
-            type="text"
-            placeholder="Staff (optional)"
-            value={addingSlot.agent}
-            onChange={e => setAddingSlot(a => (a ? { ...a, agent: e.target.value } : a))}
-            onKeyDown={e => {
-              if (e.key === 'Enter') confirmAddSlot();
-            }}
-            className="w-full h-[26px] px-2 text-[11px] rounded-[4px] outline-none placeholder-gray-400"
-            style={{
-              border: '1px solid var(--border-input)',
-              background: 'var(--bg-input)',
-              color: 'var(--text-primary)',
-            }}
-          />
+          {canAssignAuditionAgent && (
+            <input
+              type="text"
+              placeholder="Staff (optional)"
+              value={addingSlot.agent}
+              onChange={e => setAddingSlot(a => (a ? { ...a, agent: e.target.value } : a))}
+              onKeyDown={e => {
+                if (e.key === 'Enter') confirmAddSlot();
+              }}
+              className="w-full h-[26px] px-2 text-[11px] rounded-[4px] outline-none placeholder-gray-400"
+              style={{
+                border: '1px solid var(--border-input)',
+                background: 'var(--bg-input)',
+                color: 'var(--text-primary)',
+              }}
+            />
+          )}
           <div className="flex gap-1">
             <button
               onClick={confirmAddSlot}
@@ -1952,7 +2030,7 @@ function AuditionsPageInner() {
   };
 
   return (
-    <div className="flex flex-col h-full min-h-0 relative" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
+    <div className="flex flex-col h-full min-h-0 min-w-0 relative overflow-hidden" style={{ background: 'var(--bg-page)', color: 'var(--text-primary)' }}>
 
       {/* Header */}
       <div className="px-4 md:px-6 py-4 flex flex-wrap items-center justify-between gap-2 shrink-0 relative z-30" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)' }}>
@@ -2018,21 +2096,47 @@ function AuditionsPageInner() {
           </div>
 
           {/* User / Agent Filter dropdown */}
-          <AgentFilterPopover
-            selectedAgent={selectedAgent}
-            onSelectAgent={handleSelectAgent}
-            agentOptions={agentOptions}
-            agentCounts={agentCounts}
-            currentUserName={user?.name}
-          />
+          {canFilterByAgent && (
+            <AgentFilterPopover
+              selectedAgent={selectedAgent}
+              onSelectAgent={handleSelectAgent}
+              agentOptions={agentOptions}
+              agentCounts={agentCounts}
+              currentUserName={user?.name}
+            />
+          )}
 
-          {/* Branch Filter dropdown in the old place on the right */}
-          <BranchFilterPopover
-            selectedBranch={selectedBranch}
-            onSelectBranch={handleSelectBranch}
-            branchCounts={branchCounts}
-            branchGroups={legacyBranchGroups}
-          />
+          {/* Branch Filter dropdown (locked badge for branch-scoped Enrollment Director) */}
+          {isEnrollmentDirector ? (
+            <div
+              className="h-[28px] px-2.5 rounded-[6px] inline-flex items-center gap-1.5 text-[11px] font-medium"
+              style={{
+                background: 'var(--bg-pill)',
+                border: '1px solid var(--border-input)',
+                color: assignedDirectorBranch ? 'var(--text-primary)' : '#FF9500',
+              }}
+              title={
+                assignedDirectorBranch
+                  ? `Branch locked to ${assignedDirectorBranch}`
+                  : 'No branch assigned yet'
+              }
+            >
+              <MapPin className="w-3.5 h-3.5 text-[#0066FF] shrink-0" />
+              <span className="truncate max-w-[160px]">
+                {assignedDirectorBranch
+                  ? getBranchDisplayLabel(assignedDirectorBranch)
+                  : 'No branch assigned'}
+              </span>
+              <Lock className="w-3 h-3 opacity-60 shrink-0" />
+            </div>
+          ) : (
+            <BranchFilterPopover
+              selectedBranch={selectedBranch}
+              onSelectBranch={handleSelectBranch}
+              branchCounts={branchCounts}
+              branchGroups={legacyBranchGroups}
+            />
+          )}
 
           {/* Unified Date Picker (works across both Month and Week views) */}
           <input
@@ -2092,6 +2196,23 @@ function AuditionsPageInner() {
           </div>
         </div>
       </div>
+
+      {isEnrollmentDirector && !assignedDirectorBranch && (
+        <div
+          role="status"
+          className="px-4 md:px-6 py-2.5 text-[12px] flex items-center gap-2 shrink-0"
+          style={{
+            background: 'rgba(255, 149, 0, 0.08)',
+            borderBottom: '1px solid rgba(255, 149, 0, 0.25)',
+            color: 'var(--text-primary)',
+          }}
+        >
+          <AlertTriangle className="w-4 h-4 shrink-0" style={{ color: '#FF9500' }} />
+          <span>
+            No branch is assigned to your Enrollment Director account yet. Ask a Chairman to select your branch in Settings so you can view auditions for your branch.
+          </span>
+        </div>
+      )}
 
       {/* Calendar Views: Month (Weeks × Days) | Week | Day */}
       <div className="flex-1 min-h-0 overflow-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
@@ -2281,7 +2402,8 @@ function AuditionsPageInner() {
                                   onBook={() => openBooking(slot.id, key, slot.time, day)}
                                   onStatusChange={status => setSlotStatus(key, slot.id, status)}
                                   onOpenPanel={() => openSlotPanel(slot.id, key)}
-                                  onOpenChat={slot.conversationId ? () => openChat(slot.conversationId!) : undefined}
+                                  onOpenChat={canOpenAuditionChat && slot.conversationId ? () => handleOpenConversationChat(slot.conversationId!) : undefined}
+                                  chatTitle={chatButtonTitle}
                                   onDelete={
                                     slot.status === 'free' || slot.status === 'closed'
                                       ? () => deleteCustomSlot(key, slot.id)
@@ -2290,6 +2412,7 @@ function AuditionsPageInner() {
                                   onToggleClosed={() => toggleSlotClosed(slot.id)}
                                   isReadOnly={isReadOnly}
                                   isHighlighted={Boolean(highlightConvId && slot.conversationId === highlightConvId)}
+                                  hideAgentAndBranch={hideAuditionCardAgentAndBranch}
                                 />
                               ))}
                               <div className="mt-auto pt-0.5">{renderAddSlotControl(key, false)}</div>
@@ -2413,11 +2536,13 @@ function AuditionsPageInner() {
                             onBook={() => openBooking(slot.id, key, slot.time, day)}
                             onStatusChange={(status) => setSlotStatus(key, slot.id, status)}
                             onOpenPanel={() => openSlotPanel(slot.id, key)}
-                            onOpenChat={slot.conversationId ? () => openChat(slot.conversationId!) : undefined}
+                            onOpenChat={canOpenAuditionChat && slot.conversationId ? () => handleOpenConversationChat(slot.conversationId!) : undefined}
+                            chatTitle={chatButtonTitle}
                             onDelete={slot.status === 'free' || slot.status === 'closed' ? () => deleteCustomSlot(key, slot.id) : undefined}
                             onToggleClosed={() => toggleSlotClosed(slot.id)}
                             isReadOnly={isReadOnly}
                             isHighlighted={!!highlightConvId && slot.conversationId === highlightConvId}
+                            hideAgentAndBranch={hideAuditionCardAgentAndBranch}
                           />
                         ))}
                         {renderAddSlotControl(key, isMultiCol)}
@@ -2449,14 +2574,16 @@ function AuditionsPageInner() {
                   <h3 id="slot-panel-title" className="text-[17px] font-bold leading-tight" style={{ color: 'var(--text-primary)' }}>
                     {panelSlot.name || 'Audition Slot'}
                   </h3>
-                  {panelSlot.branch && (
+                  {(panelBranch || panelSlot.branch) && (
                     <span className="text-[11px] font-medium" style={{ color: '#0066FF' }}>
-                      · {panelSlot.branch}
+                      · {panelBranch || panelSlot.branch}
                     </span>
                   )}
-                  <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                    · Agent: <span className="font-medium" style={{ color: 'var(--text-secondary)' }}>{panelAgent || panelSlot.agent || 'Unassigned'}</span>
-                  </span>
+                  {canAssignAuditionAgent && (
+                    <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                      · Agent: <span className="font-medium" style={{ color: 'var(--text-secondary)' }}>{panelAgent || panelSlot.agent || 'Unassigned'}</span>
+                    </span>
+                  )}
                 </div>
                 {(panelSlot.type || panelSlot.phone) && (
                   <p className="text-[11px] font-medium mt-1" style={{ color: 'var(--text-muted)' }}>
@@ -2492,7 +2619,7 @@ function AuditionsPageInner() {
                 </button>
 
                 {/* Chat button - directly next to Slot Toggle */}
-                {(() => {
+                {canOpenAuditionChat && (() => {
                   const chatConvId = panelSlot.conversationId || conversations.find(c => panelSlot.phone && c.phone === panelSlot.phone)?.id;
                   if (chatConvId) {
                     return (
@@ -2500,10 +2627,10 @@ function AuditionsPageInner() {
                         type="button"
                         onClick={() => {
                           setSlotPanel(null);
-                          openChat(chatConvId);
+                          handleOpenConversationChat(chatConvId);
                         }}
                         className="p-1.5 rounded-lg text-[#0066FF] hover:bg-[#0066FF]/10 transition-colors cursor-pointer"
-                        title="Open Chat in Inbox"
+                        title={chatButtonTitle}
                       >
                         <MessageSquare className="w-4 h-4" />
                       </button>
@@ -2538,31 +2665,58 @@ function AuditionsPageInner() {
 
 
             {/* Assigned Agent */}
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <p className="text-[11px] font-semibold" style={{ color: 'var(--text-secondary)' }}>Assigned Agent</p>
-                {panelAgent && panelAgent !== 'Unassigned' && (
-                  <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>
-                    Current: <b style={{ color: 'var(--text-primary)' }}>{panelAgent}</b>
-                  </span>
-                )}
+            {canAssignAuditionAgent && (
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <p className="text-[11px] font-semibold" style={{ color: 'var(--text-secondary)' }}>Assigned Agent</p>
+                  {panelAgent && panelAgent !== 'Unassigned' && (
+                    <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>
+                      Current: <b style={{ color: 'var(--text-primary)' }}>{panelAgent}</b>
+                    </span>
+                  )}
+                </div>
+                <select
+                  disabled={isReadOnly}
+                  value={panelAgent}
+                  onChange={e => setPanelAgent(e.target.value)}
+                  className="w-full h-[36px] px-2.5 text-[12px] font-medium rounded-xl outline-none cursor-pointer"
+                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                >
+                  <option value="Unassigned">Unassigned</option>
+                  {assignableAgents.map(a => (
+                    <option key={a.name} value={a.name}>{a.name}</option>
+                  ))}
+                  {panelAgent && panelAgent !== 'Unassigned' && !assignableAgents.some(a => a.name === panelAgent) && (
+                    <option value={panelAgent}>{panelAgent}</option>
+                  )}
+                </select>
               </div>
-              <select
-                disabled={isReadOnly}
-                value={panelAgent}
-                onChange={e => setPanelAgent(e.target.value)}
-                className="w-full h-[36px] px-2.5 text-[12px] font-medium rounded-xl outline-none cursor-pointer"
-                style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
-              >
-                <option value="Unassigned">Unassigned</option>
-                {assignableAgents.map(a => (
-                  <option key={a.name} value={a.name}>{a.name}</option>
-                ))}
-                {panelAgent && panelAgent !== 'Unassigned' && !assignableAgents.some(a => a.name === panelAgent) && (
-                  <option value={panelAgent}>{panelAgent}</option>
-                )}
-              </select>
-            </div>
+            )}
+
+            {/* Branch */}
+            {canEditAuditionBranch && (
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <p className="text-[11px] font-semibold" style={{ color: 'var(--text-secondary)' }}>Branch</p>
+                  {(panelBranch || panelSlot.branch) ? (
+                    <span className="text-[10px] font-medium truncate max-w-[65%]" style={{ color: 'var(--text-muted)' }}>
+                      Current: <b style={{ color: 'var(--text-primary)' }}>{panelBranch || panelSlot.branch}</b>
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-medium text-[#FF9500]">
+                      Not assigned
+                    </span>
+                  )}
+                </div>
+                <BranchSelect
+                  value={panelBranch}
+                  onChange={b => setPanelBranch(b)}
+                  branchGroups={branchGroups}
+                  placeholder="Select branch…"
+                  disabled={isReadOnly}
+                />
+              </div>
+            )}
 
             {/* Audition Outcome */}
             <div>
@@ -2682,8 +2836,13 @@ function AuditionsPageInner() {
                 <label className="text-[11px] font-bold mb-1 block" style={{ color: 'var(--text-primary)' }}>Branch *</label>
                 <BranchSelect
                   value={bookForm.branch}
-                  onChange={(b) => setBookForm((f) => ({ ...f, branch: b }))}
+                  onChange={(b) => {
+                    if (!isEnrollmentDirector) {
+                      setBookForm((f) => ({ ...f, branch: b }));
+                    }
+                  }}
                   branchGroups={branchGroups}
+                  disabled={isEnrollmentDirector}
                 />
               </div>
 
@@ -2735,23 +2894,25 @@ function AuditionsPageInner() {
                 />
               </div>
 
-              <div>
-                <label className="text-[11px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>Assigned Agent</label>
-                <select
-                  value={bookForm.agent}
-                  onChange={e => setBookForm(f => ({ ...f, agent: e.target.value }))}
-                  className="w-full h-[38px] px-2.5 text-[13px] rounded-xl outline-none cursor-pointer"
-                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
-                >
-                  <option value="Unassigned">Unassigned</option>
-                  {assignableAgents.map(a => (
-                    <option key={a.name} value={a.name}>{a.name}</option>
-                  ))}
-                  {bookForm.agent && bookForm.agent !== 'Unassigned' && !assignableAgents.some(a => a.name === bookForm.agent) && (
-                    <option value={bookForm.agent}>{bookForm.agent}</option>
-                  )}
-                </select>
-              </div>
+              {canAssignAuditionAgent && (
+                <div>
+                  <label className="text-[11px] font-semibold mb-1 block" style={{ color: 'var(--text-secondary)' }}>Assigned Agent</label>
+                  <select
+                    value={bookForm.agent}
+                    onChange={e => setBookForm(f => ({ ...f, agent: e.target.value }))}
+                    className="w-full h-[38px] px-2.5 text-[13px] rounded-xl outline-none cursor-pointer"
+                    style={{ background: 'var(--bg-input)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
+                  >
+                    <option value="Unassigned">Unassigned</option>
+                    {assignableAgents.map(a => (
+                      <option key={a.name} value={a.name}>{a.name}</option>
+                    ))}
+                    {bookForm.agent && bookForm.agent !== 'Unassigned' && !assignableAgents.some(a => a.name === bookForm.agent) && (
+                      <option value={bookForm.agent}>{bookForm.agent}</option>
+                    )}
+                  </select>
+                </div>
+              )}
             </div>
             <div className="flex gap-2 pt-1 flex-wrap">
               <button disabled={!bookForm.name || !bookForm.branch} onClick={confirmBooking} className="flex-1 h-[38px] text-[13px] font-semibold text-white rounded-xl cursor-pointer disabled:opacity-50" style={{ background: '#0066FF' }}>
@@ -2910,11 +3071,87 @@ function AuditionsPageInner() {
         </div>
       )}
 
+      {/* Slide-over chat drawer when accessed without direct Inbox navigation */}
+      {canOpenAuditionChat && (
+        <SlideOverChatDrawer
+          chatId={drawerChatId}
+          showDetails={drawerShowDetails}
+          isClosing={isDrawerClosing}
+          panelRef={drawerPanelRef}
+          onToggleDetails={() => setDrawerShowDetails((v) => !v)}
+          onCloseDetails={() => setDrawerShowDetails(false)}
+          onClose={closeChatDrawer}
+          onAnimationEnd={handleDrawerAnimationEnd}
+          hideDetailsToggle={!hasInboxAccess}
+        />
+      )}
+
     </div>
   );
 }
 
 // ─── Slot Card ────────────────────────────────────────────────────────────────
+
+/** Renders branch and assigned-agent pills inside an audition card unless hidden for the active role. */
+function SlotCardMetadataPills({
+  hidden,
+  branch,
+  agent,
+  solidInverse = false,
+  iconClassName,
+  iconStyle,
+  spacingClass = 'mt-1',
+}: {
+  hidden?: boolean;
+  branch?: string;
+  agent?: string;
+  solidInverse?: boolean;
+  iconClassName?: string;
+  iconStyle?: React.CSSProperties;
+  spacingClass?: string;
+}) {
+  if (hidden || (!branch && !agent)) {
+    return null;
+  }
+
+  const pillClass = solidInverse
+    ? 'inline-flex items-center gap-1 text-[8px] px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight bg-black/20 text-white'
+    : 'inline-flex items-center gap-1 text-[8px] px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight';
+  const pillStyle = solidInverse
+    ? undefined
+    : { background: 'var(--bg-pill)', border: '1px solid var(--border-input)' };
+
+  return (
+    <div className={`flex flex-col items-start gap-1 ${spacingClass}`}>
+      {branch && (
+        <div
+          className={`${pillClass} font-normal`}
+          style={pillStyle}
+          title={branch}
+        >
+          <MapPin className={`w-2 h-2 shrink-0 ${iconClassName || ''}`} style={iconStyle} />
+          <span
+            className={`truncate ${solidInverse ? 'text-white/90' : ''}`}
+            style={solidInverse ? undefined : { color: 'var(--text-secondary)' }}
+          >
+            {branch}
+          </span>
+        </div>
+      )}
+      {agent && (
+        <div className={`${pillClass} font-medium`} style={pillStyle}>
+          <User className={`w-2 h-2 shrink-0 ${iconClassName || ''}`} style={iconStyle} />
+          <span
+            className={`truncate ${solidInverse ? 'text-white' : ''}`}
+            style={solidInverse ? undefined : { color: 'var(--text-primary)' }}
+          >
+            {agent}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function SlotCard({
   slot,
@@ -2922,20 +3159,24 @@ function SlotCard({
   onStatusChange,
   onOpenPanel,
   onOpenChat,
+  chatTitle,
   onDelete,
   onToggleClosed,
   isReadOnly,
   isHighlighted,
+  hideAgentAndBranch,
 }: {
   slot: Slot;
   onBook: () => void;
   onStatusChange: (s: SlotStatus) => void;
   onOpenPanel: () => void;
   onOpenChat?: () => void;
+  chatTitle?: string;
   onDelete?: () => void;
   onToggleClosed?: () => void;
   isReadOnly?: boolean;
   isHighlighted?: boolean;
+  hideAgentAndBranch?: boolean;
 }) {
   const highlightRef = useRef<HTMLDivElement>(null);
 
@@ -2971,26 +3212,12 @@ function SlotCard({
               <p className="text-[11px] font-semibold leading-tight truncate" style={{ color: 'var(--text-primary)' }}>{slot.name}</p>
             )}
             <p className="text-[9px] mt-0.5 text-red-500/80 font-medium">Slot unavailable</p>
-            {(slot.branch || (slot.agent && slot.agent !== 'Unassigned')) && (
-              <div className="flex flex-col items-start gap-1 mt-1">
-                {slot.branch && (
-                  <div
-                    className="inline-flex items-center gap-1 text-[8px] font-normal px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight"
-                    style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}
-                    title={slot.branch}
-                  >
-                    <MapPin className="w-2 h-2 shrink-0 text-red-500 opacity-70" />
-                    <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{slot.branch}</span>
-                  </div>
-                )}
-                {slot.agent && slot.agent !== 'Unassigned' && (
-                  <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
-                    <User className="w-2 h-2 shrink-0 text-red-500 opacity-70" />
-                    <span className="truncate" style={{ color: 'var(--text-primary)' }}>{slot.agent}</span>
-                  </div>
-                )}
-              </div>
-            )}
+            <SlotCardMetadataPills
+              hidden={hideAgentAndBranch}
+              branch={slot.branch}
+              agent={slot.agent && slot.agent !== 'Unassigned' ? slot.agent : undefined}
+              iconClassName="text-red-500 opacity-70"
+            />
           </div>
           <div className="flex items-center gap-1 shrink-0">
             {onOpenChat && (
@@ -2998,7 +3225,7 @@ function SlotCard({
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onOpenChat(); }}
                 className="w-5 h-5 flex items-center justify-center rounded text-[#0066FF] hover:bg-[#0066FF]/15 transition-colors"
-                title="Open Chat in Inbox"
+                title={chatTitle || "Open Chat"}
               >
                 <MessageSquare className="w-3 h-3" />
               </button>
@@ -3046,26 +3273,13 @@ function SlotCard({
             </button>
           )}
         </div>
-        {(slot.branch || slot.agent) && (
-          <div className="flex flex-col items-start gap-1 mt-0.5">
-            {slot.branch && (
-              <div
-                className="inline-flex items-center gap-1 text-[8px] font-normal px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight"
-                style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}
-                title={slot.branch}
-              >
-                <MapPin className="w-2 h-2 shrink-0 text-[#0066FF] opacity-70" />
-                <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{slot.branch}</span>
-              </div>
-            )}
-            {slot.agent && (
-              <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
-                <User className="w-2 h-2 shrink-0 text-[#0066FF] opacity-70" />
-                <span className="truncate" style={{ color: 'var(--text-primary)' }}>{slot.agent}</span>
-              </div>
-            )}
-          </div>
-        )}
+        <SlotCardMetadataPills
+          hidden={hideAgentAndBranch}
+          branch={slot.branch}
+          agent={slot.agent || undefined}
+          iconClassName="text-[#0066FF] opacity-70"
+          spacingClass="mt-0.5"
+        />
         <p className="text-[10px] mt-1 text-[#0066FF] font-medium">
           {!isReadOnly ? "Free — click to book" : "Free slot"}
         </p>
@@ -3107,7 +3321,7 @@ function SlotCard({
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onOpenChat(); }}
                 className="w-5 h-5 flex items-center justify-center rounded text-[#0066FF] hover:bg-[#0066FF]/15 transition-colors"
-                title="Open Chat in Inbox"
+                title={chatTitle || "Open Chat"}
               >
                 <MessageSquare className="w-3 h-3" />
               </button>
@@ -3115,23 +3329,12 @@ function SlotCard({
           </div>
         </div>
 
-        {/* Branch & Agent inside booking slot */}
-        <div className="flex flex-col items-start gap-1 mt-1">
-          {slot.branch && (
-            <div
-              className="inline-flex items-center gap-1 text-[8px] font-normal px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight"
-              style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}
-              title={slot.branch}
-            >
-              <MapPin className="w-2 h-2 shrink-0 text-[#0066FF] opacity-80" />
-              <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{slot.branch}</span>
-            </div>
-          )}
-          <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
-            <User className="w-2 h-2 shrink-0 text-[#0066FF] opacity-80" />
-            <span className="truncate" style={{ color: 'var(--text-primary)' }}>{slot.agent || 'Unassigned'}</span>
-          </div>
-        </div>
+        <SlotCardMetadataPills
+          hidden={hideAgentAndBranch}
+          branch={slot.branch}
+          agent={slot.agent || 'Unassigned'}
+          iconClassName="text-[#0066FF] opacity-80"
+        />
 
         {slot.comment ? (
           <p className="text-[10px] mt-1.5 leading-snug line-clamp-2 px-1.5 py-0.5 rounded" style={{ color: 'var(--text-secondary)', background: 'var(--bg-pill)' }}>
@@ -3198,29 +3401,20 @@ function SlotCard({
               type="button"
               onClick={(e) => { e.stopPropagation(); onOpenChat(); }}
               className="w-5 h-5 flex items-center justify-center rounded text-white hover:bg-white/20 transition-colors shrink-0"
-              title="Open Chat in Inbox"
+              title={chatTitle || "Open Chat"}
             >
               <MessageSquare className="w-3 h-3" />
             </button>
           )}
         </div>
 
-        {/* Branch & Agent inside registered slot */}
-        <div className="flex flex-col items-start gap-1 mt-1">
-          {slot.branch && (
-            <div
-              className="inline-flex items-center gap-1 text-[8px] font-normal px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight bg-black/20 text-white"
-              title={slot.branch}
-            >
-              <MapPin className="w-2 h-2 shrink-0 opacity-80" />
-              <span className="truncate text-white/90">{slot.branch}</span>
-            </div>
-          )}
-          <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight bg-black/20 text-white">
-            <User className="w-2 h-2 shrink-0 opacity-80" />
-            <span className="truncate text-white">{slot.agent || 'Unassigned'}</span>
-          </div>
-        </div>
+        <SlotCardMetadataPills
+          hidden={hideAgentAndBranch}
+          branch={slot.branch}
+          agent={slot.agent || 'Unassigned'}
+          solidInverse
+          iconClassName="opacity-80"
+        />
 
         {slot.comment ? (
           <p className="text-[10px] mt-1.5 leading-snug line-clamp-2 text-white/95 bg-black/15 px-1.5 py-0.5 rounded">
@@ -3263,30 +3457,20 @@ function SlotCard({
             onClick={(e) => { e.stopPropagation(); onOpenChat(); }}
             className="w-5 h-5 flex items-center justify-center rounded transition-colors shrink-0"
             style={{ color: cfg.color }}
-            title="Open Chat in Inbox"
+            title={chatTitle || "Open Chat"}
           >
             <MessageSquare className="w-3 h-3" />
           </button>
         )}
       </div>
 
-      {/* Branch & Agent inside outcome slot */}
-      <div className="flex flex-col items-start gap-1 mt-1">
-        {slot.branch && (
-          <div
-            className="inline-flex items-center gap-1 text-[8px] font-normal px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight"
-            style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}
-            title={slot.branch}
-          >
-            <MapPin className="w-2 h-2 shrink-0 opacity-70" style={{ color: cfg.color }} />
-            <span className="truncate" style={{ color: 'var(--text-secondary)' }}>{slot.branch}</span>
-          </div>
-        )}
-        <div className="inline-flex items-center gap-1 text-[8px] font-medium px-1.5 py-[0.5px] rounded max-w-full truncate leading-tight" style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)' }}>
-          <User className="w-2 h-2 shrink-0 opacity-70" style={{ color: cfg.color }} />
-          <span className="truncate" style={{ color: 'var(--text-primary)' }}>{slot.agent || 'Unassigned'}</span>
-        </div>
-      </div>
+      <SlotCardMetadataPills
+        hidden={hideAgentAndBranch}
+        branch={slot.branch}
+        agent={slot.agent || 'Unassigned'}
+        iconClassName="opacity-70"
+        iconStyle={{ color: cfg.color }}
+      />
 
       {slot.comment ? (
         <p className="text-[10px] mt-1.5 leading-snug line-clamp-2 px-1.5 py-0.5 rounded" style={{ color: cfg.color, background: `${cfg.color}10` }}>

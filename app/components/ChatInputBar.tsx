@@ -19,7 +19,19 @@ import { EmojiPicker, recordRecentEmoji } from "./EmojiPicker";
 import { ComposerAssistBar, FormatAction } from "./ComposerAssistBar";
 import { FastRepliesPopover } from "./FastRepliesPopover";
 import { FastReplyModal } from "./FastReplyModal";
+import { GroupMentionPopover } from "./GroupMentionPopover";
 import { useAuth } from "./AuthProvider";
+import {
+  applyMentionSelection,
+  detectMentionTrigger,
+  filterMentionCandidates,
+  reconcileComposerMentions,
+  type ComposerMentionItem,
+  type GroupMetaInfo,
+  type GroupParticipant,
+  type MentionCandidate,
+  type MessageMention,
+} from "../utils/groupMentions";
 import {
   QuickReply,
   FetchLike,
@@ -249,9 +261,15 @@ interface ChatInputBarProps {
   chatId: string;
   /** Conversation channel — controls formatting support (WhatsApp) vs plain text (IG / FB) */
   channel?: MessageChannel;
+  isGroup?: boolean;
+  groupParticipants?: GroupParticipant[];
+  groupMeta?: GroupMetaInfo | null;
+  isLoadingParticipants?: boolean;
+  onRefreshParticipants?: () => void;
   token?: string | null;
   isReadOnly: boolean;
   canSendMessages: boolean;
+  readOnlyReason?: string;
   isAssignedToOther: boolean;
   assignedAgent?: string;
   userName?: string;
@@ -262,11 +280,21 @@ interface ChatInputBarProps {
   onSendMessage: (
     text: string,
     attachments?: OutgoingAttachmentPayload[],
-    replyTo?: { id: string; text: string; senderName?: string; isIncoming?: boolean }
+    replyTo?: { id: string; text: string; senderName?: string; isIncoming?: boolean },
+    mentionPayload?: { mentions?: MessageMention[]; mentionAll?: boolean }
   ) => Promise<boolean>;
-  editingMessage?: { id: string; text: string } | null;
+  editingMessage?: {
+    id: string;
+    text: string;
+    mentions?: MessageMention[];
+    mentionAll?: boolean;
+  } | null;
   onCancelEdit?: () => void;
-  onSaveEdit?: (messageId: string, newText: string) => Promise<boolean>;
+  onSaveEdit?: (
+    messageId: string,
+    newText: string,
+    mentionPayload?: { mentions?: MessageMention[]; mentionAll?: boolean }
+  ) => Promise<boolean>;
   replyingTo?: ActiveReplyContext | null;
   onCancelReply?: () => void;
   onJumpToMessage?: (id: string) => void;
@@ -276,9 +304,15 @@ interface ChatInputBarProps {
 export const ChatInputBar = React.memo(function ChatInputBar({
   chatId,
   channel = "WA",
+  isGroup = false,
+  groupParticipants = [],
+  groupMeta = null,
+  isLoadingParticipants = false,
+  onRefreshParticipants,
   token,
   isReadOnly,
   canSendMessages,
+  readOnlyReason,
   isAssignedToOther,
   assignedAgent,
   userName,
@@ -302,18 +336,28 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [queuedAttachments, setQueuedAttachments] = useState<QueuedAttachment[]>([]);
+  const [selectedMentions, setSelectedMentions] = useState<ComposerMentionItem[]>([]);
+  const [mentionAll, setMentionAll] = useState(false);
+  const [isMentionDismissed, setIsMentionDismissed] = useState(false);
+  const [activeMentionIndex, setActiveMentionIndex] = useState(0);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const mirrorRef = useRef<HTMLDivElement>(null);
-  // Caret position drives context-aware emoji suggestions
+  // Caret position drives context-aware emoji suggestions & @mention autocomplete
   const [caret, setCaret] = useState(0);
   // Word count at which the agent dismissed suggestions (Esc) — reappear on the next word
   const [dismissedAtWords, setDismissedAtWords] = useState<number | null>(null);
   const supportsFormatting = CHANNEL_CAPABILITIES[channel]?.formatting ?? false;
-  const editorHighlight = useMemo(
-    () => (supportsFormatting && text ? renderEditorHighlight(text, true) : null),
-    [supportsFormatting, text]
-  );
+  const mentionsEnabled = Boolean(isGroup && channel === "WA");
+  const editorHighlight = useMemo(() => {
+    if (!supportsFormatting || !text) return null;
+    if (!mentionsEnabled) return renderEditorHighlight(text, true);
+    return renderEditorHighlight(text, true, {
+      mentions: selectedMentions,
+      mentionAll,
+      participants: groupParticipants,
+    });
+  }, [supportsFormatting, text, mentionsEnabled, selectedMentions, mentionAll, groupParticipants]);
   const photoInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const attachMenuRef = useRef<HTMLDivElement>(null);
@@ -364,6 +408,10 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     setDismissedAtWords(null);
     setIsFastRepliesDismissed(false);
     setActiveReplyIndex(0);
+    setSelectedMentions([]);
+    setMentionAll(false);
+    setIsMentionDismissed(false);
+    setActiveMentionIndex(0);
     setIsSending(false);
     setShowEmojiPicker(false);
     setShowAttachMenu(false);
@@ -393,6 +441,21 @@ export const ChatInputBar = React.memo(function ChatInputBar({
       setCaret(len);
       setDismissedAtWords(null);
       setShowAttachMenu(false);
+      const initialMentions: ComposerMentionItem[] = (editingMessage.mentions || [])
+        .filter((m) => Boolean(m?.jid || m?.userId || m?.displayName))
+        .map((m) => ({
+          jid: m.jid || (m.userId ? `${m.userId}@s.whatsapp.net` : m.displayName),
+          userId: m.userId,
+          phone: m.phone,
+          displayName: m.displayName,
+          token: m.token || `@${m.displayName}`,
+          isSelf: m.isSelf,
+          isGroupMention: m.isGroupMention,
+        }));
+      setSelectedMentions(initialMentions);
+      setMentionAll(Boolean(editingMessage.mentionAll));
+      setIsMentionDismissed(false);
+      setActiveMentionIndex(0);
       setTimeout(() => {
         if (inputRef.current) {
           inputRef.current.focus();
@@ -533,16 +596,24 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   );
 
   /** Apply a text edit and restore the caret / selection on the next frame. */
-  const applyEdit = useCallback((result: EditResult) => {
-    setText(result.text);
-    setCaret(result.selEnd);
-    requestAnimationFrame(() => {
-      const el = inputRef.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(result.selStart, result.selEnd);
-    });
-  }, []);
+  const applyEdit = useCallback(
+    (result: EditResult) => {
+      setText(result.text);
+      setCaret(result.selEnd);
+      if (mentionsEnabled) {
+        const rec = reconcileComposerMentions(result.text, selectedMentions, mentionAll);
+        setSelectedMentions(rec.mentions);
+        setMentionAll(rec.mentionAll);
+      }
+      requestAnimationFrame(() => {
+        const el = inputRef.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(result.selStart, result.selEnd);
+      });
+    },
+    [mentionsEnabled, selectedMentions, mentionAll]
+  );
 
   // ── Smart emoji suggestions (pure, memoized, sub-millisecond) ──
   const textBeforeCaret = text.slice(0, Math.min(caret, text.length));
@@ -604,10 +675,19 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     }
   }, []);
 
-  // Auto-grow textarea height with content (up to MAX_TEXTAREA_HEIGHT, then scroll)
-  useLayoutEffect(() => {
+  // Auto-grow textarea height with content (up to MAX_TEXTAREA_HEIGHT, then scroll),
+  // while keeping empty inputs single-line regardless of drawer width transitions or long placeholders.
+  const syncComposerHeight = useCallback(() => {
     const el = inputRef.current;
     if (!el) return;
+    if (!text) {
+      el.style.height = "";
+      el.style.overflowY = "hidden";
+      if (mirrorRef.current) {
+        mirrorRef.current.style.height = "";
+      }
+      return;
+    }
     el.style.height = "auto";
     const next = Math.min(el.scrollHeight, MAX_TEXTAREA_HEIGHT);
     el.style.height = `${next}px`;
@@ -618,8 +698,30 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     }
   }, [text]);
 
+  useLayoutEffect(() => {
+    syncComposerHeight();
+  }, [syncComposerHeight]);
+
+  // Re-sync multi-line height when the drawer/panel width changes (e.g. Pipeline width transition or Details toggle)
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let lastWidth = el.clientWidth;
+    const ro = new ResizeObserver((entries) => {
+      const nextWidth = entries[0]?.contentRect?.width ?? el.clientWidth;
+      if (Math.abs(nextWidth - lastWidth) < 1) return;
+      lastWidth = nextWidth;
+      syncComposerHeight();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [syncComposerHeight]);
+
   const handleCancelEditMode = useCallback(() => {
     setText("");
+    setSelectedMentions([]);
+    setMentionAll(false);
+    setIsMentionDismissed(false);
     setShowEmojiPicker(false);
     onCancelEdit?.();
     requestAnimationFrame(() => {
@@ -632,19 +734,38 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     const hasAttachments = queuedAttachments.length > 0;
     if ((!trimmed && !hasAttachments) || isSending || isReadOnly || !canSendMessages) return;
 
+    const reconciledMentions = mentionsEnabled
+      ? reconcileComposerMentions(trimmed, selectedMentions, mentionAll)
+      : { mentions: [], mentionAll: false };
+    const mentionPayload = mentionsEnabled
+      ? {
+          mentions: reconciledMentions.mentions,
+          mentionAll: reconciledMentions.mentionAll,
+        }
+      : undefined;
+
     // If editing an existing WhatsApp message
     if (editingMessage && onSaveEdit) {
-      if (trimmed === editingMessage.text.trim()) {
+      if (
+        trimmed === editingMessage.text.trim() &&
+        Boolean(mentionPayload?.mentionAll) === Boolean(editingMessage.mentionAll)
+      ) {
         handleCancelEditMode();
         return;
       }
+      const prevMentionsSnap = [...selectedMentions];
+      const prevMentionAllSnap = mentionAll;
       setIsSending(true);
       setShowEmojiPicker(false);
       setText("");
-      const ok = await onSaveEdit(editingMessage.id, trimmed);
+      setSelectedMentions([]);
+      setMentionAll(false);
+      const ok = await onSaveEdit(editingMessage.id, trimmed, mentionPayload);
       setIsSending(false);
       if (!ok) {
         setText(trimmed);
+        setSelectedMentions(prevMentionsSnap);
+        setMentionAll(prevMentionAllSnap);
       } else {
         inputRef.current?.focus();
       }
@@ -652,11 +773,16 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     }
 
     const attachmentsSnapshot = [...queuedAttachments];
+    const mentionsSnapshot = [...selectedMentions];
+    const mentionAllSnapshot = mentionAll;
     setIsSending(true);
     setShowEmojiPicker(false);
     setShowAttachMenu(false);
     // Optimistically clear immediately so the user can keep typing without waiting
     setText("");
+    setSelectedMentions([]);
+    setMentionAll(false);
+    setIsMentionDismissed(false);
     setQueuedAttachments([]);
 
     try {
@@ -682,12 +808,14 @@ export const ChatInputBar = React.memo(function ChatInputBar({
 
       onCancelReply?.();
 
-      const success = await onSendMessage(outgoing, readyPayloads, replyPayload);
+      const success = await onSendMessage(outgoing, readyPayloads, replyPayload, mentionPayload);
       setIsSending(false);
 
       if (!success) {
-        // Restore input text and attachments on network/server error so nothing is lost
+        // Restore input text, mentions, and attachments on network/server error so nothing is lost
         setText(trimmed);
+        setSelectedMentions(mentionsSnapshot);
+        setMentionAll(mentionAllSnapshot);
         setQueuedAttachments(attachmentsSnapshot);
       } else {
         inputRef.current?.focus();
@@ -695,6 +823,8 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     } catch {
       setIsSending(false);
       setText(trimmed);
+      setSelectedMentions(mentionsSnapshot);
+      setMentionAll(mentionAllSnapshot);
       setQueuedAttachments(attachmentsSnapshot);
     }
   }, [
@@ -703,6 +833,9 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     isSending,
     isReadOnly,
     canSendMessages,
+    mentionsEnabled,
+    selectedMentions,
+    mentionAll,
     editingMessage,
     onSaveEdit,
     handleCancelEditMode,
@@ -830,11 +963,122 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     [token, authFetch]
   );
 
-  const showSuggestions = suggestion.emojis.length > 0 && !isSuggestionDismissed && !showFastReplies;
+  // ── @Mention autocomplete detection (WhatsApp group chats in Operation Inbox) ──
+  const mentionTrigger = useMemo(
+    () => (mentionsEnabled ? detectMentionTrigger(text, caret, selectedMentions) : null),
+    [mentionsEnabled, text, caret, selectedMentions]
+  );
+
+  const lastMentionQueryRef = useRef<string | null>(null);
+  useEffect(() => {
+    const q = mentionTrigger ? mentionTrigger.query : null;
+    if (q !== lastMentionQueryRef.current) {
+      lastMentionQueryRef.current = q;
+      setIsMentionDismissed(false);
+      setActiveMentionIndex(0);
+    }
+  }, [mentionTrigger]);
+
+  const autoFetchedGroupRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      mentionTrigger &&
+      mentionsEnabled &&
+      (!groupParticipants || groupParticipants.length === 0) &&
+      !isLoadingParticipants &&
+      onRefreshParticipants &&
+      autoFetchedGroupRef.current !== chatId
+    ) {
+      autoFetchedGroupRef.current = chatId;
+      onRefreshParticipants();
+    }
+  }, [
+    mentionTrigger,
+    mentionsEnabled,
+    groupParticipants,
+    isLoadingParticipants,
+    onRefreshParticipants,
+    chatId,
+  ]);
+
+  const mentionCandidates = useMemo(
+    () => (mentionTrigger ? filterMentionCandidates(groupParticipants, mentionTrigger.query, groupMeta) : []),
+    [mentionTrigger, groupParticipants, groupMeta]
+  );
+
+  const showGroupMentions = Boolean(
+    mentionsEnabled &&
+      mentionTrigger &&
+      !isMentionDismissed &&
+      !isDisabled &&
+      !isWindowClosed &&
+      !showFastReplies
+  );
+
+  const handleSelectMentionCandidate = useCallback(
+    (candidate: MentionCandidate) => {
+      if (!mentionTrigger) return;
+      const applied = applyMentionSelection(
+        text,
+        mentionTrigger,
+        candidate,
+        selectedMentions,
+        mentionAll
+      );
+      setSelectedMentions(applied.mentions);
+      setMentionAll(applied.mentionAll);
+      setIsMentionDismissed(false);
+      setText(applied.nextText);
+      setCaret(applied.nextCaret);
+      requestAnimationFrame(() => {
+        const el = inputRef.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(applied.nextCaret, applied.nextCaret);
+      });
+    },
+    [mentionTrigger, text, selectedMentions, mentionAll]
+  );
+
+  const showSuggestions =
+    suggestion.emojis.length > 0 && !isSuggestionDismissed && !showFastReplies && !showGroupMentions;
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Never hijack keys while an IME (e.g. Arabic / CJK keyboard) is composing
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+
+    // Group @mention keyboard navigation
+    if (showGroupMentions) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        if (mentionCandidates.length > 0) {
+          setActiveMentionIndex((prev) => (prev + 1) % mentionCandidates.length);
+        }
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        if (mentionCandidates.length > 0) {
+          setActiveMentionIndex((prev) => (prev - 1 + mentionCandidates.length) % mentionCandidates.length);
+        }
+        return;
+      }
+      if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
+        if (mentionCandidates.length > 0) {
+          e.preventDefault();
+          const chosen = mentionCandidates[activeMentionIndex] || mentionCandidates[0];
+          if (chosen) {
+            handleSelectMentionCandidate(chosen);
+          }
+          return;
+        }
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setIsMentionDismissed(true);
+        return;
+      }
+    }
 
     // Fast replies keyboard navigation (WhatsApp-style)
     if (showFastReplies) {
@@ -934,8 +1178,8 @@ export const ChatInputBar = React.memo(function ChatInputBar({
 
   const placeholderText = editingMessage
     ? "Edit message..."
-    : isReadOnly
-      ? "View-only mode (Marketing role)"
+    : isReadOnly || !canSendMessages
+      ? readOnlyReason || (isReadOnly ? "View-only mode (Marketing role)" : "View-only chat mode")
       : hasQueuedAttachments
         ? "Add a caption (optional)..."
         : isAssignedToOther && userName
@@ -1230,7 +1474,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         </div>
       )}
 
-      {!editingMessage && !isReadOnly && isUnassigned && isAdmission && userName && onAssignToMe && (
+      {!editingMessage && !isReadOnly && canSendMessages && isUnassigned && isAdmission && userName && onAssignToMe && (
         <div
           className="rounded-[8px] px-3 py-1.5 text-[11px] mb-2.5 flex items-center justify-between"
           style={{
@@ -1271,8 +1515,24 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         onSetActiveIndex={setActiveReplyIndex}
       />
 
+      {/* Group @Mention Popover (Triggered by "@" in Operation WhatsApp groups) */}
+      {mentionsEnabled && (
+        <GroupMentionPopover
+          isOpen={showGroupMentions}
+          query={mentionTrigger?.query ?? ""}
+          candidates={mentionCandidates}
+          activeIndex={activeMentionIndex}
+          isLoading={isLoadingParticipants}
+          groupMeta={groupMeta}
+          onSelect={handleSelectMentionCandidate}
+          onClose={() => setIsMentionDismissed(true)}
+          onSetActiveIndex={setActiveMentionIndex}
+          onRefresh={onRefreshParticipants}
+        />
+      )}
+
       {/* Smart emoji suggestions + WhatsApp formatting toolbar (appears while typing) */}
-      {!isWindowClosed && !isDisabled && !showEmojiPicker && !showFastReplies && (
+      {!isWindowClosed && !isDisabled && !showEmojiPicker && !showFastReplies && !showGroupMentions && (
         <ComposerAssistBar
           suggestions={showSuggestions ? suggestion.emojis : []}
           onPickSuggestion={handlePickSuggestion}
@@ -1419,8 +1679,14 @@ export const ChatInputBar = React.memo(function ChatInputBar({
               dir="auto"
               value={text}
               onChange={(e) => {
-                setText(e.target.value);
-                setCaret(e.target.selectionEnd ?? e.target.value.length);
+                const nextVal = e.target.value;
+                setText(nextVal);
+                setCaret(e.target.selectionEnd ?? nextVal.length);
+                if (mentionsEnabled) {
+                  const rec = reconcileComposerMentions(nextVal, selectedMentions, mentionAll);
+                  setSelectedMentions(rec.mentions);
+                  setMentionAll(rec.mentionAll);
+                }
               }}
               onSelect={syncCaret}
               onScroll={syncScroll}
@@ -1432,6 +1698,8 @@ export const ChatInputBar = React.memo(function ChatInputBar({
               placeholder={placeholderText}
               disabled={isDisabled}
               className={`relative z-10 w-full block resize-none rounded-[8px] px-3.5 py-[9px] sm:py-[8px] leading-[22px] sm:leading-[20px] min-h-[42px] sm:min-h-[38px] text-[16px] sm:text-[13px] outline-none placeholder:text-[var(--text-muted)] ${
+                !text ? "h-[42px] sm:h-[38px] overflow-hidden " : ""
+              }${
                 editorHighlight !== null ? "wa-ed-input" : "bg-transparent"
               }`}
               style={{

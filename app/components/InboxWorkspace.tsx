@@ -25,16 +25,20 @@ import {
   Clock,
   UploadCloud,
   ChevronDown,
+  ChevronRight,
   Archive,
   ArchiveRestore,
   RotateCcw,
+  User,
   Users,
   Tag,
 } from "lucide-react";
 import { useBranches } from "../lib/branches";
 import { BranchSelect } from "./BranchSelect";
 import { ChatInputBar, OutgoingAttachmentPayload, formatFileSize } from "./ChatInputBar";
+import { GroupInfoPanel } from "./GroupInfoPanel";
 import { renderWhatsAppText } from "../utils/messageFormatting";
+import type { GroupParticipant, MessageMention } from "../utils/groupMentions";
 import { EmojiPicker, WHATSAPP_QUICK_REACTIONS, recordRecentEmoji } from "./EmojiPicker";
 import { formatMetaErrorMessage, ParsedMetaError } from "../utils/errorParser";
 import EditableLeadName from "./EditableLeadName";
@@ -74,6 +78,8 @@ import {
   getInboxBucketCounts,
   getFilterBucketTotal,
   getGroupConversationCount,
+  getUnreadConversationCount,
+  isGroupConversation,
   buildMarkAsDonePatch,
   buildReopenDonePatch,
   buildArchivePatch,
@@ -131,10 +137,13 @@ type Conversation = {
 import { useCRM, isLastMessageFromLead, type Conversation as CRMConversation } from "../context/CRMContext";
 import {
   useAuth,
+  normalizeRole,
   canAccessRoute,
   isDirectorOrChairmanRole,
   isAdmissionRole,
   isOperationRole,
+  isInboxViewOnlyRole,
+  canDownloadChatRole,
 } from "./AuthProvider";
 import {
   buildChatDateDividerLabels,
@@ -193,6 +202,29 @@ const isRealPhone = (p?: string): boolean => {
   if (s.startsWith("live ") || s === "live") return false;
   const digits = p.replace(/[^\d]/g, "");
   return digits.length >= 7;
+};
+
+const getChatAvatarInitials = (name?: string | null): string => {
+  const raw = String(name || "").trim();
+  if (!raw) return "";
+  const lower = raw.toLowerCase();
+  if (
+    lower === "whatsapp contact" ||
+    lower === "instagram user" ||
+    lower === "facebook lead" ||
+    lower === "messenger user" ||
+    lower === "unknown" ||
+    lower.startsWith("live ")
+  ) {
+    return "";
+  }
+  const parts = raw
+    .split(/\s+/)
+    .map((p) => p.replace(/[^\p{L}\p{N}]/gu, ""))
+    .filter((p) => /\p{L}/u.test(p));
+  if (parts.length === 0) return "";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0] || ""}${parts[1][0] || ""}`.toUpperCase();
 };
 
 const extractPhoneFromConversation = (conv?: any | null): string => {
@@ -320,12 +352,21 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
   const [inboxToast, setInboxToast] = useState<InboxToastState | null>(null);
   const [downloadingConvId, setDownloadingConvId] = useState<string | null>(null);
   const [syncingGroupHistory, setSyncingGroupHistory] = useState(false);
+  const [isLoadingParticipants, setIsLoadingParticipants] = useState(false);
+  const [showGroupHistorySync, setShowGroupHistorySync] = useState(false);
+  const [groupInfoModalState, setGroupInfoModalState] = useState<{
+    open: boolean;
+    initialMember?: GroupParticipant | null;
+  }>({ open: false, initialMember: null });
   const [groupHistoryNotice, setGroupHistoryNotice] = useState<{
     convId: string;
     type: "success" | "error";
     message: string;
   } | null>(null);
-  const { isReadOnly, user, token, authFetch } = useAuth();
+  const { isReadOnly: isGlobalReadOnly, user, token, authFetch } = useAuth();
+  const isEnrollmentDirector = !isOperationInbox && normalizeRole(user?.role) === "enrollment_director";
+  const isReadOnly = isGlobalReadOnly || isInboxViewOnlyRole(user?.role);
+  const canDownloadChat = canDownloadChatRole(user?.role);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const chatScrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -341,6 +382,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     assignableAgents,
     operationAssignableAgents,
     patchConversation,
+    markConversationAsRead,
     createManualLead,
     refresh,
     searchQuery,
@@ -351,10 +393,18 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     reactToMessage,
     addOptimisticMessages,
     finalizeOptimisticMessages,
+    fetchGroupParticipants,
+    fetchGroupMemberProfile,
+    fetchGroupMemberAvatars,
+    fetchConversationAvatar,
+    openGroupMemberChat,
   } = useCRM();
 
   const conversations = isOperationInbox ? operationConversations : admissionsConversations;
   const effectiveAssignableAgents = isOperationInbox ? operationAssignableAgents : assignableAgents;
+  const [failedHeaderAvatars, setFailedHeaderAvatars] = useState<Record<string, boolean>>({});
+  const headerAvatarFetchRef = useRef<Set<string>>(new Set());
+  const headerAvatarErrorRefreshRef = useRef<Set<string>>(new Set());
 
   // Periodic refresh every 30s to keep relative timestamps (e.g. "23m", "1 day ago") live
   const [, setTimeTick] = useState(0);
@@ -433,6 +483,10 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
   const bucketCounts = useMemo(() => getInboxBucketCounts(conversations), [conversations]);
   const groupCount = useMemo(
     () => (isOperationInbox ? getGroupConversationCount(conversations) : 0),
+    [isOperationInbox, conversations]
+  );
+  const unreadConvCount = useMemo(
+    () => (isOperationInbox ? getUnreadConversationCount(conversations) : 0),
     [isOperationInbox, conversations]
   );
   const activeBucketTotal = useMemo(
@@ -606,6 +660,34 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     return conversations.find((c) => c.id === activeChatId);
   }, [conversations, activeChatId]);
 
+  const rawHeaderAvatarUrl = !activeConv
+    ? null
+    : activeConv.isGroup && activeConv.channel === "WA"
+    ? activeConv.groupMeta?.avatarUrl || null
+    : !activeConv.isGroup
+    ? activeConv.profilePic || null
+    : null;
+  const headerAvatarUrl =
+    rawHeaderAvatarUrl && !failedHeaderAvatars[rawHeaderAvatarUrl]
+      ? rawHeaderAvatarUrl
+      : null;
+
+  useEffect(() => {
+    if (!activeConv) return;
+    const isWaGroup = Boolean(activeConv.isGroup && activeConv.channel === "WA");
+    const hasAvatar = isWaGroup
+      ? Boolean(activeConv.groupMeta?.avatarUrl)
+      : Boolean(activeConv.profilePic);
+    if (hasAvatar) return;
+    if (headerAvatarFetchRef.current.has(activeConv.id)) return;
+    headerAvatarFetchRef.current.add(activeConv.id);
+    if (isWaGroup) {
+      fetchGroupParticipants(activeConv.id).catch(() => {});
+    } else if (!activeConv.isGroup) {
+      fetchConversationAvatar(activeConv.id).catch(() => {});
+    }
+  }, [activeConv, fetchGroupParticipants, fetchConversationAvatar]);
+
   // ── Assignment & Permission Logic ─────────────────────────────────
   const userClean = (user?.name || "").trim().toLowerCase();
   const agentClean = (activeConv?.agent || "").trim().toLowerCase();
@@ -647,7 +729,12 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
   const [sendError, setSendError] = useState<ParsedMetaError | null>(null);
 
   // WhatsApp Message Edit, Unsend & Reaction UI state
-  const [editingMessage, setEditingMessage] = useState<{ id: string; text: string } | null>(null);
+  const [editingMessage, setEditingMessage] = useState<{
+    id: string;
+    text: string;
+    mentions?: MessageMention[];
+    mentionAll?: boolean;
+  } | null>(null);
   const [unsendingMessage, setUnsendingMessage] = useState<{
     id: string;
     text: string;
@@ -776,6 +863,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     setReplyingTo(null);
     setActiveReactionMenu(null);
     setFullEmojiMenu(null);
+    setShowGroupHistorySync(false);
+    setGroupInfoModalState({ open: false, initialMember: null });
   }, [activeChatId]);
 
   // Dismiss quick reaction pill when clicking outside
@@ -893,11 +982,51 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     return () => clearTimeout(timer);
   }, [replyingTo, scrollToBottom, scrollChildIntoChatContainer]);
 
+  const handleRefreshParticipants = useCallback(async () => {
+    if (!activeConv || !activeConv.isGroup || activeConv.channel !== "WA") return;
+    setIsLoadingParticipants(true);
+    try {
+      await fetchGroupParticipants(activeConv.id, { forceRefresh: true });
+    } finally {
+      setIsLoadingParticipants(false);
+    }
+  }, [activeConv, fetchGroupParticipants]);
+
+  const handleOpenGroupInfo = useCallback(
+    (initialMember: GroupParticipant | null = null) => {
+      if (!activeConv || !activeConv.isGroup || activeConv.channel !== "WA") return;
+      setGroupInfoModalState({ open: true, initialMember });
+      setShowDetailsPanel(true);
+      if (!activeConv.groupParticipants || activeConv.groupParticipants.length === 0) {
+        handleRefreshParticipants();
+      }
+    },
+    [activeConv, handleRefreshParticipants]
+  );
+
+  const handleSelectMemberConversation = useCallback(
+    (targetConvId: string) => {
+      if (!targetConvId) return;
+      if (activeFilter === "Groups") {
+        setActiveFilter("All");
+      }
+      setGroupInfoModalState({ open: false, initialMember: null });
+      setActiveChatId(targetConvId);
+      setMobileView("chat");
+      setShowDetailsPanel(false);
+      if (isOperationInbox) {
+        markConversationAsRead(targetConvId);
+      }
+    },
+    [activeFilter, setActiveChatId, isOperationInbox, markConversationAsRead]
+  );
+
   const handleSendReply = useCallback(
     async (
       textToSend: string,
       attachments?: OutgoingAttachmentPayload[],
-      replyTo?: { id: string; text: string; senderName?: string; isIncoming?: boolean }
+      replyTo?: { id: string; text: string; senderName?: string; isIncoming?: boolean },
+      mentionPayload?: { mentions?: MessageMention[]; mentionAll?: boolean }
     ): Promise<boolean> => {
       const hasText = Boolean(textToSend && textToSend.trim());
       const hasAttachments = Boolean(attachments && attachments.length > 0);
@@ -970,6 +1099,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
             isIncoming: false,
             status: "pending" as const,
             senderName: user?.name || "Staff",
+            mentions: idx === 0 ? mentionPayload?.mentions : undefined,
+            mentionAll: idx === 0 ? Boolean(mentionPayload?.mentionAll) : undefined,
             replyTo: idx === 0 && resolvedReplyTo ? resolvedReplyTo : undefined,
           };
         });
@@ -987,6 +1118,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
             isIncoming: false,
             status: "pending" as const,
             senderName: user?.name || "Staff",
+            mentions: mentionPayload?.mentions,
+            mentionAll: Boolean(mentionPayload?.mentionAll),
             replyTo: resolvedReplyTo || undefined,
           },
         ]);
@@ -1008,6 +1141,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
             channel: activeConv.channel,
             attachments: serverAttachments,
             replyTo: resolvedReplyTo || undefined,
+            mentions: mentionPayload?.mentions,
+            mentionAll: Boolean(mentionPayload?.mentionAll),
           }),
         });
         if (res.ok) {
@@ -1055,11 +1190,15 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
   );
 
   const handleSaveEditMessage = useCallback(
-    async (messageId: string, newText: string): Promise<boolean> => {
+    async (
+      messageId: string,
+      newText: string,
+      mentionPayload?: { mentions?: MessageMention[]; mentionAll?: boolean }
+    ): Promise<boolean> => {
       if (!activeConv || isReadOnly) return false;
       setEditingMessage(null);
       setSendError(null);
-      const res = await editMessage(activeConv.id, messageId, newText);
+      const res = await editMessage(activeConv.id, messageId, newText, mentionPayload);
       if (!res.ok) {
         setSendError({
           title: "Could not edit message",
@@ -1155,6 +1294,9 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     setActiveChatId(id);
     setMobileView("chat");
     setShowDetailsPanel(false);
+    if (isOperationInbox) {
+      markConversationAsRead(id);
+    }
   };
 
   const handleBackToList = () => {
@@ -1224,7 +1366,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
 
   const handleDownloadConversation = useCallback(
     async (targetConv: CRMConversation) => {
-      if (!targetConv || downloadingConvId === targetConv.id) return;
+      if (!canDownloadChat || !targetConv || downloadingConvId === targetConv.id) return;
 
       let exportTarget: ExportConversationInput = targetConv;
       const hasLoadedMessages =
@@ -1283,7 +1425,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
         message: `Downloaded conversation for ${displayLabel}`,
       });
     },
-    [authFetch, downloadingConvId, inboxMode, labels]
+    [authFetch, canDownloadChat, downloadingConvId, inboxMode, labels]
   );
 
   return (
@@ -1415,7 +1557,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                       )}
                     </div>
 
-                    <div className="max-h-[220px] overflow-y-auto flex flex-col gap-0.5">
+                    <div className="max-h-[240px] overflow-y-auto space-y-1 pe-1 py-0.5">
                       {labels.length === 0 ? (
                         <p className="text-[11px] px-2 py-3 text-center" style={{ color: "var(--text-muted)" }}>
                           No labels yet. Add labels from any lead&apos;s details panel.
@@ -1437,7 +1579,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                               onClick={() =>
                                 setSelectedLabelIds(toggleLeadLabelId(effectiveSelectedLabelIds, label.id))
                               }
-                              className="w-full min-h-[44px] sm:min-h-0 px-2 py-2 sm:py-1.5 rounded-lg text-start text-[11px] font-semibold flex items-center gap-2 transition-colors cursor-pointer"
+                              className="w-full shrink-0 min-h-[44px] sm:min-h-[30px] px-2.5 py-2 sm:py-1.5 rounded-lg text-start text-[11px] font-semibold flex items-center gap-2 transition-colors cursor-pointer"
                               style={{
                                 background: active ? "var(--bg-selected)" : "transparent",
                                 color: active ? "var(--text-primary)" : "var(--text-secondary)",
@@ -1702,6 +1844,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   ? bucketCounts.archived
                   : filter === "Groups"
                   ? groupCount
+                  : filter === "Unread"
+                  ? unreadConvCount
                   : null;
               return (
                 <button
@@ -1743,6 +1887,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   <Archive className="w-5 h-5 opacity-50" style={{ color: "var(--text-secondary)" }} />
                 ) : activeFilter === "Groups" ? (
                   <Users className="w-5 h-5 opacity-50" style={{ color: "var(--text-secondary)" }} />
+                ) : activeFilter === "Unread" ? (
+                  <CheckCheck className="w-5 h-5 opacity-50" style={{ color: "var(--text-secondary)" }} />
                 ) : (
                   <Search className="w-5 h-5 opacity-40" style={{ color: "var(--text-secondary)" }} />
                 )}
@@ -1754,6 +1900,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                     : "No leads found"
                   : activeFilter === "Groups"
                   ? "No WhatsApp groups"
+                  : activeFilter === "Unread"
+                  ? "No unread messages"
                   : activeFilter === "DONE"
                   ? "No done conversations"
                   : activeFilter === "Archived"
@@ -1773,6 +1921,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   ? `No conversations in ${activeFilter} for ${dateFilterDisplayLabel}`
                   : activeFilter === "Groups"
                   ? "WhatsApp groups connected to Operation WhatsApp appear here."
+                  : activeFilter === "Unread"
+                  ? "Conversations with unread incoming messages appear here."
                   : activeFilter === "DONE"
                   ? "Conversations you mark as done appear here and leave the main list."
                   : activeFilter === "Archived"
@@ -2076,62 +2226,130 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   <ArrowLeft className="w-5 h-5" />
                 </button>
                 <div className="min-w-0">
-                  <h2 className="text-[15px] font-bold truncate flex items-center gap-1.5" style={{ color: "var(--text-primary)" }}>
-                    {activeConv.isGroup && (
-                      <svg
-                        className="w-4 h-4 shrink-0 text-[#0066FF]"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-label="WhatsApp Group"
+                  {(() => {
+                    const headerAvatarEl = headerAvatarUrl ? (
+                      <img
+                        src={headerAvatarUrl}
+                        alt=""
+                        referrerPolicy="no-referrer"
+                        onError={() => {
+                          const failedUrl = rawHeaderAvatarUrl;
+                          if (failedUrl) {
+                            setFailedHeaderAvatars((prev) => ({ ...prev, [failedUrl]: true }));
+                          }
+                          if (!headerAvatarErrorRefreshRef.current.has(activeConv.id)) {
+                            headerAvatarErrorRefreshRef.current.add(activeConv.id);
+                            if (activeConv.isGroup && activeConv.channel === "WA") {
+                              fetchGroupParticipants(activeConv.id, { forceRefresh: true }).catch(() => {});
+                            } else if (!activeConv.isGroup) {
+                              fetchConversationAvatar(activeConv.id, { forceRefresh: true }).catch(() => {});
+                            }
+                          }
+                        }}
+                        className="w-9 h-9 rounded-full object-cover shrink-0 border"
+                        style={{ borderColor: "var(--border-main)" }}
+                      />
+                    ) : (
+                      <div
+                        className="w-9 h-9 rounded-full shrink-0 flex items-center justify-center border text-[12px] font-semibold"
+                        style={{
+                          background: "var(--bg-card)",
+                          borderColor: "var(--border-main)",
+                          color: "var(--text-secondary)",
+                        }}
+                        aria-label={activeConv.isGroup ? "WhatsApp Group" : activeConv.name}
                       >
-                        <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-                        <circle cx="9" cy="7" r="4" />
-                        <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-                        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-                      </svg>
-                    )}
-                    <span className="truncate">
-                      {activeConv.name}
-                      {!activeConv.isGroup && activeConv.leadName && activeConv.leadName !== activeConv.name
-                        ? ` · ${activeConv.leadName}`
-                        : ""}
-                    </span>
-                  </h2>
-                  <div className="flex items-center text-[11px] mt-0.5 min-w-0" style={{ color: "var(--text-secondary)" }}>
-                    <span className="truncate">
-                      {activeConv.channel === "WA"
-                        ? activeConv.isGroup
-                          ? "WhatsApp Group"
-                          : activeConv.metaChannel === "FB"
-                          ? "WhatsApp · Facebook Form"
-                          : activeConv.metaChannel === "IG"
-                          ? "WhatsApp · Instagram Form"
-                          : "WhatsApp"
-                        : activeConv.channel === "IG"
-                        ? "Instagram"
-                        : "Messenger"}
-                    </span>
-                    {!activeConv.isGroup && isRealPhone(activeConv.phone) && activeConv.phone !== activeConv.name && (
-                      <>
-                        <span className="mx-1.5 shrink-0">•</span>
-                        <span className="truncate">{activeConv.phone}</span>
-                      </>
-                    )}
-                    {activeConv.channel === "WA" && (
-                      <>
-                        <span className="mx-1.5 shrink-0">•</span>
-                        <span
-                          className={`shrink-0 ${activeConv.windowLeft === "Closed" ? "text-[#FF9500]" : "text-[#34C759]"}`}
-                        >
-                          {activeConv.windowLeft === "Closed" ? "Window closed" : `${activeConv.windowLeft}`}
-                        </span>
-                      </>
-                    )}
-                  </div>
+                        {activeConv.isGroup ? (
+                          <Users className="w-4 h-4 text-[#0066FF]" />
+                        ) : (
+                          getChatAvatarInitials(activeConv.name) ||
+                          getChatAvatarInitials(activeConv.leadName) || (
+                            <User className="w-4 h-4" />
+                          )
+                        )}
+                      </div>
+                    );
+
+                    return activeConv.isGroup && activeConv.channel === "WA" ? (
+                      <button
+                        type="button"
+                        onClick={() => handleOpenGroupInfo(null)}
+                        title="View group info and members"
+                        className="text-left min-w-0 max-w-full rounded-lg px-1.5 py-0.5 -mx-1.5 hover:bg-black/5 dark:hover:bg-white/5 transition-colors cursor-pointer group flex items-center gap-2.5"
+                      >
+                        {headerAvatarEl}
+                        <div className="min-w-0">
+                          <h2
+                            className="text-[15px] font-bold truncate flex items-center gap-1.5"
+                            style={{ color: "var(--text-primary)" }}
+                          >
+                            <span className="truncate group-hover:underline">{activeConv.name}</span>
+                            <ChevronRight
+                              className="w-3.5 h-3.5 shrink-0 opacity-60 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all"
+                              style={{ color: "var(--text-secondary)" }}
+                            />
+                          </h2>
+                          <div
+                            className="flex items-center text-[11px] mt-0.5 min-w-0"
+                            style={{ color: "var(--text-secondary)" }}
+                          >
+                            <span className="truncate">
+                              WhatsApp Group
+                              {(activeConv.groupParticipants?.length || activeConv.groupMeta?.size || 0) > 0
+                                ? ` · ${activeConv.groupParticipants?.length || activeConv.groupMeta?.size} members`
+                                : ""}
+                              {" · Tap for members"}
+                            </span>
+                          </div>
+                        </div>
+                      </button>
+                    ) : (
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        {headerAvatarEl}
+                        <div className="min-w-0">
+                          <h2 className="text-[15px] font-bold truncate flex items-center gap-1.5" style={{ color: "var(--text-primary)" }}>
+                            <span className="truncate">
+                              {activeConv.name}
+                              {!activeConv.isGroup && activeConv.leadName && activeConv.leadName !== activeConv.name
+                                ? ` · ${activeConv.leadName}`
+                                : ""}
+                            </span>
+                          </h2>
+                          <div className="flex items-center text-[11px] mt-0.5 min-w-0" style={{ color: "var(--text-secondary)" }}>
+                            <span className="truncate">
+                              {activeConv.channel === "WA"
+                                ? activeConv.isGroup
+                                  ? "WhatsApp Group"
+                                  : activeConv.metaChannel === "FB"
+                                  ? "WhatsApp · Facebook Form"
+                                  : activeConv.metaChannel === "IG"
+                                  ? "WhatsApp · Instagram Form"
+                                  : "WhatsApp"
+                                : activeConv.channel === "IG"
+                                ? "Instagram"
+                                : "Messenger"}
+                            </span>
+                            {!activeConv.isGroup && isRealPhone(activeConv.phone) && activeConv.phone !== activeConv.name && (
+                              <>
+                                <span className="mx-1.5 shrink-0">•</span>
+                                <span className="truncate">{activeConv.phone}</span>
+                              </>
+                            )}
+                            {activeConv.channel === "WA" && (
+                              <>
+                                <span className="mx-1.5 shrink-0">•</span>
+                                <span
+                                  className={`shrink-0 ${activeConv.windowLeft === "Closed" ? "text-[#FF9500]" : "text-[#34C759]"}`}
+                                >
+                                  {activeConv.windowLeft === "Closed" ? "Window closed" : `${activeConv.windowLeft}`}
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -2210,15 +2428,18 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                 </div>
 
                 {/* Conversation Actions Dropdown (Mark as done, Archive, Download conversation) */}
-                <InboxBucketActions
-                  conversationId={activeConv.id}
-                  isDone={isConversationDone(activeConv)}
-                  isArchived={isConversationArchived(activeConv)}
-                  canManageBuckets={!isReadOnly}
-                  isDownloading={downloadingConvId === activeConv.id}
-                  onAction={(action) => applyInboxBucketChange(activeConv.id, action)}
-                  onDownload={() => void handleDownloadConversation(activeConv)}
-                />
+                {(!isReadOnly || canDownloadChat) && (
+                  <InboxBucketActions
+                    conversationId={activeConv.id}
+                    isDone={isConversationDone(activeConv)}
+                    isArchived={isConversationArchived(activeConv)}
+                    canManageBuckets={!isReadOnly}
+                    canDownload={canDownloadChat}
+                    isDownloading={downloadingConvId === activeConv.id}
+                    onAction={(action) => applyInboxBucketChange(activeConv.id, action)}
+                    onDownload={() => void handleDownloadConversation(activeConv)}
+                  />
+                )}
 
                 {/* Details toggle button — mobile & tablet */}
                 <button
@@ -2300,7 +2521,9 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                         : activeConv.name}
                     </p>
                     <p className="text-[12px] leading-relaxed" style={{ color: "var(--text-secondary)" }}>
-                      {activeConv.isGroup
+                      {isReadOnly
+                        ? "No messages in this conversation yet."
+                        : activeConv.isGroup
                         ? "No messages synced in this group yet. Send a message below, or new group messages will appear here live."
                         : "No messages in this conversation yet. Send a WhatsApp message below to start chatting with this lead."}
                     </p>
@@ -2604,7 +2827,13 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                                   }}
                                   dir="auto"
                                 >
-                                  {quoteText}
+                                  {activeConv.channel === "WA" && activeConv.isGroup
+                                    ? renderWhatsAppText(quoteText, {
+                                        mentions: referencedMsg?.mentions,
+                                        mentionAll: referencedMsg?.mentionAll,
+                                        participants: activeConv.groupParticipants,
+                                      })
+                                    : quoteText}
                                 </p>
                               </div>
                             );
@@ -2823,15 +3052,42 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
 
                               {/* Text content (e.g. form comments or lead message) */}
                               {showPlainText && (
-                                <p
-                                  className={`text-[14px] md:text-[15px] leading-relaxed whitespace-pre-wrap break-words ${
-                                    hasTemplateAttachment || shouldRenderFallbackCard ? "mb-3" : ""
-                                  } ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
-                                  style={{ color: msg.isIncoming ? "var(--text-chat-incoming)" : "var(--text-chat-outgoing)" }}
-                                  dir={msg.dir}
-                                >
-                                  {activeConv.channel === "WA" ? renderWhatsAppText(msg.text) : msg.text}
-                                </p>
+                                <>
+                                  {msg.mentionAll && !/@(?:all|everyone|الكل|الجميع)(?=$|[\s.,!?:;،؛)\]"'»])/i.test(msg.text || "") && (
+                                    <div className="mb-1">
+                                      <span
+                                        className="inline-block text-[10.5px] font-semibold px-1.5 py-0.5 rounded border"
+                                        style={{
+                                          background: "var(--label-amber-bg)",
+                                          color: "var(--label-amber-text)",
+                                          borderColor: "var(--label-amber-border)",
+                                        }}
+                                      >
+                                        @all
+                                      </span>
+                                    </div>
+                                  )}
+                                  <p
+                                    className={`text-[14px] md:text-[15px] leading-relaxed whitespace-pre-wrap break-words ${
+                                      hasTemplateAttachment || shouldRenderFallbackCard ? "mb-3" : ""
+                                    } ${msg.dir === "rtl" ? "text-right" : "text-left"}`}
+                                    style={{ color: msg.isIncoming ? "var(--text-chat-incoming)" : "var(--text-chat-outgoing)" }}
+                                    dir={msg.dir}
+                                  >
+                                    {activeConv.channel === "WA"
+                                      ? renderWhatsAppText(
+                                          msg.text,
+                                          activeConv.isGroup
+                                            ? {
+                                                mentions: msg.mentions,
+                                                mentionAll: msg.mentionAll,
+                                                participants: activeConv.groupParticipants,
+                                              }
+                                            : undefined
+                                        )
+                                      : msg.text}
+                                  </p>
+                                </>
                               )}
 
                               {/* Template card attachments */}
@@ -3025,7 +3281,12 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                                 setActiveReactionMenu(null);
                                 setFullEmojiMenu(null);
                                 setReplyingTo(null);
-                                setEditingMessage({ id: msg.id, text: msg.text });
+                                setEditingMessage({
+                                  id: msg.id,
+                                  text: msg.text,
+                                  mentions: msg.mentions,
+                                  mentionAll: msg.mentionAll,
+                                });
                               }}
                               title="Edit message"
                               className="p-1.5 rounded-full border border-transparent hover:border-[#0066FF] transition-colors cursor-pointer"
@@ -3129,15 +3390,25 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
             <ChatInputBar
               chatId={activeConv.id}
               channel={activeConv.channel}
+              isGroup={Boolean(activeConv.isGroup)}
+              groupParticipants={activeConv.groupParticipants}
+              groupMeta={activeConv.groupMeta}
+              isLoadingParticipants={isLoadingParticipants}
+              onRefreshParticipants={handleRefreshParticipants}
               token={token}
               isReadOnly={isReadOnly}
               canSendMessages={canSendMessages}
+              readOnlyReason={
+                isEnrollmentDirector
+                  ? "View-only inbox · Enrollment Director cannot send messages"
+                  : undefined
+              }
               isAssignedToOther={isAssignedToOther}
               assignedAgent={activeConv.agent}
               userName={user?.name}
               windowLeft={activeConv.windowLeft}
               isUnassigned={!isAssigned}
-              isAdmission={canHandleAssignment}
+              isAdmission={canHandleAssignment && !isReadOnly}
               onAssignToMe={user?.name ? () => patchConversation(activeConv.id, { agent: user.name }) : undefined}
               onSendMessage={handleSendReply}
               editingMessage={editingMessage}
@@ -3158,36 +3429,76 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
         )}
       </div>
 
-      {/* ── RIGHT: Details Panel ── */}
+      {/* ── RIGHT: Details Panel / WhatsApp-style Group Info Side View ── */}
       {/* Desktop: always visible if a conv is active */}
-      {activeConv && (
-        <>
-          {/* Mobile overlay backdrop */}
-          {showDetailsPanel && (
-            <div
-              className="fixed inset-0 z-40 bg-black/40 lg:hidden"
-              onClick={() => setShowDetailsPanel(false)}
-            />
-          )}
+      {activeConv && (() => {
+        const showGroupInfoSide = Boolean(
+          groupInfoModalState.open && activeConv.isGroup && activeConv.channel === "WA"
+        );
+        return (
+          <>
+            {/* Mobile overlay backdrop */}
+            {showDetailsPanel && (
+              <div
+                className="fixed inset-0 z-40 bg-black/40 lg:hidden"
+                onClick={() => {
+                  setShowDetailsPanel(false);
+                  if (showGroupInfoSide) {
+                    setGroupInfoModalState({ open: false, initialMember: null });
+                  }
+                }}
+              />
+            )}
 
-          <div
-            className={`
-              flex flex-col h-full overflow-y-auto p-5 shrink-0
-              fixed lg:relative right-0 top-0 z-50
-              w-[85vw] sm:w-[320px] lg:w-[300px]
-              transform transition-transform duration-200 ease-in-out
-              ${showDetailsPanel ? "translate-x-0" : "translate-x-full lg:translate-x-0"}
-            `}
-            style={{ background: "var(--bg-panel)", borderLeft: "1px solid var(--border-main)" }}
-          >
-            <EditableLeadName
+            <div
+              className={`
+                flex flex-col h-full shrink-0
+                fixed lg:relative right-0 top-0 z-50
+                transform transition-transform duration-200 ease-in-out
+                ${showGroupInfoSide ? "overflow-hidden p-0 w-[92vw] sm:w-[360px] lg:w-[340px] xl:w-[360px]" : "overflow-y-auto p-5 w-[85vw] sm:w-[320px] lg:w-[300px]"}
+                ${showDetailsPanel ? "translate-x-0" : "translate-x-full lg:translate-x-0"}
+              `}
+              style={{ background: "var(--bg-panel)", borderLeft: "1px solid var(--border-main)" }}
+            >
+              {showGroupInfoSide ? (
+                <GroupInfoPanel
+                  groupConv={activeConv}
+                  allInboxConversations={operationConversations}
+                  initialMember={groupInfoModalState.initialMember}
+                  isLoadingParticipants={isLoadingParticipants}
+                  isExporting={downloadingConvId === activeConv.id}
+                  isReadOnly={isReadOnly}
+                  onClose={() => {
+                    setGroupInfoModalState({ open: false, initialMember: null });
+                    setShowDetailsPanel(false);
+                  }}
+                  onSwitchToCrmDetails={() =>
+                    setGroupInfoModalState({ open: false, initialMember: null })
+                  }
+                  onExportChat={canDownloadChat ? () => handleDownloadConversation(activeConv) : undefined}
+                  onRefreshParticipants={handleRefreshParticipants}
+                  onFetchMemberProfile={fetchGroupMemberProfile}
+                  onFetchMemberAvatars={fetchGroupMemberAvatars}
+                  onOpenMemberChat={(member) =>
+                    openGroupMemberChat(activeConv.id, member, activeConv.name)
+                  }
+                  onSelectConversation={handleSelectMemberConversation}
+                />
+              ) : (
+                <>
+                  <EditableLeadName
               conversationId={activeConv.id}
+              label={isGroupConversation(activeConv) ? "Group Name" : "Lead Name"}
               displayName={getEditableLeadDisplayName(activeConv)}
-              secondaryText={activeConv.phone || activeConv.id}
+              secondaryText={
+                isGroupConversation(activeConv) || isGroupConversation(activeConv.phone)
+                  ? undefined
+                  : activeConv.phone || activeConv.id
+              }
               isNameCustomized={
                 activeConv.channel !== "WA" || hasAgentEditedLeadName(activeConv.source)
               }
-              isReadOnly={isReadOnly}
+              isReadOnly={isReadOnly || isGroupConversation(activeConv)}
               onSaveName={(newName) =>
                 patchConversation(activeConv.id, buildLeadNamePatchUpdates(newName))
               }
@@ -3289,122 +3600,136 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
             {isOperationInbox && (
               <>
                 {/* Phone / Chat Type display */}
-                <div className="mb-5">
-                  <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">
-                    {activeConv.isGroup ? "Chat Type" : "Phone"}
-                  </h3>
-                  <div
-                    className="rounded-[6px] p-2.5 flex items-center justify-between gap-2"
-                    style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)" }}
-                  >
-                    <span className="text-[12px] font-mono font-medium truncate" style={{ color: "var(--text-primary)" }}>
-                      {activeConv.isGroup
-                        ? "WhatsApp Group"
-                        : isRealPhone(activeConv.phone)
-                        ? activeConv.phone
-                        : extractPhoneFromConversation(activeConv) || "Not available"}
-                    </span>
+                {!activeConv.isGroup && (
+                  <div className="mb-5">
+                    <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">
+                      Phone
+                    </h3>
+                    <div
+                      className="rounded-[6px] p-2.5 flex items-center justify-between gap-2"
+                      style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)" }}
+                    >
+                      <span className="text-[12px] font-mono font-medium truncate" style={{ color: "var(--text-primary)" }}>
+                        {isRealPhone(activeConv.phone)
+                          ? activeConv.phone
+                          : extractPhoneFromConversation(activeConv) || "Not available"}
+                      </span>
+                    </div>
                   </div>
-                </div>
+                )}
 
-                {/* Group History On-Demand Sync (WhatsApp Groups in Right Sidebar Only) */}
+                {/* Group History On-Demand Sync (WhatsApp Groups in Right Sidebar Only — Collapsed by Default) */}
                 {activeConv.isGroup && (
                   <div className="mb-5">
-                    <div className="flex items-center justify-between mb-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowGroupHistorySync((prev) => !prev)}
+                      className="w-full flex items-center justify-between gap-2 text-left cursor-pointer py-1"
+                    >
                       <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase">
                         Group History Sync
                       </h3>
-                      <span
-                        className="text-[10px] font-semibold"
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {activeConv.messages.length === 0 && (
+                          <span
+                            className="text-[10px] font-semibold"
+                            style={{ color: "var(--text-secondary)" }}
+                          >
+                            Waiting for 1st msg
+                          </span>
+                        )}
+                        <ChevronDown
+                          className={`w-3.5 h-3.5 transition-transform shrink-0 ${
+                            showGroupHistorySync ? "rotate-180" : ""
+                          }`}
+                          style={{ color: "var(--text-muted)" }}
+                        />
+                      </div>
+                    </button>
+
+                    {showGroupHistorySync && (
+                      <div
+                        className="mt-2 rounded-[6px] p-2.5 space-y-2"
                         style={{
-                          color:
-                            activeConv.messages.length > 0 ? "#34C759" : "var(--text-secondary)",
+                          background: "var(--bg-input)",
+                          border: "1px solid var(--border-input)",
                         }}
                       >
-                        {activeConv.messages.length > 0 ? "Anchor ready" : "Waiting for 1st msg"}
-                      </span>
-                    </div>
-                    <div
-                      className="rounded-[6px] p-2.5 space-y-2"
-                      style={{
-                        background: "var(--bg-input)",
-                        border: "1px solid var(--border-input)",
-                      }}
-                    >
-                      <p
-                        className="text-[11px] leading-relaxed"
-                        style={{ color: "var(--text-secondary)" }}
-                      >
-                        {activeConv.messages.length > 0
-                          ? "Pull up to 50 earlier messages from the linked Operation phone using the oldest message in this group."
-                          : "WhatsApp requires at least 1 message in this group to anchor earlier history. Once 1 message is sent or received, earlier history is requested automatically."}
-                      </p>
-                      {!isReadOnly && (
-                        <button
-                          type="button"
-                          disabled={syncingGroupHistory || activeConv.messages.length === 0}
-                          onClick={async () => {
-                            if (syncingGroupHistory || activeConv.messages.length === 0) return;
-                            const targetConvId = activeConv.id;
-                            setSyncingGroupHistory(true);
-                            setGroupHistoryNotice(null);
-                            try {
-                              const res = await authFetch(
-                                `/api/messages/${encodeURIComponent(targetConvId)}/sync-history`,
-                                {
-                                  method: "POST",
-                                  headers: { "Content-Type": "application/json" },
-                                  body: JSON.stringify({ count: 50 }),
-                                }
-                              );
-                              const json = await res.json().catch(() => null);
-                              if (!res.ok || !json?.success) {
-                                throw new Error(
-                                  json?.error || "Could not request earlier group messages."
-                                );
-                              }
-                              setGroupHistoryNotice({
-                                convId: targetConvId,
-                                type: "success",
-                                message:
-                                  "Requested earlier messages from WhatsApp. Any available messages will appear here in a few seconds.",
-                              });
-                            } catch (err: any) {
-                              setGroupHistoryNotice({
-                                convId: targetConvId,
-                                type: "error",
-                                message:
-                                  err?.message || "Could not request earlier group messages.",
-                              });
-                            } finally {
-                              setSyncingGroupHistory(false);
-                            }
-                          }}
-                          className="w-full py-1.5 px-2.5 rounded-md text-[11px] font-semibold bg-[#0066FF] hover:bg-[#0055D6] text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer flex items-center justify-center gap-1.5"
-                        >
-                          <RotateCcw
-                            className={`w-3 h-3 shrink-0 ${syncingGroupHistory ? "animate-spin" : ""}`}
-                          />
-                          <span>
-                            {syncingGroupHistory
-                              ? "Requesting from WhatsApp..."
-                              : activeConv.messages.length > 0
-                              ? "Fetch Earlier Messages"
-                              : "Waiting for 1st Message"}
-                          </span>
-                        </button>
-                      )}
-                      {groupHistoryNotice && groupHistoryNotice.convId === activeConv.id && (
                         <p
-                          className="text-[10px] leading-snug"
-                          style={{
-                            color: groupHistoryNotice.type === "error" ? "#FF3B30" : "#34C759",
-                          }}
+                          className="text-[11px] leading-relaxed"
+                          style={{ color: "var(--text-secondary)" }}
                         >
-                          {groupHistoryNotice.message}
+                          {activeConv.messages.length > 0
+                            ? "Load up to 50 older messages from WhatsApp."
+                            : "Send or receive 1 message first to load older history."}
                         </p>
-                      )}
-                    </div>
+                        {!isReadOnly && (
+                          <button
+                            type="button"
+                            disabled={syncingGroupHistory || activeConv.messages.length === 0}
+                            onClick={async () => {
+                              if (syncingGroupHistory || activeConv.messages.length === 0) return;
+                              const targetConvId = activeConv.id;
+                              setSyncingGroupHistory(true);
+                              setGroupHistoryNotice(null);
+                              try {
+                                const res = await authFetch(
+                                  `/api/messages/${encodeURIComponent(targetConvId)}/sync-history`,
+                                  {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ count: 50 }),
+                                  }
+                                );
+                                const json = await res.json().catch(() => null);
+                                if (!res.ok || !json?.success) {
+                                  throw new Error(
+                                    json?.error || "Could not request earlier group messages."
+                                  );
+                                }
+                                setGroupHistoryNotice({
+                                  convId: targetConvId,
+                                  type: "success",
+                                  message:
+                                    "Requested earlier messages from WhatsApp. Any available messages will appear here in a few seconds.",
+                                });
+                              } catch (err: any) {
+                                setGroupHistoryNotice({
+                                  convId: targetConvId,
+                                  type: "error",
+                                  message:
+                                    err?.message || "Could not request earlier group messages.",
+                                });
+                              } finally {
+                                setSyncingGroupHistory(false);
+                              }
+                            }}
+                            className="w-full py-1.5 px-2.5 rounded-md text-[11px] font-semibold bg-[#0066FF] hover:bg-[#0055D6] text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer flex items-center justify-center gap-1.5"
+                          >
+                            <RotateCcw
+                              className={`w-3 h-3 shrink-0 ${syncingGroupHistory ? "animate-spin" : ""}`}
+                            />
+                            <span>
+                              {syncingGroupHistory
+                                ? "Loading from WhatsApp..."
+                                : activeConv.messages.length > 0
+                                ? "Load Earlier Messages"
+                                : "Waiting for 1st Message"}
+                            </span>
+                          </button>
+                        )}
+                        {groupHistoryNotice && groupHistoryNotice.convId === activeConv.id && (
+                          <p
+                            className="text-[10px] leading-snug"
+                            style={{
+                              color: groupHistoryNotice.type === "error" ? "#FF3B30" : "#34C759",
+                            }}
+                          >
+                            {groupHistoryNotice.message}
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -3818,12 +4143,14 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                           Ended
                         </span>
                       )}
-                      <Link
-                        href="/follow-ups"
-                        className="text-[10px] font-semibold text-[#0066FF] hover:underline flex items-center gap-0.5"
-                      >
-                        Follow-ups →
-                      </Link>
+                      {canAccessRoute(user?.role, "/follow-ups") && (
+                        <Link
+                          href="/follow-ups"
+                          className="text-[10px] font-semibold text-[#0066FF] hover:underline flex items-center gap-0.5"
+                        >
+                          Follow-ups →
+                        </Link>
+                      )}
                       {hasFollowUp && !isReadOnly && (
                         <button
                           type="button"
@@ -3841,9 +4168,10 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                     <input
                       key={`fn-${activeConv.id}-${activeConv.followUpNote || ''}-${activeConv.auditionOutcome || ''}-${(activeConv.followUpTags || []).join(',')}`}
                       type="text"
+                      disabled={isReadOnly}
                       defaultValue={activeConv.followUpNote || ""}
                       placeholder={isJoiningLater ? "e.g. Joining in summer" : isPaymentPending ? "e.g. Waiting for transfer" : isTrialSession ? "e.g. Trial on Saturday" : "e.g. Call back about Sunday"}
-                      className={`flex-1 min-w-0 rounded-[6px] text-[11px] py-1.5 px-2 outline-none placeholder-gray-400 transition-colors ${
+                      className={`flex-1 min-w-0 rounded-[6px] text-[11px] py-1.5 px-2 outline-none placeholder-gray-400 transition-colors disabled:opacity-60 ${
                         activeConv.followUpCompleted ? 'line-through' : ''
                       }`}
                       style={{
@@ -3938,8 +4266,9 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                     <input
                       key={`fd-${activeConv.id}-${activeConv.followUpDate || ''}-${activeConv.auditionOutcome || ''}-${(activeConv.followUpTags || []).join(',')}`}
                       type="date"
+                      disabled={isReadOnly}
                       defaultValue={activeConv.followUpDate || ""}
-                      className={`flex-1 rounded-[6px] px-2 py-1.5 text-[11px] outline-none cursor-pointer transition-colors ${
+                      className={`flex-1 rounded-[6px] px-2 py-1.5 text-[11px] outline-none cursor-pointer transition-colors disabled:opacity-60 ${
                         activeConv.followUpCompleted ? 'line-through' : ''
                       }`}
                       style={{
@@ -3982,9 +4311,12 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
             <div className="mt-8 text-[9px]" style={{ color: "var(--text-muted)" }}>
               Conversation cv-{activeConv.name.toLowerCase()}
             </div>
+                </>
+              )}
           </div>
         </>
-      )}
+        );
+      })()}
 
       {/* Full-Screen Photo Lightbox Modal */}
       {lightboxImage && (

@@ -24,6 +24,15 @@ import {
   isAdmissionRole,
   isOperationRole,
   canAccessInbox,
+  canAccessConversationInboxData,
+  isInboxViewOnlyRole,
+  canSendChatMessagesRole,
+  canDownloadChatRole,
+  shouldShowAuditionCardAgentAndBranch,
+  canAssignAuditionAgentRole,
+  canOpenAuditionChatRole,
+  canFilterAuditionsByAgentRole,
+  canEditAuditionBranchRole,
   isAssignableRole,
   isAssignableForInbox,
   canAccessRoute,
@@ -46,6 +55,15 @@ export {
   isAdmissionRole,
   isOperationRole,
   canAccessInbox,
+  canAccessConversationInboxData,
+  isInboxViewOnlyRole,
+  canSendChatMessagesRole,
+  canDownloadChatRole,
+  shouldShowAuditionCardAgentAndBranch,
+  canAssignAuditionAgentRole,
+  canOpenAuditionChatRole,
+  canFilterAuditionsByAgentRole,
+  canEditAuditionBranchRole,
   isAssignableRole,
   isAssignableForInbox,
   canAccessRoute,
@@ -57,6 +75,7 @@ export interface AuthUser {
   name: string;
   email: string;
   role: Role;
+  branch?: string;
   avatar?: string;
 }
 

@@ -11,7 +11,7 @@ import {
   isAdmissionRole,
   isOperationRole,
 } from "./AuthProvider";
-import { resolveConvInboxMode } from "../utils/inboxFilters";
+import { isGroupConversation, resolveConvInboxMode } from "../utils/inboxFilters";
 import { useBranches } from "../lib/branches";
 import { BranchSelect } from "./BranchSelect";
 import EditableLeadName from "./EditableLeadName";
@@ -82,6 +82,7 @@ export function ConversationDetailsSidebar({
   const isAdmission = isAdmissionRole(user?.role);
   const isOperation = isOperationRole(user?.role);
   const isOperationConv = resolveConvInboxMode(conversation) === "operation";
+  const isGroupChat = isGroupConversation(conversation);
   const canHandleAssignment = isOperationConv ? isOperation || isChairman : isAdmission || isChairman;
   const canViewTeamActivity = isChairman || canAccessRoute(user?.role, "/team-performance");
   const { branchGroups } = useBranches();
@@ -210,12 +211,17 @@ export function ConversationDetailsSidebar({
       {/* Header: editable name + phone + optional actions */}
       <EditableLeadName
         conversationId={conversation.id}
+        label={isGroupChat ? "Group Name" : "Lead Name"}
         displayName={getEditableLeadDisplayName(conversation)}
-        secondaryText={conversation.phone || conversation.id}
+        secondaryText={
+          isGroupChat || isGroupConversation(conversation.phone)
+            ? undefined
+            : conversation.phone || conversation.id
+        }
         isNameCustomized={
           conversation.channel !== "WA" || hasAgentEditedLeadName(conversation.source)
         }
-        isReadOnly={isReadOnly}
+        isReadOnly={isReadOnly || isGroupChat}
         onSaveName={(newName) =>
           patchConversation(conversation.id, buildLeadNamePatchUpdates(newName))
         }
@@ -335,21 +341,23 @@ export function ConversationDetailsSidebar({
 
       {isOperationConv && (
         <>
-          <div className="mb-5">
-            <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">
-              Phone
-            </h3>
-            <div
-              className="rounded-[6px] p-2.5 text-[12px] font-mono font-medium truncate"
-              style={{
-                background: "var(--bg-input)",
-                border: "1px solid var(--border-input)",
-                color: "var(--text-primary)",
-              }}
-            >
-              {conversation.phone || conversation.id}
+          {!isGroupChat && (
+            <div className="mb-5">
+              <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">
+                Phone
+              </h3>
+              <div
+                className="rounded-[6px] p-2.5 text-[12px] font-mono font-medium truncate"
+                style={{
+                  background: "var(--bg-input)",
+                  border: "1px solid var(--border-input)",
+                  color: "var(--text-primary)",
+                }}
+              >
+                {conversation.phone || conversation.id}
+              </div>
             </div>
-          </div>
+          )}
 
           <div className="mb-5">
             <div className="flex items-center justify-between mb-2">
@@ -865,7 +873,10 @@ export function ConversationDetailsSidebar({
       </div>
 
       <div className="mt-8 text-[9px]" style={{ color: "var(--text-muted)" }}>
-        Conversation cv-{conversation.phone || conversation.id || conversation.name.toLowerCase()}
+        Conversation cv-
+        {isGroupChat
+          ? conversation.name.toLowerCase()
+          : conversation.phone || conversation.id || conversation.name.toLowerCase()}
       </div>
     </div>
   );
