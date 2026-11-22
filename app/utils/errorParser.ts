@@ -6,6 +6,18 @@ export interface ParsedMetaError {
   subcode?: number;
 }
 
+function asRecord(val: unknown): Record<string, unknown> | null {
+  return val && typeof val === "object" ? (val as Record<string, unknown>) : null;
+}
+
+function asNumber(val: unknown): number | undefined {
+  return typeof val === "number" && Number.isFinite(val) ? val : undefined;
+}
+
+function asString(val: unknown): string | undefined {
+  return typeof val === "string" ? val : undefined;
+}
+
 /**
  * Parses raw Meta API errors or server error responses into human-friendly messages
  * with clear action hints, adhering to CRM UX standards.
@@ -19,34 +31,40 @@ export function formatMetaErrorMessage(errorInput: unknown): ParsedMetaError {
     };
   }
 
-  let parsed: any = errorInput;
+  let parsed: unknown = errorInput;
 
   // Handle serialized JSON strings (e.g. '{"error":{"message":"(#551)..."}}')
   if (typeof errorInput === "string") {
     const trimmed = errorInput.trim();
     if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
       try {
-        parsed = JSON.parse(trimmed);
+        parsed = JSON.parse(trimmed) as unknown;
       } catch {
         parsed = errorInput;
       }
     }
   }
 
-  const metaErr = parsed?.error || parsed;
-  const code = metaErr?.code || parsed?.details?.code;
-  const subcode = metaErr?.error_subcode || parsed?.details?.subcode;
+  const parsedObj = asRecord(parsed);
+  const nestedErrorObj = asRecord(parsedObj?.error);
+  const metaErrObj = nestedErrorObj || parsedObj;
+  const details = asRecord(parsedObj?.details);
+
+  const code = asNumber(metaErrObj?.code) ?? asNumber(details?.code);
+  const subcode =
+    asNumber(metaErrObj?.error_subcode) ??
+    asNumber(metaErrObj?.subcode) ??
+    asNumber(details?.subcode);
+  const reason = asString(details?.reason) || "";
+  const detailsFriendly = asString(details?.friendlyMessage);
+  const detailsHint = asString(details?.actionHint);
   const rawMsg =
-    typeof metaErr?.message === "string"
-      ? metaErr.message
-      : typeof metaErr === "string"
-      ? metaErr
-      : typeof parsed === "string"
-      ? parsed
-      : "";
+    asString(metaErrObj?.message) ??
+    asString(parsedObj?.error) ??
+    (typeof parsed === "string" ? parsed : "");
   const lowerMsg = rawMsg.toLowerCase();
 
-  // 1. Recipient unavailable on Messenger (Error 551 / Subcode 1545041)
+  // 1. Recipient unavailable on Messenger / Instagram (Error 551 / Subcode 1545041)
   if (
     code === 551 ||
     subcode === 1545041 ||
@@ -55,10 +73,11 @@ export function formatMetaErrorMessage(errorInput: unknown): ParsedMetaError {
     rawMsg.includes("is not available")
   ) {
     return {
-      title: "Recipient unavailable on Messenger",
+      title: "Recipient unavailable",
       message:
         "This person cannot receive messages right now. They may have blocked messages, deactivated their account, or your Meta App is still in Development mode.",
-      actionHint: "Check if you can reply via Meta Business Suite, or verify that your Meta App is set to Live in the Developer Console.",
+      actionHint:
+        "Check if you can reply via Meta Business Suite, or verify that your Meta App is set to Live in the Developer Console.",
       code: 551,
       subcode: 1545041,
     };
@@ -81,52 +100,83 @@ export function formatMetaErrorMessage(errorInput: unknown): ParsedMetaError {
     };
   }
 
-  // 2. 7-day Human Agent window expired
-  if (lowerMsg.includes("7 days") || lowerMsg.includes("seven days")) {
+  // 1c. Automated AI reply outside 24-hour window
+  if (reason === "automated_outside_24h" || lowerMsg.includes("automated reply")) {
     return {
-      title: "7-day reply window expired",
+      title: "Automated reply restricted to 24 hours",
       message:
-        "More than 7 days have passed since the customer's last message. Meta's maximum 7-day Human Agent window has closed.",
-      actionHint: "Wait for the customer to send a new message, or reach out to them via WhatsApp or phone call.",
-      code: 10,
-      subcode: 2018001,
+        detailsFriendly ||
+        "More than 24 hours have passed since the customer's last message. Automated replies are only allowed within 24 hours.",
+      actionHint:
+        detailsHint || "A human staff member can still reply manually within 7 days.",
+      code: code || 10,
+      subcode: subcode || 2018278,
     };
   }
 
-  // 3. Human Agent tag permission required in Meta Developer Portal
+  // 2. 7-day Human Agent window expired
   if (
-    lowerMsg.includes("human agent") ||
+    reason === "human_agent_window_expired" ||
+    lowerMsg.includes("7 days") ||
+    lowerMsg.includes("seven days")
+  ) {
+    return {
+      title: "7-day reply window expired",
+      message:
+        detailsFriendly ||
+        "More than 7 days have passed since the customer's last message. Meta's maximum 7-day Human Agent window has closed.",
+      actionHint:
+        detailsHint ||
+        "Wait for the customer to send a new message, or reach out to them via WhatsApp or phone call.",
+      code: code || 10,
+      subcode: subcode || 2018278,
+    };
+  }
+
+  // 3. Human Agent permission / feature approval issue
+  if (
+    reason === "human_agent_permission_required" ||
+    lowerMsg.includes("needs the 'human agent'") ||
     lowerMsg.includes("human_agent")
   ) {
     return {
       title: "Human Agent permission required (7-day window)",
       message:
-        "To reply outside 24 hours (up to 7 days), your Meta App must be approved for the 'Human Agent' feature in Meta Developer Console.",
-      actionHint: "Go to Meta Developer Console > App Review > Permissions and Features > request Advanced Access for 'Human Agent'.",
-      code: 10,
-      subcode: 2018001,
+        detailsFriendly ||
+        "To reply outside 24 hours (up to 7 days), your Meta App needs the 'Human Agent' feature approved and included on the active Page token.",
+      actionHint:
+        detailsHint ||
+        "Verify 'Human Agent' and channel permissions in Meta Developer Console and refresh FB_PAGE_ACCESS_TOKEN if needed.",
+      code: code || 10,
+      subcode: subcode || 2018001,
     };
   }
 
-  // 4. 24-hour policy window (Error 10 / Subcode 2018001)
+  // 4. 24-hour policy window (Error 10 / Subcode 2018001 / 2018278 / 2534022)
   if (
+    reason === "standard_window_expired" ||
     code === 10 ||
     subcode === 2018001 ||
+    subcode === 2018278 ||
+    subcode === 2534022 ||
     rawMsg.includes("24 hours") ||
     rawMsg.includes("message tag") ||
-    rawMsg.includes("window")
+    lowerMsg.includes("allowed window")
   ) {
     return {
       title: "24-hour reply window expired",
       message:
+        detailsFriendly ||
         "More than 24 hours have passed since the customer's last message. Standard replies are restricted outside 24 hours.",
-      actionHint: "Request the 'Human Agent' feature in Meta Developer Console to enable 7-day replies, or reply via Meta Business Suite.",
-      code: 10,
-      subcode: 2018001,
+      actionHint:
+        detailsHint ||
+        "Verify 'Human Agent' access in Meta Developer Console to enable 7-day replies, or reply via Meta Business Suite.",
+      code: code || 10,
+      subcode: subcode || 2018001,
     };
   }
 
-  // 3. Token expired or invalid (Error 190)
+  // 5. Token expired or invalid (Error 190)
   if (code === 190 || rawMsg.includes("access token") || rawMsg.includes("Session has expired")) {
     return {
       title: "Meta authorization expired",
@@ -136,17 +186,20 @@ export function formatMetaErrorMessage(errorInput: unknown): ParsedMetaError {
     };
   }
 
-  // 4. Permissions error (Error 200 / 230)
+  // 6. Permissions error (Error 200 / 230)
   if (code === 200 || code === 230 || rawMsg.includes("Permissions error")) {
     return {
       title: "Permission denied",
-      message: "The Meta App lacks permission (pages_messaging) to message this recipient.",
-      actionHint: "Verify permissions in Meta Developer Portal.",
-      code: 200,
+      message:
+        detailsFriendly ||
+        "The Meta App lacks permission (pages_messaging / instagram_manage_messages) to message this recipient.",
+      actionHint:
+        detailsHint || "Verify permissions in Meta Developer Portal and refresh the Page token.",
+      code: code || 200,
     };
   }
 
-  // 5. Invalid parameters (Error 100)
+  // 7. Invalid parameters (Error 100)
   if (code === 100) {
     return {
       title: "Invalid recipient",
@@ -156,11 +209,11 @@ export function formatMetaErrorMessage(errorInput: unknown): ParsedMetaError {
   }
 
   // If a friendly message was already provided by our backend
-  if (parsed?.details?.friendlyMessage) {
+  if (detailsFriendly) {
     return {
       title: "Message could not be sent",
-      message: parsed.details.friendlyMessage,
-      actionHint: parsed.details.actionHint || "Please try again later.",
+      message: detailsFriendly,
+      actionHint: detailsHint || "Please try again later.",
       code,
       subcode,
     };

@@ -576,7 +576,7 @@ export const ConversationChatView = React.memo(function ConversationChatView({
         } else {
           finalizeOptimisticMessages(chatId, tempIds);
           const data = await res.json().catch(() => null);
-          const parsed = formatMetaErrorMessage(data?.error || data);
+          const parsed = formatMetaErrorMessage(data || { error: `Request failed (HTTP ${res.status})` });
           setSendError(parsed);
           return false;
         }
