@@ -174,6 +174,28 @@ describe("conversationExport", () => {
     });
 
     assert.match(rawTranscript, /\[09:00\] Mona: \[Template: Lead Form — Phone: \+201112223334\]/);
+
+    const waGhostTranscript = formatConversationTranscript({
+      id: "op_966504667561",
+      channel: "WA",
+      name: "Taleen Abou Aliah",
+      messages: [
+        { messageId: "m1", direction: "outgoing", senderName: "Staff", timestamp: 1795451486000, text: "", attachments: [] },
+        { messageId: "m2", direction: "incoming", senderName: "Taleen", timestamp: 1795451500000, text: "Yess", attachments: [] },
+        {
+          messageId: "m3",
+          direction: "incoming",
+          senderName: "Rowan",
+          timestamp: 1795451600000,
+          text: "",
+          attachments: [],
+          reactions: [{ emoji: "🙏", sender: "MaNaR", fromMe: false }],
+        },
+      ],
+    });
+    assert.match(waGhostTranscript, /Messages: 2/);
+    assert.doesNotMatch(waGhostTranscript, /\(empty message\)/);
+    assert.match(waGhostTranscript, /\[Message unavailable in CRM\]/);
   });
 });
 

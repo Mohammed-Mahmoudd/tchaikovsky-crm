@@ -453,7 +453,17 @@ export function formatConversationTranscript(
       : ""
     : "";
 
-  const rawMessages = Array.isArray(conv.messages) ? conv.messages.filter(Boolean) : [];
+  const isWhatsAppConv = String(conv.channel || "").toUpperCase() === "WA";
+  const rawMessages = Array.isArray(conv.messages)
+    ? conv.messages.filter((m) => {
+        if (!m) return false;
+        if (!isWhatsAppConv || m.isDeleted) return true;
+        const hasText = typeof m.text === "string" && m.text.trim().length > 0;
+        const hasAttachments = Array.isArray(m.attachments) && m.attachments.length > 0;
+        if (hasText || hasAttachments) return true;
+        return Boolean(m.replyTo) || (Array.isArray(m.reactions) && m.reactions.length > 0);
+      })
+    : [];
 
   const headerLines: string[] = [
     "Tchaikovsky School — Conversation Transcript",
@@ -597,6 +607,8 @@ export function formatConversationTranscript(
       for (let j = 1; j < attachmentLines.length; j++) {
         bodyLines.push(`  ${attachmentLines[j]}`);
       }
+    } else if (isWhatsAppConv) {
+      bodyLines.push(`[${timeLabel}] ${senderLabel}${editedSuffix}${pendingSuffix}: [Message unavailable in CRM]`);
     } else {
       bodyLines.push(`[${timeLabel}] ${senderLabel}${editedSuffix}${pendingSuffix}: (empty message)`);
     }

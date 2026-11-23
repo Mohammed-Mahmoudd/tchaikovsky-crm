@@ -6,6 +6,145 @@ export interface MessageLike {
   attachments?: ReadonlyArray<unknown>;
 }
 
+export interface MessageRenderInput {
+  text?: string;
+  attachments?: ReadonlyArray<unknown>;
+  isDeleted?: boolean;
+  replyTo?: unknown;
+  reactions?: ReadonlyArray<unknown>;
+}
+
+const TEMPLATE_FALLBACK_PLACEHOLDERS = new Set([
+  "📋 [form / template]",
+  "[form / template]",
+  "form / template",
+  "template",
+  "📋",
+]);
+
+const PLACEHOLDER_MESSAGE_TEXTS = new Set([
+  ...TEMPLATE_FALLBACK_PLACEHOLDERS,
+  "shared post/reel",
+  "[shared post/reel]",
+  "🔗 [shared post/reel]",
+  "photo",
+  "[photo]",
+  "📷 [photo]",
+  "voice message",
+  "[voice message]",
+  "🎤 [voice message]",
+  "video",
+  "[video]",
+  "🎥 [video]",
+  "file",
+  "[file]",
+  "📎 [file]",
+  "attachment",
+  "[attachment]",
+]);
+
+const MEDIA_ATTACHMENT_TYPES = new Set([
+  "image",
+  "audio",
+  "video",
+  "file",
+  "document",
+  "ig_post",
+  "ig_reel",
+  "share",
+]);
+
+export function isTemplateAttachmentLike(att: unknown): boolean {
+  if (!att || typeof att !== "object") return false;
+  const a = att as {
+    type?: unknown;
+    elements?: unknown;
+    payload?: {
+      template_type?: unknown;
+      generic?: unknown;
+      button?: unknown;
+      elements?: unknown;
+    };
+  };
+  return Boolean(
+    a.type === "template" ||
+      a.type === "fallback" ||
+      a.payload?.template_type ||
+      a.payload?.generic ||
+      a.payload?.button ||
+      a.payload?.elements ||
+      a.elements
+  );
+}
+
+export function isMediaAttachmentLike(att: unknown): boolean {
+  if (!att || typeof att !== "object") return false;
+  const t = (att as { type?: unknown }).type;
+  return typeof t === "string" && MEDIA_ATTACHMENT_TYPES.has(t);
+}
+
+/**
+ * Matches known media/template placeholder text strings (excluding empty string).
+ */
+export function isPlaceholderMessageText(text?: string): boolean {
+  if (!text) return false;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("📋 [")) return true;
+  const lower = trimmed.toLowerCase();
+  if (lower.includes("shared post/reel")) return true;
+  return PLACEHOLDER_MESSAGE_TEXTS.has(lower);
+}
+
+/**
+ * Matches explicit legacy Meta template/form placeholder text that warrants
+ * synthesizing a fallback MessageTemplate card when attachments were omitted.
+ */
+export function isTemplateFallbackPlaceholder(text?: string): boolean {
+  if (!text) return false;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("📋 [")) return true;
+  return TEMPLATE_FALLBACK_PLACEHOLDERS.has(trimmed.toLowerCase());
+}
+
+/**
+ * Legacy Meta lead-form fallback cards ("Lead form submitted" / "Confirmation")
+ * must NEVER render for WhatsApp messages or blank text messages.
+ */
+export function shouldRenderLegacyTemplateFallback(
+  msg: MessageRenderInput,
+  channel?: string | null
+): boolean {
+  if (channel === "WA") return false;
+  const atts = Array.isArray(msg.attachments) ? msg.attachments : [];
+  if (atts.some(isTemplateAttachmentLike)) return false;
+  if (atts.some(isMediaAttachmentLike)) return false;
+  return isTemplateFallbackPlaceholder(msg.text);
+}
+
+export type WhatsAppGhostDisplayMode = "normal" | "hide" | "unavailable";
+
+/**
+ * Classifies legacy empty WhatsApp rows stored with `text: ""` and `attachments: []`:
+ * - `'hide'` when there are no replies or reactions attached (pure protocol/ghost packet)
+ * - `'unavailable'` when someone replied to or reacted to the message, so UI shows an honest note
+ * - `'normal'` for all regular messages
+ */
+export function getWhatsAppGhostDisplayMode(
+  msg: MessageRenderInput,
+  channel?: string | null
+): WhatsAppGhostDisplayMode {
+  if (channel !== "WA" || msg.isDeleted) return "normal";
+  const hasText = typeof msg.text === "string" && msg.text.trim().length > 0;
+  const hasAttachments = Array.isArray(msg.attachments) && msg.attachments.length > 0;
+  if (hasText || hasAttachments) return "normal";
+
+  const hasReplyOrReactions =
+    Boolean(msg.replyTo) || (Array.isArray(msg.reactions) && msg.reactions.length > 0);
+  return hasReplyOrReactions ? "unavailable" : "hide";
+}
+
 export interface ConversationMessageState {
   messages?: ReadonlyArray<MessageLike>;
   lastMessageDirection?: "incoming" | "outgoing";

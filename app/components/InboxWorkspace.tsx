@@ -65,7 +65,14 @@ import {
   getAuditionTimeSelectOptions,
   syncAuditionSlotCacheOnUpdate,
 } from "../utils/auditionSchedule";
-import { buildConfirmedReplyMessages } from "../utils/conversationMessages";
+import {
+  buildConfirmedReplyMessages,
+  getWhatsAppGhostDisplayMode,
+  isMediaAttachmentLike,
+  isPlaceholderMessageText,
+  isTemplateAttachmentLike,
+  shouldRenderLegacyTemplateFallback,
+} from "../utils/conversationMessages";
 import {
   INBOX_FILTERS,
   OPERATION_INBOX_FILTERS,
@@ -164,38 +171,6 @@ import {
   toggleLeadLabelId,
 } from "../utils/leadLabels";
 
-const isPlaceholderText = (text?: string) => {
-  if (!text) return true;
-  const s = text.trim();
-  const lower = s.toLowerCase();
-  return (
-    s === "📋 [Form / Template]" ||
-    s === "[Form / Template]" ||
-    s === "Form / Template" ||
-    s === "Template" ||
-    s.startsWith("📋 [") ||
-    s === "📋" ||
-    lower === "shared post/reel" ||
-    lower === "[shared post/reel]" ||
-    lower === "🔗 [shared post/reel]" ||
-    lower.includes("shared post/reel") ||
-    lower === "photo" ||
-    lower === "[photo]" ||
-    lower === "📷 [photo]" ||
-    lower === "voice message" ||
-    lower === "[voice message]" ||
-    lower === "🎤 [voice message]" ||
-    lower === "video" ||
-    lower === "[video]" ||
-    lower === "🎥 [video]" ||
-    lower === "file" ||
-    lower === "[file]" ||
-    lower === "📎 [file]" ||
-    lower === "attachment" ||
-    lower === "[attachment]"
-  );
-};
-
 const isRealPhone = (p?: string): boolean => {
   if (!p) return false;
   const s = p.trim().toLowerCase();
@@ -256,19 +231,6 @@ const extractPhoneFromConversation = (conv?: any | null): string => {
   }
   return "";
 };
-
-const isTemplateAttachment = (att: any) =>
-  Boolean(
-    att && (
-      att.type === "template" ||
-      att.payload?.template_type ||
-      Boolean(att.payload?.generic) ||
-      Boolean(att.payload?.button) ||
-      Boolean(att.payload?.elements) ||
-      Boolean(att.elements) ||
-      att.type === "fallback"
-    )
-  );
 
 const PIPELINE_STAGES = [
   "New",
@@ -2540,20 +2502,22 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
               ) : null}
               {(() => {
                 const convPhone = extractPhoneFromConversation(activeConv);
-                const dateDividerLabels = buildChatDateDividerLabels(activeConv.messages);
-                return activeConv.messages.map((msg, msgIdx) => {
+                const visibleMessages = activeConv.messages.filter(
+                  (m) => getWhatsAppGhostDisplayMode(m, activeConv.channel) !== "hide"
+                );
+                const dateDividerLabels = buildChatDateDividerLabels(visibleMessages);
+                return visibleMessages.map((msg, msgIdx) => {
                   const dateDividerLabel = dateDividerLabels[msgIdx];
                   const timeTooltip = formatChatMessageTooltip(msg.timestamp, msg.time);
-                  const hasTemplateAttachment = (msg.attachments || []).some(isTemplateAttachment);
+                  const ghostMode = getWhatsAppGhostDisplayMode(msg, activeConv.channel);
+                  const hasTemplateAttachment = (msg.attachments || []).some(isTemplateAttachmentLike);
                   const hasSharedPostAttachment = (msg.attachments || []).some(
                     (a: any) => a.type === "ig_post" || a.type === "ig_reel" || a.type === "share"
                   );
-                  const hasMediaAttachment = (msg.attachments || []).some((a: any) =>
-                    ["image", "audio", "video", "file", "document", "ig_post", "ig_reel", "share"].includes(a.type)
-                  );
-                  const shouldRenderFallbackCard = !hasTemplateAttachment && !hasMediaAttachment && isPlaceholderText(msg.text);
+                  const hasMediaAttachment = (msg.attachments || []).some(isMediaAttachmentLike);
+                  const shouldRenderFallbackCard = shouldRenderLegacyTemplateFallback(msg, activeConv.channel);
 
-                  let showPlainText = Boolean(msg.text && !isPlaceholderText(msg.text));
+                  let showPlainText = Boolean(msg.text && !isPlaceholderMessageText(msg.text));
                   if (showPlainText && hasMediaAttachment && msg.attachments) {
                     const trimmedMsgText = msg.text.trim();
                     const matchesAttachmentFileName = msg.attachments.some(
@@ -2575,7 +2539,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                     }
                   }
                   if (showPlainText && hasTemplateAttachment) {
-                    const firstTemplateAtt = msg.attachments?.find(isTemplateAttachment);
+                    const firstTemplateAtt = msg.attachments?.find(isTemplateAttachmentLike);
                     const parsed = parseTemplateAttachment(firstTemplateAtt, msg.isIncoming, convPhone);
                     if (parsed.length > 0 && parsed[0].title.trim() === msg.text.trim()) {
                       showPlainText = false;
@@ -2858,13 +2822,13 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                               {msg.attachments && msg.attachments.length > 0 && (
                                 <div className="flex flex-col gap-2 mb-1.5">
                                   {msg.attachments.map((att: any, idx: number) => {
-                                    if (isTemplateAttachment(att)) return null;
+                                    if (isTemplateAttachmentLike(att)) return null;
                                     const url = att.previewUrl || att.payload?.url || att.url;
                                     const fileName =
                                       att.fileName ||
                                       att.payload?.title ||
                                       att.title ||
-                                      (att.type === "file" && msg.text && !isPlaceholderText(msg.text)
+                                      (att.type === "file" && msg.text && !isPlaceholderMessageText(msg.text)
                                         ? msg.text
                                         : undefined);
                                     const fileSizeStr = formatFileSize(att.fileSize);
@@ -3094,7 +3058,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                               {hasTemplateAttachment && (
                                 <div className="flex flex-col gap-2.5">
                                   {msg.attachments
-                                    ?.filter(isTemplateAttachment)
+                                    ?.filter(isTemplateAttachmentLike)
                                     .map((att: any, idx: number) => (
                                       <MessageTemplate
                                         key={idx}
@@ -3106,7 +3070,19 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                                 </div>
                               )}
 
-                              {/* Graceful fallback card for legacy messages that stored placeholder text */}
+                              {/* Neutral placeholder when a legacy empty WA message still has replies or reactions */}
+                              {ghostMode === "unavailable" && (
+                                <p
+                                  className="text-[12px] italic opacity-80 select-none"
+                                  style={{
+                                    color: msg.isIncoming ? "var(--text-secondary)" : "var(--text-chat-outgoing)",
+                                  }}
+                                >
+                                  Message unavailable in CRM
+                                </p>
+                              )}
+
+                              {/* Graceful fallback card for legacy Meta messages that stored template placeholder text */}
                               {shouldRenderFallbackCard && (
                                 <MessageTemplate
                                   attachment={{

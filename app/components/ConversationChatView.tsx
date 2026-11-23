@@ -41,41 +41,16 @@ import InstagramMedia from "./InstagramMedia";
 import { VoiceNotePlayer } from "./VoiceNotePlayer";
 import { ChatDateDivider } from "./ChatDateDivider";
 import { buildChatDateDividerLabels, formatChatMessageTooltip } from "../utils/time";
-import { buildConfirmedReplyMessages } from "../utils/conversationMessages";
+import {
+  buildConfirmedReplyMessages,
+  getWhatsAppGhostDisplayMode,
+  isMediaAttachmentLike,
+  isPlaceholderMessageText,
+  isTemplateAttachmentLike,
+  shouldRenderLegacyTemplateFallback,
+} from "../utils/conversationMessages";
 
 // ─── Helper Functions ────────────────────────────────────────────────────────
-
-const isPlaceholderText = (text?: string) => {
-  if (!text) return true;
-  const s = text.trim();
-  const lower = s.toLowerCase();
-  return (
-    s === "📋 [Form / Template]" ||
-    s === "[Form / Template]" ||
-    s === "Form / Template" ||
-    s === "Template" ||
-    s.startsWith("📋 [") ||
-    s === "📋" ||
-    lower === "shared post/reel" ||
-    lower === "[shared post/reel]" ||
-    lower === "🔗 [shared post/reel]" ||
-    lower.includes("shared post/reel") ||
-    lower === "photo" ||
-    lower === "[photo]" ||
-    lower === "📷 [photo]" ||
-    lower === "voice message" ||
-    lower === "[voice message]" ||
-    lower === "🎤 [voice message]" ||
-    lower === "video" ||
-    lower === "[video]" ||
-    lower === "🎥 [video]" ||
-    lower === "file" ||
-    lower === "[file]" ||
-    lower === "📎 [file]" ||
-    lower === "attachment" ||
-    lower === "[attachment]"
-  );
-};
 
 const isRealPhone = (p?: string): boolean => {
   if (!p) return false;
@@ -112,6 +87,7 @@ interface AttachmentItem {
 
 const extractPhoneFromConversation = (conv?: Conversation | null): string => {
   if (!conv) return "";
+  if (conv.isGroup || /^(?:op_)?grp_/i.test(String(conv.id || ""))) return "";
   if (isRealPhone(conv.phone)) return conv.phone;
   if (conv.formPhone && isRealPhone(conv.formPhone)) return `+${String(conv.formPhone).replace(/\D/g, "")}`;
   const fa = conv.formAnswers as Record<string, unknown> | undefined;
@@ -138,21 +114,6 @@ const extractPhoneFromConversation = (conv?: Conversation | null): string => {
     }
   }
   return "";
-};
-
-const isTemplateAttachment = (att: AttachmentItem | unknown) => {
-  const a = att as AttachmentItem | undefined;
-  return Boolean(
-    a && (
-      a.type === "template" ||
-      a.payload?.template_type ||
-      Boolean(a.payload?.generic) ||
-      Boolean(a.payload?.button) ||
-      Boolean(a.payload?.elements) ||
-      Boolean(a.elements) ||
-      a.type === "fallback"
-    )
-  );
 };
 
 // ─── Component Props ─────────────────────────────────────────────────────────
@@ -952,21 +913,23 @@ export const ConversationChatView = React.memo(function ConversationChatView({
         ) : null}
 
         {(() => {
-          const dateDividerLabels = buildChatDateDividerLabels(activeConv.messages);
-          return activeConv.messages.map((msg, msgIdx) => {
+          const visibleMessages = activeConv.messages.filter(
+            (m) => getWhatsAppGhostDisplayMode(m, activeConv.channel) !== "hide"
+          );
+          const dateDividerLabels = buildChatDateDividerLabels(visibleMessages);
+          return visibleMessages.map((msg, msgIdx) => {
             const dateDividerLabel = dateDividerLabels[msgIdx];
             const timeTooltip = formatChatMessageTooltip(msg.timestamp, msg.time);
+          const ghostMode = getWhatsAppGhostDisplayMode(msg, activeConv.channel);
           const msgAttachments = (msg.attachments || []) as AttachmentItem[];
-          const hasTemplateAttachment = msgAttachments.some(isTemplateAttachment);
+          const hasTemplateAttachment = msgAttachments.some(isTemplateAttachmentLike);
           const hasSharedPostAttachment = msgAttachments.some(
             (a) => a.type === "ig_post" || a.type === "ig_reel" || a.type === "share"
           );
-          const hasMediaAttachment = msgAttachments.some((a) =>
-            ["image", "audio", "video", "file", "document", "ig_post", "ig_reel", "share"].includes(a.type || "")
-          );
-          const shouldRenderFallbackCard = !hasTemplateAttachment && !hasMediaAttachment && isPlaceholderText(msg.text);
+          const hasMediaAttachment = msgAttachments.some(isMediaAttachmentLike);
+          const shouldRenderFallbackCard = shouldRenderLegacyTemplateFallback(msg, activeConv.channel);
 
-          let showPlainText = Boolean(msg.text && !isPlaceholderText(msg.text));
+          let showPlainText = Boolean(msg.text && !isPlaceholderMessageText(msg.text));
           if (showPlainText && hasMediaAttachment && msgAttachments.length > 0) {
             const trimmedMsgText = msg.text.trim();
             const matchesAttachmentFileName = msgAttachments.some(
@@ -988,7 +951,7 @@ export const ConversationChatView = React.memo(function ConversationChatView({
             }
           }
           if (showPlainText && hasTemplateAttachment) {
-            const firstTemplateAtt = msg.attachments?.find(isTemplateAttachment);
+            const firstTemplateAtt = msg.attachments?.find(isTemplateAttachmentLike);
             const parsed = parseTemplateAttachment(firstTemplateAtt, msg.isIncoming, convPhone);
             if (parsed.length > 0 && parsed[0].title.trim() === msg.text.trim()) {
               showPlainText = false;
@@ -1246,13 +1209,13 @@ export const ConversationChatView = React.memo(function ConversationChatView({
                       {msgAttachments && msgAttachments.length > 0 && (
                         <div className="flex flex-col gap-2 mb-1.5">
                           {msgAttachments.map((att, idx) => {
-                            if (isTemplateAttachment(att)) return null;
+                            if (isTemplateAttachmentLike(att)) return null;
                             const url = att.previewUrl || att.payload?.url || att.url;
                             const fileName =
                               att.fileName ||
                               att.payload?.title ||
                               att.title ||
-                              (att.type === "file" && msg.text && !isPlaceholderText(msg.text)
+                              (att.type === "file" && msg.text && !isPlaceholderMessageText(msg.text)
                                 ? msg.text
                                 : undefined);
                             const fileSizeStr = formatFileSize(att.fileSize);
@@ -1399,7 +1362,7 @@ export const ConversationChatView = React.memo(function ConversationChatView({
                       {hasTemplateAttachment && (
                         <div className="flex flex-col gap-2">
                           {msgAttachments
-                            .filter(isTemplateAttachment)
+                            .filter(isTemplateAttachmentLike)
                             .map((att, idx) => (
                               <MessageTemplate
                                 key={idx}
@@ -1409,6 +1372,27 @@ export const ConversationChatView = React.memo(function ConversationChatView({
                               />
                             ))}
                         </div>
+                      )}
+
+                      {/* Neutral placeholder when a legacy empty WA message still has replies or reactions */}
+                      {ghostMode === "unavailable" && (
+                        <p
+                          className="text-[12px] italic opacity-80 select-none"
+                          style={{
+                            color: msg.isIncoming ? "var(--text-secondary)" : "var(--text-chat-outgoing)",
+                          }}
+                        >
+                          Message unavailable in CRM
+                        </p>
+                      )}
+
+                      {/* Graceful fallback card for legacy Meta messages that stored template placeholder text */}
+                      {shouldRenderFallbackCard && (
+                        <MessageTemplate
+                          attachment={{ type: "template" }}
+                          isIncoming={msg.isIncoming}
+                          senderPhone={convPhone}
+                        />
                       )}
 
                       {/* Plain Text Message */}

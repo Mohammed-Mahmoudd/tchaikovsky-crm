@@ -4,11 +4,15 @@ import {
   buildConfirmedReplyMessages,
   computeUnreadFromMessages,
   getLastRealMessageDirection,
+  getWhatsAppGhostDisplayMode,
   isAutomatedTemplateMsg,
   isLastMessageFromLead,
+  isPlaceholderMessageText,
   isRealSenderName,
+  isTemplateFallbackPlaceholder,
   mergeExistingMessageFromSse,
   resolvePreferredSenderName,
+  shouldRenderLegacyTemplateFallback,
 } from "./conversationMessages.ts";
 
 describe("conversationMessages", () => {
@@ -197,6 +201,36 @@ describe("conversationMessages", () => {
     assert.equal(merged.seenAt, 1100);
     assert.equal(merged.attachments?.length, 1);
     assert.equal(merged.reactions?.length, 1);
+  });
+
+  it("never renders Lead form submitted / Confirmation fallback cards for WhatsApp or blank messages", () => {
+    assert.equal(isPlaceholderMessageText(""), false);
+    assert.equal(isPlaceholderMessageText("Photo"), true);
+    assert.equal(isTemplateFallbackPlaceholder("Template"), true);
+    assert.equal(isTemplateFallbackPlaceholder("Photo"), false);
+
+    // WhatsApp incoming/outgoing empty messages must never trigger Meta lead-form fallback cards
+    assert.equal(shouldRenderLegacyTemplateFallback({ text: "", attachments: [] }, "WA"), false);
+    assert.equal(shouldRenderLegacyTemplateFallback({ text: "Template", attachments: [] }, "WA"), false);
+
+    // Non-WA (FB/IG) only triggers legacy template fallback for explicit template placeholders
+    assert.equal(shouldRenderLegacyTemplateFallback({ text: "", attachments: [] }, "FB"), false);
+    assert.equal(shouldRenderLegacyTemplateFallback({ text: "Template", attachments: [] }, "FB"), true);
+    assert.equal(shouldRenderLegacyTemplateFallback({ text: "[Form / Template]", attachments: [] }, "IG"), true);
+
+    // Pure empty WA ghost rows without reply/reactions are hidden; reacted/replied ones show unavailable note
+    assert.equal(getWhatsAppGhostDisplayMode({ text: "", attachments: [] }, "WA"), "hide");
+    assert.equal(
+      getWhatsAppGhostDisplayMode({ text: "", attachments: [], reactions: [{ emoji: "🙏" }] }, "WA"),
+      "unavailable"
+    );
+    assert.equal(
+      getWhatsAppGhostDisplayMode({ text: "", attachments: [], replyTo: { id: "m1" } }, "WA"),
+      "unavailable"
+    );
+    assert.equal(getWhatsAppGhostDisplayMode({ text: "", attachments: [], isDeleted: true }, "WA"), "normal");
+    assert.equal(getWhatsAppGhostDisplayMode({ text: "Yess", attachments: [] }, "WA"), "normal");
+    assert.equal(getWhatsAppGhostDisplayMode({ text: "", attachments: [] }, "FB"), "normal");
   });
 });
 
