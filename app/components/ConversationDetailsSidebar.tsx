@@ -18,6 +18,7 @@ import EditableLeadName from "./EditableLeadName";
 import LeadLabelsSection from "./LeadLabelsSection";
 import LeadClaudeToggleSection from "./LeadClaudeToggleSection";
 import LeadCashInSection from "./LeadCashInSection";
+import PipelineStageSection from "./PipelineStageSection";
 import {
   buildLeadNamePatchUpdates,
   getEditableLeadDisplayName,
@@ -27,30 +28,6 @@ import {
   extractExplicitAuditionTime,
   syncAuditionSlotCacheOnUpdate,
 } from "../utils/auditionSchedule";
-
-const PIPELINE_STAGES = [
-  "New",
-  "Contacted",
-  "Qualified",
-  "Audition Booked",
-  "Attended",
-  "Registered",
-  "Joining Later",
-  "Unqualified",
-  "Lost",
-] as const;
-
-const PIPELINE_STAGE_COLORS: Record<string, string> = {
-  New: "#007AFF",
-  Contacted: "#5856D6",
-  Qualified: "#30B0C7",
-  "Audition Booked": "#FF9500",
-  Attended: "#34C759",
-  Registered: "#0066FF",
-  "Joining Later": "#AF52DE",
-  Unqualified: "#FF3B30",
-  Lost: "#8E8E93",
-};
 
 interface ConversationDetailsSidebarProps {
   conversation: Conversation;
@@ -420,71 +397,16 @@ export function ConversationDetailsSidebar({
       </div>
 
       {/* PIPELINE */}
-      <div className="mb-5">
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase">
-            Pipeline
-          </h3>
-          {conversation.pipeline !== "direct" && (
-            <span
-              className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold transition-all"
-              style={{
-                backgroundColor: `${PIPELINE_STAGE_COLORS[conversation.pipeline] || "#8E8E93"}18`,
-                color: PIPELINE_STAGE_COLORS[conversation.pipeline] || "#8E8E93",
-                border: `1px solid ${PIPELINE_STAGE_COLORS[conversation.pipeline] || "#8E8E93"}35`,
-              }}
-            >
-              <span
-                className="w-1.5 h-1.5 rounded-full"
-                style={{
-                  backgroundColor: PIPELINE_STAGE_COLORS[conversation.pipeline] || "#8E8E93",
-                }}
-              />
-              {conversation.pipeline}
-            </span>
-          )}
-        </div>
-        {conversation.pipeline === "direct" ? (
-          <div
-            className="rounded-[6px] p-2.5 space-y-1.5"
-            style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)" }}
-          >
-            <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
-              No lead record — this contact messaged directly.
-            </p>
-            {!isReadOnly && (
-              <button
-                type="button"
-                onClick={() => patchConversation(conversation.id, { pipeline: "New" })}
-                className="text-[11px] font-semibold text-[#0066FF] hover:underline cursor-pointer flex items-center gap-1"
-              >
-                + Add to pipeline
-              </button>
-            )}
-          </div>
-        ) : (
-          <select
-            disabled={isReadOnly}
-            value={conversation.pipeline}
-            onChange={(e) => patchConversation(conversation.id, { pipeline: e.target.value })}
-            className="w-full rounded-[6px] text-[12px] py-1.5 px-2 outline-none disabled:opacity-60 cursor-pointer font-medium transition-colors"
-            style={{
-              border: "1px solid var(--border-input)",
-              background: "var(--bg-input)",
-              color: "var(--text-primary)",
-            }}
-          >
-            {PIPELINE_STAGES.map((stage) => (
-              <option key={stage} value={stage}>
-                {stage}
-              </option>
-            ))}
-            {!PIPELINE_STAGES.includes(conversation.pipeline as any) && (
-              <option value={conversation.pipeline}>{conversation.pipeline}</option>
-            )}
-          </select>
-        )}
-      </div>
+      <PipelineStageSection
+        conversationId={conversation.id}
+        pipeline={conversation.pipeline}
+        lostReason={conversation.lostReason}
+        lostReasonNote={conversation.lostReasonNote}
+        lostAt={conversation.lostAt}
+        lostBy={conversation.lostBy}
+        isReadOnly={isReadOnly}
+        onSavePatch={(updates) => patchConversation(conversation.id, updates)}
+      />
 
       {/* AUDITION */}
       <div className="mb-5">

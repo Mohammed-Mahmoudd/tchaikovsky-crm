@@ -529,3 +529,55 @@ export function splitDisplayReplyChunks(replyText?: string | null): string[] {
   return second ? [first, second] : [first];
 }
 
+export interface ClaudeActivationNoteResult {
+  message: string;
+  tone: "info" | "warning";
+}
+
+/** Formats user-facing feedback when enabling or resuming Adham AI on a lead. */
+export function formatClaudeActivationNote(
+  verb: "Enabled" | "Resumed",
+  res: { autoReplyTriggered?: boolean; autoReplySkippedReason?: string | null }
+): ClaudeActivationNoteResult {
+  if (res.autoReplyTriggered) {
+    return {
+      message: `${verb}. Adham is reading the chat and replying now.`,
+      tone: "info",
+    };
+  }
+  if (res.autoReplySkippedReason === "meta_7d_window_expired") {
+    return {
+      message: `${verb} for future replies — Meta's 7-day Messenger/Instagram window expired, so Adham cannot auto-reply until the lead messages again.`,
+      tone: "warning",
+    };
+  }
+  if (res.autoReplySkippedReason === "meta_24h_window_expired") {
+    return {
+      message: `${verb} for future replies — Meta's 24-hour Messenger/Instagram window expired, so Adham cannot auto-reply until the lead messages again.`,
+      tone: "warning",
+    };
+  }
+  if (res.autoReplySkippedReason === "global_disabled") {
+    return {
+      message: `${verb} for this lead (Global Auto-Reply is OFF in Settings).`,
+      tone: "warning",
+    };
+  }
+  if (res.autoReplySkippedReason === "lead_archived") {
+    return {
+      message: `${verb} for this lead (archived chats do not receive auto-replies).`,
+      tone: "warning",
+    };
+  }
+  if (res.autoReplySkippedReason === "service_unavailable") {
+    return {
+      message: `${verb} for this lead (auto-reply service is currently unavailable).`,
+      tone: "warning",
+    };
+  }
+  return {
+    message: `${verb} for this lead.`,
+    tone: "info",
+  };
+}
+

@@ -1,7 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildBatchConversationExportFilename,
+  buildConversationArchiveEntries,
   buildConversationExportFilename,
+  formatCombinedConversationsTranscript,
   formatConversationTranscript,
   sanitizeExportFilenamePart,
 } from "./conversationExport.ts";
@@ -196,6 +199,56 @@ describe("conversationExport", () => {
     assert.match(waGhostTranscript, /Messages: 2/);
     assert.doesNotMatch(waGhostTranscript, /\(empty message\)/);
     assert.match(waGhostTranscript, /\[Message unavailable in CRM\]/);
+  });
+
+  it("formats combined transcripts and deduplicated archive entries for batch Agent export", () => {
+    const exportedAt = new Date(2026, 10, 24, 14, 0, 0);
+    assert.equal(
+      buildBatchConversationExportFilename("txt", "saved-conversations", exportedAt),
+      "saved-conversations-2026-11-24.txt"
+    );
+    assert.equal(
+      buildBatchConversationExportFilename("zip", "saved-conversations", exportedAt),
+      "saved-conversations-2026-11-24.zip"
+    );
+
+    const convs = [
+      {
+        id: "c1",
+        channel: "WA",
+        name: "Sara",
+        messages: [{ id: "m1", isIncoming: true, timestamp: 1795451500000, text: "Hello piano" }],
+      },
+      {
+        id: "c2",
+        channel: "FB",
+        name: "Sara",
+        messages: [
+          { id: "m2", isIncoming: true, timestamp: 1795451600000, text: "Pricing?" },
+          { id: "m3", isIncoming: false, senderName: "Adham (AI)", timestamp: 1795451660000, text: "Welcome!" },
+        ],
+      },
+    ];
+
+    const combined = formatCombinedConversationsTranscript(convs, {
+      inboxMode: "admissions",
+      exportedAt,
+    });
+    assert.match(combined, /Tchaikovsky School — Saved Conversations Bundle/);
+    assert.match(combined, /Conversations: 2/);
+    assert.match(combined, /Total Messages: 3/);
+    assert.match(combined, /1\. Sara \(WhatsApp · Admissions · 1 message\)/);
+    assert.match(combined, /2\. Sara \(Messenger · Admissions · 2 messages\)/);
+    assert.match(combined, /\[Conversation 1 of 2\]/);
+    assert.match(combined, /\[Conversation 2 of 2\]/);
+    assert.match(combined, /Hello piano/);
+    assert.match(combined, /Pricing\?/);
+
+    const entries = buildConversationArchiveEntries(convs, { exportedAt });
+    assert.equal(entries.length, 2);
+    assert.equal(entries[0].name, "conversation-Sara-2026-11-24.txt");
+    assert.equal(entries[1].name, "conversation-Sara-2026-11-24-2.txt");
+    assert.ok(entries[0].content.startsWith("\uFEFF"));
   });
 });
 

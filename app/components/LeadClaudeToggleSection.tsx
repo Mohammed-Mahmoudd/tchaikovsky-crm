@@ -5,7 +5,11 @@ import Link from "next/link";
 import { Bot, RotateCcw, AlertCircle, ChevronDown } from "lucide-react";
 import { useAuth, normalizeRole } from "./AuthProvider";
 import { useCRM } from "../context/CRMContext";
-import { getLeadClaudeStatusMeta } from "../utils/claudeAgent";
+import {
+  type ClaudeActivationNoteResult,
+  formatClaudeActivationNote,
+  getLeadClaudeStatusMeta,
+} from "../utils/claudeAgent";
 
 export interface LeadClaudeToggleSectionProps {
   conversationId: string;
@@ -39,7 +43,7 @@ function LeadClaudeToggleSectionInner({
   const [isExpanded, setIsExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [statusNote, setStatusNote] = useState<string | null>(null);
+  const [statusNote, setStatusNote] = useState<ClaudeActivationNoteResult | null>(null);
 
   if (normalizeRole(user?.role) !== "chairman") {
     return null;
@@ -50,19 +54,6 @@ function LeadClaudeToggleSectionInner({
     claudePaused,
     claudePausedReason,
   });
-
-  const formatActivationNote = (
-    verb: "Enabled" | "Resumed",
-    res: { autoReplyTriggered?: boolean; autoReplySkippedReason?: string | null }
-  ): string => {
-    if (res.autoReplyTriggered) {
-      return `${verb}. Adham is reading the chat and replying now.`;
-    }
-    if (res.autoReplySkippedReason === "global_disabled") {
-      return `${verb} for this lead (Global Auto-Reply is OFF in Settings).`;
-    }
-    return `${verb} for this lead.`;
-  };
 
   const handleToggleEnabled = async () => {
     if (isReadOnly || busy) return;
@@ -80,7 +71,9 @@ function LeadClaudeToggleSectionInner({
       return;
     }
     setStatusNote(
-      nextEnabled ? formatActivationNote("Enabled", res) : "Turned off for this lead."
+      nextEnabled
+        ? formatClaudeActivationNote("Enabled", res)
+        : { message: "Turned off for this lead.", tone: "info" }
     );
   };
 
@@ -98,7 +91,7 @@ function LeadClaudeToggleSectionInner({
       setErrorMsg(res.error || "Could not resume Claude.");
       return;
     }
-    setStatusNote(formatActivationNote("Resumed", res));
+    setStatusNote(formatClaudeActivationNote("Resumed", res));
   };
 
   const handleResetSession = async () => {
@@ -114,7 +107,10 @@ function LeadClaudeToggleSectionInner({
       setErrorMsg(res.error || "Could not reset Claude session.");
       return;
     }
-    setStatusNote("Memory reset; next reply starts a fresh session.");
+    setStatusNote({
+      message: "Memory reset; next reply starts a fresh session.",
+      tone: "info",
+    });
   };
 
   const lastRepliedDate = claudeLastRepliedAt ? new Date(claudeLastRepliedAt) : null;
@@ -258,11 +254,11 @@ function LeadClaudeToggleSectionInner({
                 )}
               </div>
               <Link
-                href="/settings#claude"
+                href="/agent"
                 className="inline-flex items-center min-h-[44px] sm:min-h-0 text-[11px] font-medium hover:underline shrink-0 ms-auto"
                 style={{ color: "var(--text-secondary)" }}
               >
-                Settings
+                Agent Settings
               </Link>
             </div>
 
@@ -287,9 +283,23 @@ function LeadClaudeToggleSectionInner({
             )}
 
             {statusNote && !errorMsg && (
-              <p className="text-[11px] font-medium" style={{ color: "var(--text-secondary)" }}>
-                {statusNote}
-              </p>
+              statusNote.tone === "warning" ? (
+                <div
+                  className="flex items-start gap-1.5 rounded-md p-2 text-[11px] font-medium leading-snug"
+                  style={{
+                    background: "var(--label-amber-bg)",
+                    border: "1px solid var(--label-amber-border)",
+                    color: "var(--label-amber-text)",
+                  }}
+                >
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span className="min-w-0 break-words">{statusNote.message}</span>
+                </div>
+              ) : (
+                <p className="text-[11px] font-medium" style={{ color: "var(--text-secondary)" }}>
+                  {statusNote.message}
+                </p>
+              )
             )}
           </div>
         )}

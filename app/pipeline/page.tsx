@@ -12,6 +12,26 @@ import { BranchSelect } from "../components/BranchSelect";
 import { ConversationChatView } from "../components/ConversationChatView";
 import { ConversationDetailsSidebar } from "../components/ConversationDetailsSidebar";
 import LeadCashInSection from "../components/LeadCashInSection";
+import { LostReasonPanel } from "../components/PipelineStageSection";
+import LostReasonModal from "../components/LostReasonModal";
+import { PipelineFilterBar } from "../components/PipelineFilters";
+import { PipelineTableView } from "../components/PipelineTableView";
+import { formatLostReasonDisplay, getLostReasonLabel } from "../utils/lostReasons";
+import { formatLeadSource, simplifyMetaLabel } from "../utils/leadSource";
+import { getCreatedTime } from "../utils/teamMetrics";
+import {
+  DEFAULT_PIPELINE_TABLE_SORT,
+  DEFAULT_PIPELINE_TIME_FILTER,
+  PIPELINE_STAGE_LIST,
+  countActivePipelineFilters,
+  evaluatePipelineFilters,
+  getNextTableSort,
+  sortPipelineTableLeads,
+  type PipelineStage,
+  type PipelineTableSort,
+  type PipelineTableSortField,
+  type PipelineTimeFilter,
+} from "../utils/pipelineFilters";
 import { Conversation } from "../context/CRMContext";
 import { getTeamReturnBannerInfo, navigateBackToTeamActivities } from "../utils/teamAuditNav";
 import {
@@ -43,36 +63,88 @@ import { CSS } from "@dnd-kit/utilities";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-type Stage =
-  | "New"
-  | "Contacted"
-  | "Qualified"
-  | "Audition Booked"
-  | "Attended"
-  | "Enrolled"
-  | "Joining Later"
-  | "Unqualified"
-  | "Lost";
+type Stage = PipelineStage;
 
 type Lead = {
   id: string;
   name: string;
   campaign: string;
+  campaignKey: string;
+  campaignLabel: string;
+  campaignFull: string;
+  sourceDisplay: string;
+  sourceChannel: string;
   date: string;
   stage: Stage;
+  lostReason?: string;
+  lostReasonNote?: string;
   phone?: string;
-  agent?: string;
+  agent: string;
   channel?: string;
-  rawCreatedAt?: number;
+  rawCreatedAt: number;
   lastMessageAt?: number;
 };
 
-const STAGES: Stage[] = [
-  "New", "Contacted", "Qualified", "Audition Booked", "Attended", "Enrolled", "Joining Later", "Unqualified", "Lost",
-];
+const STAGES: Stage[] = [...PIPELINE_STAGE_LIST];
 
 // How many cards to render initially per column
 const INITIAL_VISIBLE_COUNT = 30;
+const TABLE_PAGE_SIZE = 50;
+
+// Shared singleton formatter — avoids allocating Intl.DateTimeFormat per lead
+const RECEIVED_DATE_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+  day: "2-digit",
+  month: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+
+function formatPipelineDate(ts: number): string {
+  if (!ts || !Number.isFinite(ts)) return "—";
+  return RECEIVED_DATE_FORMATTER.format(new Date(ts));
+}
+
+function buildLeadFromConversation(c: Conversation, stageOverride?: Stage): Lead {
+  const formattedSource = formatLeadSource(c.source);
+  const campaignKey = formattedSource.campaign || "Direct";
+  const campaignLabel = formattedSource.isUnresolvedId
+    ? `Campaign #${campaignKey}`
+    : campaignKey === "Direct" || campaignKey === "Organic / Direct"
+      ? campaignKey
+      : simplifyMetaLabel(campaignKey) || campaignKey;
+  const campaignFull = formattedSource.isUnresolvedId
+    ? `Campaign #${campaignKey}`
+    : campaignKey;
+  const rawCreatedAt = getCreatedTime(c);
+  const channel = c.channel || (typeof c.source === "object" ? "Meta" : "Direct");
+  const sourceChannel = channel || (campaignKey !== "Direct" ? "Meta" : "Direct");
+  const resolvedStage =
+    stageOverride ||
+    ((c.pipeline && c.pipeline !== "direct" ? c.pipeline : "New") as Stage);
+
+  return {
+    id: c.id,
+    name: c.name,
+    campaign: campaignFull,
+    campaignKey,
+    campaignLabel,
+    campaignFull,
+    sourceDisplay: formattedSource.display,
+    sourceChannel,
+    date: formatPipelineDate(rawCreatedAt),
+    rawCreatedAt,
+    stage: resolvedStage,
+    lostReason: c.lostReason || "",
+    lostReasonNote: c.lostReasonNote || "",
+    phone: c.phone,
+    agent: c.agent || "Unassigned",
+    channel,
+    lastMessageAt:
+      c.lastMessageAt ||
+      (c.updatedAt ? new Date(c.updatedAt).getTime() : undefined) ||
+      (rawCreatedAt || undefined),
+  };
+}
 
 // ─── "Move to" Popover (Fixed viewport-clamped positioning so it never clips) ─
 
@@ -298,10 +370,19 @@ const LeadCard = React.memo(function LeadCard({
       <p
         className="text-[11px] mt-0.5 leading-snug truncate"
         style={{ color: "var(--text-secondary)" }}
-        title={lead.campaign}
+        title={lead.sourceDisplay || lead.campaignFull}
       >
-        {lead.campaign}
+        {lead.campaignLabel}
       </p>
+      {lead.stage === "Lost" && lead.lostReason && (
+        <p
+          className="text-[10px] mt-1 font-medium truncate"
+          style={{ color: "var(--label-red-text)" }}
+          title={formatLostReasonDisplay(lead.lostReason, lead.lostReasonNote)}
+        >
+          {getLostReasonLabel(lead.lostReason)}
+        </p>
+      )}
       <div className="flex items-center justify-between mt-2 gap-1.5">
         <span
           className="text-[10px] truncate"
@@ -527,6 +608,8 @@ function PipelinePageInner() {
   const { branchGroups } = useBranches();
   const [isBookingAudition, setIsBookingAudition] = useState(false);
   const [bookingError, setBookingError] = useState<string | null>(null);
+  const [pendingLostModalLead, setPendingLostModalLead] = useState<{ id: string; name: string } | null>(null);
+  const [isPanelLostTransition, setIsPanelLostTransition] = useState(false);
 
   const handleOpenPanel = useCallback((leadId: string, tab: "details" | "chat" = "details") => {
     if (closeTimeoutRef.current) {
@@ -537,6 +620,7 @@ function PipelinePageInner() {
     setPanelTab(tab);
     setShowChatDetails(false);
     setIsClosing(false);
+    setIsPanelLostTransition(false);
   }, []);
 
   const handleClosePanel = useCallback(() => {
@@ -544,6 +628,7 @@ function PipelinePageInner() {
     setIsClosing(true);
     setShowChatDetails(false);
     setShowDeleteConfirm(false);
+    setIsPanelLostTransition(false);
     if (closeTimeoutRef.current) clearTimeout(closeTimeoutRef.current);
     closeTimeoutRef.current = setTimeout(() => {
       setPanelLeadId(null);
@@ -573,18 +658,22 @@ function PipelinePageInner() {
     };
   }, []);
 
-  // Periodic refresh every 30s to keep relative timestamps live
+  // Periodic refresh every 30s to keep relative timestamps live on Kanban cards
   const [, setTimeTick] = useState(0);
   useEffect(() => {
+    if (view !== "pipeline") return;
     const timer = setInterval(() => setTimeTick((t) => t + 1), 30000);
     return () => clearInterval(timer);
-  }, []);
+  }, [view]);
   // Instant synchronous stage overrides for immediate 0ms UI drop feedback
   const [stageOverrides, setStageOverrides] = useState<Record<string, Stage | "direct">>({});
   const [filterAgent, setFilterAgent] = useState("Everyone");
-  const [filterCampaign, setFilterCampaign] = useState("All campaigns");
-  const [filterReceived, setFilterReceived] = useState("Any time");
+  const [filterCampaigns, setFilterCampaigns] = useState<string[]>([]);
+  const [filterTime, setFilterTime] = useState<PipelineTimeFilter>(DEFAULT_PIPELINE_TIME_FILTER);
+  const [filterStages, setFilterStages] = useState<Stage[]>([]);
   const [filterSource, setFilterSource] = useState("All sources");
+  const [tableSort, setTableSort] = useState<PipelineTableSort>(DEFAULT_PIPELINE_TABLE_SORT);
+  const [tablePage, setTablePage] = useState(1);
   const [hiddenStages, setHiddenStages] = useState<Set<Stage>>(new Set());
   // Track how many cards are visible per stage (for "show more" pagination)
   const [visibleCounts, setVisibleCounts] = useState<Record<Stage, number>>(() => {
@@ -609,155 +698,114 @@ function PipelinePageInner() {
     });
   }, [conversations]);
 
-  // Derive leads dynamically from shared conversations + synchronous local overrides
-  // Note: cards deleted from pipeline have stage "direct" and are excluded from the pipeline board/table,
-  // but their chat history, contact data and messages remain completely safe in the Inbox.
-  const leads: Lead[] = useMemo(() => {
-    return conversations
-      .filter((c) => {
-        const stage = stageOverrides[c.id] || c.pipeline;
-        return stage !== "direct";
-      })
-      .map((c) => ({
-        id: c.id,
-        name: c.name,
-        campaign: typeof c.source === "object" ? c.source?.campaign || "Direct" : (c.source && c.source !== "direct" ? c.source : "Direct"),
-        date: c.createdAt
-          ? new Date(c.createdAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
-          : "—",
-        rawCreatedAt: c.createdAt ? new Date(c.createdAt).getTime() : 0,
-        stage: (stageOverrides[c.id] as Stage) || (c.pipeline as Stage) || "New",
-        phone: c.phone,
-        agent: c.agent || "Unassigned",
-        channel: c.channel || (typeof c.source === "object" ? "Meta" : "Direct"),
-        lastMessageAt: c.lastMessageAt || (c.updatedAt ? new Date(c.updatedAt).getTime() : undefined) || (c.createdAt ? new Date(c.createdAt).getTime() : undefined),
-      }));
-  }, [conversations, stageOverrides]);
-
-  // Real dynamic campaign options from actual data
-  const campaignOptions = useMemo(() => {
-    const counts: Record<string, number> = {};
-    leads.forEach((l) => {
-      const camp = l.campaign || "Direct";
-      counts[camp] = (counts[camp] || 0) + 1;
-    });
-
-    const nonDirect = Object.keys(counts)
-      .filter((c) => c !== "Direct")
-      .sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
-
-    const options: { label: string; value: string }[] = [
-      { label: `All campaigns (${leads.length})`, value: "All campaigns" },
-    ];
-
-    if (counts["Direct"]) {
-      options.push({ label: `Direct (${counts["Direct"]})`, value: "Direct" });
+  // Two-stage memoization: format dates & Meta campaign metadata once per conversations update,
+  // then apply optimistic drag/stage overrides without re-formatting every lead.
+  const baseLeads: Lead[] = useMemo(() => {
+    const list: Lead[] = [];
+    for (let i = 0; i < conversations.length; i += 1) {
+      const c = conversations[i];
+      if (c.pipeline === "direct") continue;
+      list.push(buildLeadFromConversation(c));
     }
+    return list;
+  }, [conversations]);
 
-    nonDirect.forEach((c) => {
-      const display = /^\d+$/.test(c) ? `Campaign #${c}` : c;
-      options.push({ label: `${display} (${counts[c]})`, value: c });
-    });
+  const leads: Lead[] = useMemo(() => {
+    const overrideKeys = Object.keys(stageOverrides);
+    if (overrideKeys.length === 0) return baseLeads;
 
-    return options;
-  }, [leads]);
-
-  // Real dynamic agent options
-  const agentOptions = useMemo(() => {
-    const counts: Record<string, number> = {};
-    leads.forEach((l) => {
-      const ag = l.agent || "Unassigned";
-      counts[ag] = (counts[ag] || 0) + 1;
-    });
-    // Ensure all assignable team members are visible in options
-    assignableAgents.forEach((a) => {
-      if (counts[a.name] === undefined) {
-        counts[a.name] = 0;
+    const list: Lead[] = [];
+    for (let i = 0; i < baseLeads.length; i += 1) {
+      const lead = baseLeads[i];
+      const override = stageOverrides[lead.id];
+      if (override === "direct") continue;
+      if (override && override !== lead.stage) {
+        list.push({ ...lead, stage: override });
+      } else {
+        list.push(lead);
       }
-    });
-    const sorted = Object.keys(counts).sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
-    return [
-      { label: `Everyone (${leads.length})`, value: "Everyone" },
-      ...sorted.map((ag) => ({ label: `${ag} (${counts[ag]})`, value: ag })),
-    ];
-  }, [leads, assignableAgents]);
+    }
+    return list;
+  }, [baseLeads, stageOverrides]);
 
-  // Real dynamic source options
-  const sourceOptions = useMemo(() => {
-    const counts: Record<string, number> = {};
-    leads.forEach((l) => {
-      const src = l.channel || (l.campaign !== "Direct" ? "Meta" : "Direct");
-      counts[src] = (counts[src] || 0) + 1;
-    });
-    const sorted = Object.keys(counts).sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
-    return [
-      { label: `All sources (${leads.length})`, value: "All sources" },
-      ...sorted.map((src) => ({ label: `${src} (${counts[src]})`, value: src })),
-    ];
-  }, [leads]);
+  const assignableAgentNames = useMemo(
+    () => assignableAgents.map((a) => a.name),
+    [assignableAgents]
+  );
 
-  // Check if any filter is active
+  const filterState = useMemo(
+    () => ({
+      time: filterTime,
+      campaigns: filterCampaigns,
+      stages: filterStages,
+      agent: filterAgent,
+      source: filterSource,
+    }),
+    [filterTime, filterCampaigns, filterStages, filterAgent, filterSource]
+  );
+
+  // Single-pass O(N) filtering + faceted counts for both Pipeline board & Table view
+  const filterEval = useMemo(
+    () =>
+      evaluatePipelineFilters(leads, filterState, {
+        assignableAgentNames,
+        applyStageFilterToFacets: view === "table",
+      }),
+    [leads, filterState, assignableAgentNames, view]
+  );
+
+  const sortedTableLeads = useMemo(
+    () => sortPipelineTableLeads(filterEval.tableLeads, tableSort),
+    [filterEval.tableLeads, tableSort]
+  );
+
+  const groupedLeads = filterEval.groupedByStage;
+  const activeLeadsCount =
+    view === "table" ? filterEval.tableLeads.length : filterEval.boardLeads.length;
   const hasActiveFilters =
-    filterCampaign !== "All campaigns" ||
-    filterAgent !== "Everyone" ||
-    filterSource !== "All sources" ||
-    filterReceived !== "Any time";
+    countActivePipelineFilters(filterState, view === "table") > 0;
 
-  const clearFilters = () => {
-    setFilterCampaign("All campaigns");
+  const handleTimeChange = useCallback((next: PipelineTimeFilter) => {
+    setFilterTime(next);
+    setTablePage(1);
+  }, []);
+
+  const handleCampaignsChange = useCallback((next: string[]) => {
+    setFilterCampaigns(next);
+    setTablePage(1);
+  }, []);
+
+  const handleStagesChange = useCallback((next: Stage[]) => {
+    setFilterStages(next);
+    setTablePage(1);
+  }, []);
+
+  const handleAgentChange = useCallback((next: string) => {
+    setFilterAgent(next);
+    setTablePage(1);
+  }, []);
+
+  const handleSourceChange = useCallback((next: string) => {
+    setFilterSource(next);
+    setTablePage(1);
+  }, []);
+
+  const handleToggleSort = useCallback(
+    (field: Exclude<PipelineTableSortField, "default">) => {
+      setTableSort((prev) => getNextTableSort(prev, field));
+      setTablePage(1);
+    },
+    []
+  );
+
+  const clearFilters = useCallback(() => {
+    setFilterTime(DEFAULT_PIPELINE_TIME_FILTER);
+    setFilterCampaigns([]);
+    setFilterStages([]);
     setFilterAgent("Everyone");
     setFilterSource("All sources");
-    setFilterReceived("Any time");
-  };
-
-  // Apply filters
-  const filteredLeads = useMemo(() => {
-    // Calendar boundaries based on local date
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
-    const todayStartMs = startOfToday.getTime();
-
-    // Saturday start (Saudi week: Sat-Fri)
-    const startOfWeek = new Date(startOfToday);
-    const day = startOfWeek.getDay();
-    const diffToSat = day === 6 ? 0 : day + 1;
-    startOfWeek.setDate(startOfWeek.getDate() - diffToSat);
-    const weekStartMs = startOfWeek.getTime();
-
-    const startOfMonth = new Date(startOfToday);
-    startOfMonth.setDate(1);
-    const monthStartMs = startOfMonth.getTime();
-
-    return leads.filter((lead) => {
-      if (filterCampaign !== "All campaigns" && lead.campaign !== filterCampaign) return false;
-      if (filterAgent !== "Everyone" && lead.agent !== filterAgent) return false;
-      if (filterSource !== "All sources") {
-        const src = lead.channel || (lead.campaign !== "Direct" ? "Meta" : "Direct");
-        if (src !== filterSource) return false;
-      }
-      if (filterReceived !== "Any time") {
-        if (!lead.rawCreatedAt) return false;
-        if (filterReceived === "Today" && lead.rawCreatedAt < todayStartMs) return false;
-        if (filterReceived === "This week" && lead.rawCreatedAt < weekStartMs) return false;
-        if (filterReceived === "This month" && lead.rawCreatedAt < monthStartMs) return false;
-      }
-      return true;
-    });
-  }, [leads, filterCampaign, filterAgent, filterSource, filterReceived]);
-
-  // Pre-group leads by stage (instead of filtering 703 × 9 on every render)
-  const groupedLeads = useMemo(() => {
-    const groups: Record<Stage, Lead[]> = {
-      "New": [], "Contacted": [], "Qualified": [], "Audition Booked": [], "Attended": [],
-      "Enrolled": [], "Joining Later": [], "Unqualified": [], "Lost": [],
-    };
-    for (const lead of filteredLeads) {
-      if (groups[lead.stage]) {
-        groups[lead.stage].push(lead);
-      }
-    }
-    return groups;
-  }, [filteredLeads]);
+    setTablePage(1);
+  }, []);
 
   // Dedicated collision detection strategy: pointer-first with rect intersection fallback
   const collisionDetectionStrategy: CollisionDetection = useCallback((args) => {
@@ -789,24 +837,7 @@ function PipelinePageInner() {
     if (found) return found;
     const conv = conversations.find((c) => c.id === panelLeadId);
     if (!conv) return null;
-    return {
-      id: conv.id,
-      name: conv.name,
-      campaign:
-        typeof conv.source === "object"
-          ? conv.source?.campaign || "Direct"
-          : conv.source && conv.source !== "direct"
-            ? conv.source
-            : "Direct",
-      date: conv.createdAt
-        ? new Date(conv.createdAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
-        : "—",
-      rawCreatedAt: conv.createdAt ? new Date(conv.createdAt).getTime() : 0,
-      stage: ((conv.pipeline && conv.pipeline !== "direct" ? conv.pipeline : "New") as Stage),
-      phone: conv.phone,
-      agent: conv.agent || "Unassigned",
-      channel: conv.channel || "Direct",
-    };
+    return buildLeadFromConversation(conv);
   }, [panelLeadId, leads, conversations]);
 
   useEffect(() => {
@@ -836,14 +867,26 @@ function PipelinePageInner() {
             return next;
           });
         }
-        const inFiltered = filteredLeads.some((l) => l.id === urlLeadId);
+        const activeViewList =
+          view === "table" ? sortedTableLeads : filterEval.boardLeads;
+        const inFiltered = activeViewList.some((l) => l.id === urlLeadId);
         if (!inFiltered && hasActiveFilters) {
-          setFilterCampaign("All campaigns");
+          setFilterTime(DEFAULT_PIPELINE_TIME_FILTER);
+          setFilterCampaigns([]);
+          setFilterStages([]);
           setFilterAgent("Everyone");
           setFilterSource("All sources");
-          setFilterReceived("Any time");
         }
-        const stageList = (inFiltered ? groupedLeads[targetLead.stage] : leads.filter((l) => l.stage === targetLead.stage));
+        if (view === "table") {
+          const tableSource = inFiltered ? sortedTableLeads : leads;
+          const idxInTable = tableSource.findIndex((l) => l.id === urlLeadId);
+          if (idxInTable >= 0) {
+            setTablePage(Math.floor(idxInTable / TABLE_PAGE_SIZE) + 1);
+          }
+        }
+        const stageList = inFiltered
+          ? groupedLeads[targetLead.stage]
+          : leads.filter((l) => l.stage === targetLead.stage);
         const idxInStage = stageList.findIndex((l) => l.id === urlLeadId);
         if (idxInStage >= 0) {
           setVisibleCounts((prev) => {
@@ -858,7 +901,17 @@ function PipelinePageInner() {
     return () => {
       cancelled = true;
     };
-  }, [urlLeadId, conversations.length, leads, hiddenStages, filteredLeads, hasActiveFilters, groupedLeads]);
+  }, [
+    urlLeadId,
+    conversations.length,
+    leads,
+    hiddenStages,
+    view,
+    sortedTableLeads,
+    filterEval.boardLeads,
+    hasActiveFilters,
+    groupedLeads,
+  ]);
 
   useEffect(() => {
     if (!highlightedLeadId) return;
@@ -970,9 +1023,14 @@ function PipelinePageInner() {
   // Move a lead to any stage (used by mobile "Move to" popover) — instant 0ms optimistic UI
   const moveLeadToStage = useCallback((id: string, stage: Stage) => {
     if (isReadOnly) return;
+    const currentLead = leads.find((l) => l.id === id);
+    if (stage === "Lost" && currentLead?.stage !== "Lost") {
+      setPendingLostModalLead({ id, name: currentLead?.name || "this lead" });
+      return;
+    }
     setStageOverrides((prev) => ({ ...prev, [id]: stage }));
     patchConversation(id, { pipeline: stage });
-  }, [patchConversation, isReadOnly]);
+  }, [leads, patchConversation, isReadOnly]);
 
   // Delete a lead from the pipeline only — preserves inbox conversation, messages & contact data
   const handleDeleteLeadFromPipeline = useCallback(async () => {
@@ -1116,6 +1174,10 @@ function PipelinePageInner() {
     if (targetStage) {
       const currentLead = leads.find(l => l.id === activeLeadId);
       if (currentLead && currentLead.stage !== targetStage) {
+        if (targetStage === "Lost") {
+          setPendingLostModalLead({ id: activeLeadId, name: currentLead.name });
+          return;
+        }
         // 1. Instant 0ms synchronous local state update (eliminates any transfer lag)
         setStageOverrides((prev) => ({ ...prev, [activeLeadId]: targetStage }));
         // 2. Persist to shared context & backend in background
@@ -1154,7 +1216,9 @@ function PipelinePageInner() {
         >
           Table
         </button>
-        <span className="text-[12px] ml-1" style={{ color: 'var(--text-muted)' }}>{filteredLeads.length} leads</span>
+        <span className="text-[12px] ml-1 tabular-nums" style={{ color: 'var(--text-muted)' }}>
+          {activeLeadsCount} {activeLeadsCount === 1 ? "lead" : "leads"}
+        </span>
         {isReadOnly && (
           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full text-[#FF9500] bg-[rgba(255,149,0,0.12)] border border-[rgba(255,149,0,0.25)] ml-2">
             View Only Mode
@@ -1164,9 +1228,14 @@ function PipelinePageInner() {
         <div className="ml-auto flex items-center gap-2">
           {hasActiveFilters && (
             <button
+              type="button"
               onClick={clearFilters}
-              className="text-[11px] font-semibold rounded-[6px] px-2.5 py-1 transition-colors cursor-pointer text-[#FF3B30] hover:bg-[rgba(255,59,48,0.1)]"
-              style={{ border: '1px solid rgba(255, 59, 48, 0.3)', background: 'var(--bg-card)' }}
+              className="text-[11px] font-semibold rounded-[6px] px-2.5 py-1 transition-colors cursor-pointer hover:opacity-85"
+              style={{
+                border: "1px solid var(--label-red-border)",
+                background: "var(--label-red-bg)",
+                color: "var(--label-red-text)",
+              }}
             >
               Clear filters
             </button>
@@ -1174,62 +1243,39 @@ function PipelinePageInner() {
         </div>
       </div>
 
-      {/* Filter row */}
-      <div className="px-4 md:px-6 py-2 flex items-center gap-3 overflow-x-auto flex-nowrap shrink-0" style={{ background: 'var(--bg-card)', borderBottom: '1px solid var(--border-main)', WebkitOverflowScrolling: 'touch' }}>
-        <FilterPill label="RECEIVED" value={filterReceived} options={["Any time", "Today", "This week", "This month"]} onChange={setFilterReceived} />
-        <FilterPill label="AGENT" value={filterAgent} options={agentOptions} onChange={setFilterAgent} />
-        <FilterPill label="CAMPAIGN" value={filterCampaign} options={campaignOptions} onChange={setFilterCampaign} />
-        <FilterPill label="SOURCE" value={filterSource} options={sourceOptions} onChange={setFilterSource} />
-      </div>
+      {/* Unified Filter Bar (Time, Campaigns, Stage [Table view], Agent, Source) */}
+      <PipelineFilterBar
+        view={view}
+        filterState={filterState}
+        campaignOptions={filterEval.campaignOptions}
+        campaignTotal={filterEval.campaignTotal}
+        stageCounts={filterEval.stageCounts}
+        stageTotal={filterEval.stageTotal}
+        agentOptions={filterEval.agentOptions}
+        sourceOptions={filterEval.sourceOptions}
+        matchedCount={activeLeadsCount}
+        onChangeTime={handleTimeChange}
+        onChangeCampaigns={handleCampaignsChange}
+        onChangeStages={handleStagesChange}
+        onChangeAgent={handleAgentChange}
+        onChangeSource={handleSourceChange}
+        onClearAll={clearFilters}
+      />
 
       {/* Main Content Area */}
       {view === "table" ? (
-        <div className="flex-1 min-h-0 min-w-0 overflow-x-auto overflow-y-auto" style={{ background: 'var(--bg-card)', WebkitOverflowScrolling: 'touch' }}>
-          <table className="w-full text-left border-collapse min-w-[800px]">
-            <thead className="text-[10px] uppercase font-bold tracking-widest sticky top-0 z-10" style={{ background: 'var(--bg-table-header)', color: 'var(--text-secondary)' }}>
-              <tr>
-                <th className="px-6 py-3">NAME</th>
-                <th className="px-6 py-3">PHONE</th>
-                <th className="px-6 py-3">CAMPAIGN</th>
-                <th className="px-6 py-3">STAGE</th>
-                <th className="px-6 py-3">AGENT</th>
-                <th className="px-6 py-3">RECEIVED</th>
-              </tr>
-            </thead>
-            <tbody className="text-[13px]" style={{ color: 'var(--text-primary)' }}>
-              {filteredLeads.map((lead, idx) => (
-                <tr
-                  key={lead.id}
-                  data-lead-id={lead.id}
-                  onClick={() => {
-                    handleOpenPanel(lead.id, "details");
-                  }}
-                  className={`cursor-pointer transition-colors`}
-                  style={{
-                    borderBottom: '1px solid var(--border-main)',
-                    background:
-                      highlightedLeadId === lead.id
-                        ? 'var(--bg-selected)'
-                        : idx % 2 === 0
-                          ? 'var(--bg-table-alt)'
-                          : 'var(--bg-card)',
-                  }}
-                >
-                  <td className="px-6 py-3">{lead.name}</td>
-                  <td className="px-6 py-3 font-medium">{lead.phone || "—"}</td>
-                  <td className="px-6 py-3" style={{ color: 'var(--text-secondary)' }}>{lead.campaign}</td>
-                  <td className="px-6 py-3">
-                    <span className="text-[11px] font-medium px-2.5 py-0.5 rounded-full inline-block" style={{ background: 'var(--bg-pill)', color: '#0066FF' }}>
-                      {lead.stage}
-                    </span>
-                  </td>
-                  <td className="px-6 py-3" style={{ color: 'var(--text-secondary)' }}>{lead.agent || "Unassigned"}</td>
-                  <td className="px-6 py-3" style={{ color: 'var(--text-secondary)' }}>{lead.date}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <PipelineTableView
+          leads={sortedTableLeads}
+          hasActiveFilters={hasActiveFilters}
+          highlightedLeadId={highlightedLeadId}
+          sort={tableSort}
+          page={tablePage}
+          pageSize={TABLE_PAGE_SIZE}
+          onToggleSort={handleToggleSort}
+          onPageChange={setTablePage}
+          onSelectLead={(id) => handleOpenPanel(id, "details")}
+          onClearFilters={clearFilters}
+        />
       ) : (
         <>
           {/* Stage summary pills (clean neutral/theme styling) + horizontal scroll controls */}
@@ -1600,7 +1646,7 @@ function PipelinePageInner() {
 
                 <div className="mb-6">
                   <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Lead Management</h3>
-                  <div className="flex gap-3">
+                  <div className="flex flex-col sm:flex-row gap-3">
                     <div className="flex-1">
                       <label className="text-[11px] block mb-1" style={{ color: 'var(--text-secondary)' }}>Assigned to</label>
                       {(() => {
@@ -1672,13 +1718,23 @@ function PipelinePageInner() {
                         );
                       })()}
                     </div>
-                    <div className="flex-1">
+                    <div className="flex-1 min-w-0">
                       <label className="text-[11px] block mb-1" style={{ color: 'var(--text-secondary)' }}>Stage</label>
                       <select
                         disabled={isReadOnly}
-                        value={panelLead.stage}
-                        onChange={(e) => moveLeadToStage(panelLead.id, e.target.value as Stage)}
-                        className="w-full rounded-[6px] text-[13px] py-1.5 px-2 outline-none disabled:opacity-60 cursor-pointer"
+                        value={isPanelLostTransition ? "Lost" : panelLead.stage}
+                        onChange={(e) => {
+                          const nextStage = e.target.value as Stage;
+                          if (nextStage === "Lost" && panelLead.stage !== "Lost") {
+                            setIsPanelLostTransition(true);
+                            return;
+                          }
+                          setIsPanelLostTransition(false);
+                          if (nextStage !== panelLead.stage) {
+                            moveLeadToStage(panelLead.id, nextStage);
+                          }
+                        }}
+                        className="w-full rounded-[6px] text-base sm:text-[13px] py-1.5 px-2 min-h-[44px] sm:min-h-[34px] outline-none disabled:opacity-60 cursor-pointer"
                         style={{ border: '1px solid var(--border-input)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
                       >
                         {STAGES.map((s) => (
@@ -1687,6 +1743,39 @@ function PipelinePageInner() {
                       </select>
                     </div>
                   </div>
+                  <LostReasonPanel
+                    conversationId={panelLead.id}
+                    pipeline={panelLead.stage}
+                    lostReason={panelConv?.lostReason ?? panelLead.lostReason}
+                    lostReasonNote={panelConv?.lostReasonNote ?? panelLead.lostReasonNote}
+                    lostAt={panelConv?.lostAt}
+                    lostBy={panelConv?.lostBy}
+                    isTransitionDraft={isPanelLostTransition}
+                    isReadOnly={isReadOnly}
+                    variant="panel"
+                    onCancelTransition={() => setIsPanelLostTransition(false)}
+                    onConfirmLost={async ({ lostReason: reason, lostReasonNote: note }) => {
+                      const prevStage = panelLead.stage;
+                      setStageOverrides((prev) => ({ ...prev, [panelLead.id]: "Lost" }));
+                      const res = await patchConversation(panelLead.id, {
+                        pipeline: "Lost",
+                        lostReason: reason,
+                        lostReasonNote: note,
+                      });
+                      if (res && res.ok === false) {
+                        setStageOverrides((prev) => ({ ...prev, [panelLead.id]: prevStage }));
+                        return res;
+                      }
+                      setIsPanelLostTransition(false);
+                      return res;
+                    }}
+                    onSaveLostDetails={async ({ lostReason: reason, lostReasonNote: note }) =>
+                      patchConversation(panelLead.id, {
+                        lostReason: reason,
+                        lostReasonNote: note,
+                      })
+                    }
+                  />
                 </div>
 
                 <LeadCashInSection
@@ -1699,7 +1788,9 @@ function PipelinePageInner() {
 
                 <div className="mb-6">
                   <h3 className="text-[10px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Source</h3>
-                  <p className="text-[13px]" style={{ color: 'var(--text-primary)' }}>{panelLead.campaign}</p>
+                  <p className="text-[13px] break-words" style={{ color: 'var(--text-primary)' }} title={panelLead.sourceDisplay}>
+                    {panelLead.sourceDisplay || panelLead.campaignFull}
+                  </p>
                 </div>
 
                 <div className="mb-6">
@@ -2069,37 +2160,30 @@ function PipelinePageInner() {
           </div>
         </div>
       )}
-    </div>
-  );
-}
 
-// ─── Filter pill ──────────────────────────────────────────────────────────────
-
-function FilterPill({ label, value, options, onChange }: {
-  label: string;
-  value: string;
-  options: (string | { label: string; value: string })[];
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div className="flex items-center gap-1.5 shrink-0">
-      <span className="text-[9px] font-bold uppercase tracking-widest" style={{ color: 'var(--text-muted)' }}>{label}</span>
-      <select
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        className="h-[24px] text-[11px] rounded-[6px] px-2 outline-none cursor-pointer"
-        style={{ background: 'var(--bg-pill)', border: '1px solid var(--border-input)', color: 'var(--text-primary)' }}
-      >
-        {options.map((opt) => {
-          const optValue = typeof opt === "string" ? opt : opt.value;
-          const optLabel = typeof opt === "string" ? opt : opt.label;
-          return (
-            <option key={optValue} value={optValue}>
-              {optLabel}
-            </option>
-          );
-        })}
-      </select>
+      {pendingLostModalLead && (
+        <LostReasonModal
+          leadName={pendingLostModalLead.name}
+          onClose={() => setPendingLostModalLead(null)}
+          onConfirm={async ({ lostReason, lostReasonNote }) => {
+            const targetId = pendingLostModalLead.id;
+            const prevStage = leads.find((l) => l.id === targetId)?.stage;
+            setStageOverrides((prev) => ({ ...prev, [targetId]: "Lost" }));
+            const res = await patchConversation(targetId, {
+              pipeline: "Lost",
+              lostReason,
+              lostReasonNote,
+            });
+            if (res && res.ok === false) {
+              if (prevStage) {
+                setStageOverrides((prev) => ({ ...prev, [targetId]: prevStage }));
+              }
+              return res;
+            }
+            return res;
+          }}
+        />
+      )}
     </div>
   );
 }

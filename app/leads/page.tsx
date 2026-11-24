@@ -18,6 +18,7 @@ import {
   formatLeadSource,
   buildCampaignFilterList,
 } from "../utils/leadSource";
+import { formatLostReasonDisplay, getLostReasonLabel } from "../utils/lostReasons";
 import {
   MessageSquare,
   Plus,
@@ -79,6 +80,8 @@ type Lead = {
   sourceDisplay: string;
   sourceLabel: string;
   stage: string;
+  lostReason?: string;
+  lostReasonNote?: string;
   agent: string;
   channel: string;
   labels?: string[];
@@ -216,15 +219,26 @@ const LeadTableRow = memo(function LeadTableRow({
         </div>
       </td>
       <td className="py-3 px-4 whitespace-nowrap">
-        <span
-          className="text-[10px] font-bold px-2 py-0.5 rounded-full"
-          style={{
-            background: `${STAGE_COLORS[lead.stage] || "#0066FF"}18`,
-            color: STAGE_COLORS[lead.stage] || "#0066FF",
-          }}
-        >
-          {lead.stage}
-        </span>
+        <div className="flex flex-col items-start gap-0.5">
+          <span
+            className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+            style={{
+              background: `${STAGE_COLORS[lead.stage] || "#0066FF"}18`,
+              color: STAGE_COLORS[lead.stage] || "#0066FF",
+            }}
+          >
+            {lead.stage}
+          </span>
+          {lead.stage === "Lost" && lead.lostReason && (
+            <span
+              className="text-[10px] max-w-[160px] truncate"
+              style={{ color: "var(--text-muted)" }}
+              title={formatLostReasonDisplay(lead.lostReason, lead.lostReasonNote)}
+            >
+              {getLostReasonLabel(lead.lostReason)}
+            </span>
+          )}
+        </div>
       </td>
       <td className="py-3 px-4 text-right whitespace-nowrap">
         <button
@@ -299,6 +313,15 @@ const LeadMobileCard = memo(function LeadMobileCard({
         <span className="break-words leading-snug">
           Source: <strong style={{ color: "var(--text-primary)" }}>{lead.sourceLabel}</strong>
         </span>
+        {lead.stage === "Lost" && lead.lostReason && (
+          <p
+            className="text-[11px] mt-1 truncate"
+            style={{ color: "var(--label-red-text)" }}
+            title={formatLostReasonDisplay(lead.lostReason, lead.lostReasonNote)}
+          >
+            Lost reason: {formatLostReasonDisplay(lead.lostReason, lead.lostReasonNote)}
+          </p>
+        )}
       </div>
 
       <div
@@ -1020,6 +1043,8 @@ export default function LeadsPage() {
         sourceDisplay: formattedSource.display,
         sourceLabel: formattedSource.shortDisplay,
         stage: c.pipeline || "New",
+        lostReason: c.lostReason || "",
+        lostReasonNote: c.lostReasonNote || "",
         agent: c.agent || "Unassigned",
         channel: c.channel || "—",
         labels: c.labels || [],

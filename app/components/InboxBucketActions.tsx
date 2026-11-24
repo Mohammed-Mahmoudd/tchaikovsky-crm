@@ -4,9 +4,11 @@ import React, { useEffect, useId, useRef, useState } from "react";
 import {
   Archive,
   ArchiveRestore,
+  Bookmark,
   CheckCircle2,
   ChevronDown,
   Download,
+  FileText,
   Loader2,
   RotateCcw,
 } from "lucide-react";
@@ -17,11 +19,16 @@ interface InboxBucketActionsProps {
   conversationId: string;
   isDone: boolean;
   isArchived: boolean;
+  isSaved?: boolean;
+  savedCount?: number;
   canManageBuckets?: boolean;
   canDownload?: boolean;
   isDownloading?: boolean;
+  isBatchDownloading?: boolean;
   onAction: (action: InboxBucketAction) => void;
+  onToggleSaved?: () => void;
   onDownload: () => void;
+  onDownloadSaved?: (format: "txt" | "zip") => void;
 }
 
 /**
@@ -36,11 +43,16 @@ export function InboxBucketActions(props: InboxBucketActionsProps) {
 function InboxBucketActionsInner({
   isDone,
   isArchived,
+  isSaved = false,
+  savedCount = 0,
   canManageBuckets = true,
   canDownload = true,
   isDownloading = false,
+  isBatchDownloading = false,
   onAction,
+  onToggleSaved,
   onDownload,
+  onDownloadSaved,
 }: InboxBucketActionsProps) {
   const [open, setOpen] = useState(false);
   const menuId = useId();
@@ -126,10 +138,21 @@ function InboxBucketActionsInner({
     onAction(action);
   };
 
+  const handleSavedToggleSelect = () => {
+    setOpen(false);
+    onToggleSaved?.();
+  };
+
   const handleDownloadSelect = () => {
     if (isDownloading) return;
     setOpen(false);
     onDownload();
+  };
+
+  const handleDownloadSavedSelect = (format: "txt" | "zip") => {
+    if (isBatchDownloading || savedCount <= 0 || !onDownloadSaved) return;
+    setOpen(false);
+    onDownloadSaved(format);
   };
 
   const menuItemClass =
@@ -170,7 +193,7 @@ function InboxBucketActionsInner({
           role="menu"
           aria-label="Conversation actions"
           onKeyDown={handleMenuKeyDown}
-          className="absolute end-0 top-[calc(100%+6px)] z-50 w-56 max-w-[calc(100vw-1.5rem)] rounded-xl p-1.5 shadow-2xl flex flex-col gap-0.5"
+          className="absolute end-0 top-[calc(100%+6px)] z-50 w-64 max-w-[calc(100vw-1rem)] rounded-xl p-1.5 shadow-2xl flex flex-col gap-0.5"
           style={{
             background: "var(--bg-card)",
             border: "1px solid var(--border-main)",
@@ -252,6 +275,34 @@ function InboxBucketActionsInner({
             </>
           )}
 
+          {canDownload && onToggleSaved && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={handleSavedToggleSelect}
+              className={menuItemClass}
+              style={{
+                color: isSaved ? "var(--label-purple-text)" : "var(--text-primary)",
+              }}
+              title={
+                isSaved
+                  ? "Remove conversation from Saved downloads"
+                  : "Save conversation for batch Agent download"
+              }
+            >
+              <Bookmark
+                className="w-3.5 h-3.5 shrink-0"
+                style={{
+                  color: isSaved ? "var(--label-purple-text)" : "var(--text-secondary)",
+                }}
+                fill={isSaved ? "currentColor" : "none"}
+              />
+              <span className="truncate">
+                {isSaved ? "Saved for download (remove)" : "Save to download"}
+              </span>
+            </button>
+          )}
+
           {canDownload && (
             <button
               type="button"
@@ -260,7 +311,7 @@ function InboxBucketActionsInner({
               onClick={handleDownloadSelect}
               className={menuItemClass}
               style={{ color: "var(--text-primary)" }}
-              title="Download full conversation transcript (.txt)"
+              title="Download this conversation transcript (.txt)"
             >
               {isDownloading ? (
                 <Loader2
@@ -268,15 +319,106 @@ function InboxBucketActionsInner({
                   style={{ color: "var(--bg-banner)" }}
                 />
               ) : (
-                <Download
+                <FileText
                   className="w-3.5 h-3.5 shrink-0"
                   style={{ color: "var(--text-secondary)" }}
                 />
               )}
               <span className="truncate">
-                {isDownloading ? "Downloading..." : "Download conversation"}
+                {isDownloading ? "Downloading..." : "Download conversation (.txt)"}
               </span>
             </button>
+          )}
+
+          {canDownload && onDownloadSaved && (
+            <>
+              <div
+                role="separator"
+                className="my-1 border-t"
+                style={{ borderColor: "var(--border-main)" }}
+              />
+              <div
+                className="px-2.5 pt-1 pb-0.5 text-[10px] font-bold uppercase tracking-wider flex items-center justify-between"
+                style={{ color: "var(--text-muted)" }}
+              >
+                <span>Saved exports</span>
+                <span>{savedCount}</span>
+              </div>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={savedCount <= 0 || isBatchDownloading}
+                onClick={() => handleDownloadSavedSelect("txt")}
+                className={menuItemClass}
+                style={{ color: "var(--text-primary)" }}
+                title={
+                  savedCount > 0
+                    ? `Download ${savedCount} saved conversations as one combined .txt file`
+                    : "Save at least one conversation first"
+                }
+              >
+                {isBatchDownloading ? (
+                  <Loader2
+                    className="w-3.5 h-3.5 shrink-0 animate-spin"
+                    style={{ color: "var(--bg-banner)" }}
+                  />
+                ) : (
+                  <Download
+                    className="w-3.5 h-3.5 shrink-0"
+                    style={{ color: "var(--text-secondary)" }}
+                  />
+                )}
+                <span className="truncate flex-1">Download saved (1 .txt file)</span>
+                {savedCount > 0 && (
+                  <span
+                    className="text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0"
+                    style={{
+                      background: "var(--bg-pill)",
+                      color: "var(--text-secondary)",
+                    }}
+                  >
+                    {savedCount}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={savedCount <= 0 || isBatchDownloading}
+                onClick={() => handleDownloadSavedSelect("zip")}
+                className={menuItemClass}
+                style={{ color: "var(--text-primary)" }}
+                title={
+                  savedCount > 0
+                    ? `Download ${savedCount} saved conversations as a .zip archive of .txt files`
+                    : "Save at least one conversation first"
+                }
+              >
+                {isBatchDownloading ? (
+                  <Loader2
+                    className="w-3.5 h-3.5 shrink-0 animate-spin"
+                    style={{ color: "var(--bg-banner)" }}
+                  />
+                ) : (
+                  <Archive
+                    className="w-3.5 h-3.5 shrink-0"
+                    style={{ color: "var(--text-secondary)" }}
+                  />
+                )}
+                <span className="truncate flex-1">Download saved (.zip)</span>
+                {savedCount > 0 && (
+                  <span
+                    className="text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0"
+                    style={{
+                      background: "var(--bg-pill)",
+                      color: "var(--text-secondary)",
+                    }}
+                  >
+                    {savedCount}
+                  </span>
+                )}
+              </button>
+            </>
           )}
         </div>
       )}

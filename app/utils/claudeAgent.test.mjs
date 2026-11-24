@@ -14,6 +14,7 @@ import {
   formatToolTraceTitle,
   getActivityOutcomeMeta,
   formatDurationLabel,
+  formatClaudeActivationNote,
   splitDisplayReplyChunks,
 } from "./claudeAgent.ts";
 
@@ -143,5 +144,32 @@ test("filterClaudeLeadCandidates, summarizeClaudeLeadCounts, and mergeAssignedCl
     "Hi!",
     "How can I help?",
   ]);
+
+  assert.deepEqual(
+    formatClaudeActivationNote("Enabled", { autoReplyTriggered: true }),
+    {
+      message: "Enabled. Adham is reading the chat and replying now.",
+      tone: "info",
+    }
+  );
+  const expired7dNote = formatClaudeActivationNote("Enabled", {
+    autoReplyTriggered: false,
+    autoReplySkippedReason: "meta_7d_window_expired",
+  });
+  assert.equal(expired7dNote.tone, "warning");
+  assert.match(expired7dNote.message, /7-day Messenger\/Instagram window expired/);
+  const expired24hNote = formatClaudeActivationNote("Enabled", {
+    autoReplyTriggered: false,
+    autoReplySkippedReason: "meta_24h_window_expired",
+  });
+  assert.equal(expired24hNote.tone, "warning");
+  assert.match(expired24hNote.message, /24-hour Messenger\/Instagram window expired/);
+  assert.equal(
+    formatClaudeActivationNote("Resumed", {
+      autoReplyTriggered: false,
+      autoReplySkippedReason: "global_disabled",
+    }).tone,
+    "warning"
+  );
 });
 

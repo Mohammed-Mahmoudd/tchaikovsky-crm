@@ -1,3 +1,9 @@
+import {
+  createZipArchive,
+  deduplicateArchiveFilenames,
+  triggerBinaryFileDownload,
+} from "./zipArchive.mjs";
+
 export interface ExportAttachmentLike {
   type?: string;
   url?: string;
@@ -109,8 +115,13 @@ export interface ExportConversationInput {
   followUpTags?: ReadonlyArray<string>;
   cashIn?: number;
   notes?: string;
+  savedForAgent?: boolean;
+  savedForAgentAt?: string | null;
+  savedForAgentBy?: string;
   messages?: ReadonlyArray<ExportMessageInput>;
 }
+
+export type BatchExportFormat = "txt" | "zip";
 
 export interface ExportLabelLike {
   id: string;
@@ -667,4 +678,130 @@ export function triggerTextFileDownload(filename: string, content: string): void
   window.setTimeout(() => {
     URL.revokeObjectURL(url);
   }, 1000);
+}
+
+/**
+ * Builds a deterministic filename for batch conversation downloads (`.txt` or `.zip`).
+ */
+export function buildBatchConversationExportFilename(
+  format: BatchExportFormat,
+  prefix = "saved-conversations",
+  exportedAt: number | Date = new Date()
+): string {
+  const slug = sanitizeExportFilenamePart(prefix) || "saved-conversations";
+  const dateObj = exportedAt instanceof Date ? exportedAt : new Date(exportedAt);
+  const validDate = Number.isNaN(dateObj.getTime()) ? new Date() : dateObj;
+  const ext = format === "zip" ? "zip" : "txt";
+  return `${slug}-${toLocalDateKey(validDate)}.${ext}`;
+}
+
+export interface BatchTranscriptOptions extends BuildTranscriptOptions {
+  title?: string;
+}
+
+/**
+ * Formats multiple conversations into a single UTF-8 transcript bundle with a
+ * table of contents so it can be uploaded directly to Adham / Claude or reviewed offline.
+ */
+export function formatCombinedConversationsTranscript(
+  conversations: ReadonlyArray<ExportConversationInput>,
+  options: BatchTranscriptOptions = {}
+): string {
+  const exportedDate =
+    options.exportedAt instanceof Date
+      ? options.exportedAt
+      : options.exportedAt !== undefined
+      ? new Date(options.exportedAt)
+      : new Date();
+  const validExportedDate = Number.isNaN(exportedDate.getTime()) ? new Date() : exportedDate;
+  const title = (options.title || "").trim() || "Tchaikovsky School — Saved Conversations Bundle";
+
+  const totalMessages = conversations.reduce(
+    (sum, conv) => sum + (Array.isArray(conv.messages) ? conv.messages.length : 0),
+    0
+  );
+
+  const summaryLines: string[] = [
+    title,
+    "=".repeat(title.length),
+    `Conversations: ${conversations.length}`,
+    `Total Messages: ${totalMessages}`,
+    `Exported: ${EXPORTED_AT_FORMATTER.format(validExportedDate)}`,
+  ];
+
+  if (conversations.length === 0) {
+    summaryLines.push("=".repeat(title.length), "", "(No conversations in this export.)");
+    return `${summaryLines.join("\n")}\n`;
+  }
+
+  summaryLines.push("", "Contents:");
+  conversations.forEach((conv, idx) => {
+    const contact = resolveContactDisplayName(conv);
+    const channel = formatChannelLabel(conv);
+    const inbox = resolveInboxLabel(conv, options.inboxMode);
+    const msgCount = Array.isArray(conv.messages) ? conv.messages.length : 0;
+    summaryLines.push(
+      `${idx + 1}. ${contact} (${channel} · ${inbox} · ${msgCount} ${msgCount === 1 ? "message" : "messages"})`
+    );
+  });
+  summaryLines.push("=".repeat(title.length));
+
+  const sections = conversations.map((conv, idx) => {
+    const transcript = formatConversationTranscript(conv, {
+      ...options,
+      exportedAt: validExportedDate,
+    });
+    return [
+      "========================================================================",
+      `[Conversation ${idx + 1} of ${conversations.length}]`,
+      transcript.trimEnd(),
+    ].join("\n");
+  });
+
+  return `${summaryLines.join("\n")}\n\n${sections.join("\n\n")}\n`;
+}
+
+/**
+ * Builds deduplicated UTF-8 `.txt` archive entries for a batch of conversations.
+ */
+export function buildConversationArchiveEntries(
+  conversations: ReadonlyArray<ExportConversationInput>,
+  options: BuildTranscriptOptions = {}
+): Array<{ name: string; content: string }> {
+  const exportedDate =
+    options.exportedAt instanceof Date
+      ? options.exportedAt
+      : options.exportedAt !== undefined
+      ? new Date(options.exportedAt)
+      : new Date();
+  const validExportedDate = Number.isNaN(exportedDate.getTime()) ? new Date() : exportedDate;
+
+  const rawNames = conversations.map((conv) =>
+    buildConversationExportFilename(conv, validExportedDate)
+  );
+  const uniqueNames = deduplicateArchiveFilenames(rawNames);
+
+  return conversations.map((conv, idx) => {
+    const transcript = formatConversationTranscript(conv, {
+      ...options,
+      exportedAt: validExportedDate,
+    });
+    return {
+      name: uniqueNames[idx],
+      content: `\uFEFF${transcript}`,
+    };
+  });
+}
+
+/**
+ * Generates and downloads a `.zip` file containing one UTF-8 `.txt` transcript per conversation.
+ */
+export async function triggerConversationsZipDownload(
+  filename: string,
+  conversations: ReadonlyArray<ExportConversationInput>,
+  options: BuildTranscriptOptions = {}
+): Promise<void> {
+  const entries = buildConversationArchiveEntries(conversations, options);
+  const zipBytes = await createZipArchive(entries, { compress: true });
+  triggerBinaryFileDownload(filename, zipBytes, "application/zip");
 }

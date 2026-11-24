@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, useId } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useTheme } from './ThemeProvider';
@@ -19,6 +19,11 @@ import {
   Moon,
   Activity,
   User,
+  Users,
+  ChevronDown,
+  Bot,
+  ShieldCheck,
+  Layers,
 } from 'lucide-react';
 
 import { useCRM } from '../context/CRMContext';
@@ -26,6 +31,26 @@ import { buildLabelNameMap, matchLeadSearch } from '../utils/search';
 import { LeadLabelBadges } from './LeadLabelBadges';
 import { markTeamSidebarNavigation } from '../utils/teamAuditNav';
 import { isConversationArchived, isConversationDone, resolveConvInboxMode } from '../utils/inboxFilters';
+import {
+  AGENT_CACHE_KEYS,
+  dedupeAgentRequest,
+  isAgentCacheFresh,
+  writeAgentActivityCache,
+  writeAgentLeadsCache,
+  writeAgentStatusCache,
+} from '../utils/agentWorkspaceCache';
+import {
+  buildSidebarNav,
+  getNextSidebarGroupToggles,
+  isSidebarGroupActive,
+  isSidebarGroupExpanded,
+  isSidebarRouteActive,
+  type SidebarBadge,
+  type SidebarBadgeTone,
+  type SidebarGroupItem,
+  type SidebarGroupToggleMap,
+  type SidebarIconKey,
+} from '../utils/sidebarNav';
 
 interface SidebarProps {
   isMobileOpen?: boolean;
@@ -36,7 +61,7 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { theme, toggle } = useTheme();
-  const { user, logout, roleDisplayName, isReadOnly } = useAuth();
+  const { user, logout, roleDisplayName, isReadOnly, authFetch } = useAuth();
   const {
     badgeCounts,
     searchQuery,
@@ -46,11 +71,90 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
     openChat,
   } = useCRM();
   const closeTouchedRef = useRef(false);
+  const agentWarmStartedRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchContainerRef = useRef<HTMLDivElement>(null);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const [groupToggles, setGroupToggles] = useState<SidebarGroupToggleMap>({});
+  const navIdPrefix = useId();
 
   const labelNameMap = useMemo(() => buildLabelNameMap(labels), [labels]);
+
+  const navEntries = useMemo(
+    () =>
+      buildSidebarNav({
+        canAccess: (href) => canAccessRoute(user?.role, href),
+        isChairman: normalizeRole(user?.role) === 'chairman',
+        badgeCounts,
+      }),
+    [user?.role, badgeCounts]
+  );
+
+  const warmAgentWorkspace = useCallback(() => {
+    if (normalizeRole(user?.role) !== 'chairman' || agentWarmStartedRef.current) return;
+    agentWarmStartedRef.current = true;
+
+    const agentRoutes = ['/agent', '/agent/leads', '/agent/studio'];
+    for (const route of agentRoutes) {
+      router.prefetch(route);
+    }
+
+    if (!isAgentCacheFresh(AGENT_CACHE_KEYS.status)) {
+      void dedupeAgentRequest('agent:status', async () => {
+        const res = await authFetch('/crm-api/claude/status', { cache: 'no-store' });
+        const json = res.ok ? await res.json().catch(() => null) : null;
+        if (json?.success && json.data) {
+          writeAgentStatusCache(json.data);
+          return json.data;
+        }
+        return null;
+      }).catch(() => {});
+    }
+    if (!isAgentCacheFresh(AGENT_CACHE_KEYS.leads)) {
+      void dedupeAgentRequest('agent:leads', async () => {
+        const res = await authFetch('/crm-api/claude/leads', { cache: 'no-store' });
+        const json = res.ok ? await res.json().catch(() => null) : null;
+        if (json?.success && Array.isArray(json.data)) {
+          writeAgentLeadsCache(json.data);
+          return json.data;
+        }
+        return null;
+      }).catch(() => {});
+    }
+    if (!isAgentCacheFresh(AGENT_CACHE_KEYS.activity)) {
+      void dedupeAgentRequest('agent:activity:all:40:', async () => {
+        const res = await authFetch('/crm-api/claude/activity?outcome=all&limit=40', { cache: 'no-store' });
+        const json = res.ok ? await res.json().catch(() => null) : null;
+        if (json?.success && json.data) {
+          const payload = {
+            items: Array.isArray(json.data.items) ? json.data.items : [],
+            summary: json.data.summary,
+          };
+          if (payload.summary) writeAgentActivityCache(payload);
+          return payload;
+        }
+        return null;
+      }).catch(() => {});
+    }
+  }, [authFetch, router, user?.role]);
+
+  const handleToggleGroup = useCallback(
+    (group: SidebarGroupItem, currentlyOpen: boolean, hasActiveChild: boolean) => {
+      if (group.id === 'agent' && !currentlyOpen) {
+        warmAgentWorkspace();
+      }
+      setGroupToggles((prev) =>
+        getNextSidebarGroupToggles({
+          prev,
+          groupId: group.id,
+          currentlyOpen,
+          hasActiveChild,
+          pathname,
+        })
+      );
+    },
+    [pathname, warmAgentWorkspace]
+  );
 
   // Top matching leads/conversations for the quick sidebar search dropdown (scoped by authorized inbox)
   const sidebarMatches = useMemo(() => {
@@ -144,7 +248,7 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
 
       {/* Sidebar Panel */}
       <div
-        className={`flex flex-col h-full w-[260px] md:w-[220px] fixed md:relative inset-y-0 left-0 z-50 transform transition-transform duration-200 ease-in-out ${
+        className={`flex flex-col h-full w-[260px] md:w-[244px] fixed md:relative inset-y-0 left-0 z-50 transform transition-transform duration-200 ease-in-out ${
           isMobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
         }`}
         style={{
@@ -312,107 +416,46 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
         </div>
 
         {/* Navigation */}
-        <nav className="flex-1 px-3 space-y-1 overflow-y-auto mt-2">
-          {canAccessRoute(user?.role, '/') && (
-            <NavItem
-              href="/"
-              icon={<Inbox className="w-[17px] h-[17px]" />}
-              label="Inbox"
-              badge={badgeCounts.inbox > 0 ? String(badgeCounts.inbox) : undefined}
-              badgeColor="#0066FF"
-              active={pathname === '/'}
-              onClick={onCloseMobile}
-            />
-          )}
-          {canAccessRoute(user?.role, '/operation-inbox') && (
-            <NavItem
-              href="/operation-inbox"
-              icon={<MessageSquare className="w-[17px] h-[17px]" />}
-              label="Operation Inbox"
-              badge={badgeCounts.operationInbox > 0 ? String(badgeCounts.operationInbox) : undefined}
-              badgeColor="#0066FF"
-              active={pathname === '/operation-inbox'}
-              onClick={onCloseMobile}
-            />
-          )}
-          {canAccessRoute(user?.role, '/pipeline') && (
-            <NavItem
-              href="/pipeline"
-              icon={<FilterIcon />}
-              label="Pipeline"
-              active={pathname === '/pipeline'}
-              onClick={onCloseMobile}
-            />
-          )}
-          {canAccessRoute(user?.role, '/leads') && (
-            <NavItem
-              href="/leads"
-              icon={<Download className="w-[17px] h-[17px]" />}
-              label="Leads"
-              badge={badgeCounts.leads > 0 ? String(badgeCounts.leads) : undefined}
-              badgeColor="#FF9500"
-              active={pathname === '/leads'}
-              onClick={onCloseMobile}
-            />
-          )}
-          {canAccessRoute(user?.role, '/auditions') && (
-            <NavItem
-              href="/auditions"
-              icon={<Calendar className="w-[17px] h-[17px]" />}
-              label="Auditions"
-              badge={badgeCounts.auditions > 0 ? String(badgeCounts.auditions) : undefined}
-              badgeColor="#34C759"
-              active={pathname === '/auditions'}
-              onClick={onCloseMobile}
-            />
-          )}
-          {canAccessRoute(user?.role, '/follow-ups') && (
-            <NavItem
-              href="/follow-ups"
-              icon={<ListTodo className="w-[17px] h-[17px]" />}
-              label="Follow-ups"
-              badge={badgeCounts.followUps > 0 ? String(badgeCounts.followUps) : undefined}
-              badgeColor="#FF3B30"
-              active={pathname === '/follow-ups'}
-              onClick={onCloseMobile}
-            />
-          )}
-          {canAccessRoute(user?.role, '/reports') && (
-            <NavItem
-              href="/reports"
-              icon={<BarChart2 className="w-[17px] h-[17px]" />}
-              label="Reports"
-              active={pathname === '/reports'}
-              onClick={onCloseMobile}
-            />
-          )}
-          {canAccessRoute(user?.role, '/team-performance') && (
-            <NavItem
-              href="/team-performance"
-              icon={<Activity className="w-[17px] h-[17px]" />}
-              label="Team Activities"
-              active={pathname === '/team-performance'}
-              onClick={onCloseMobile}
-            />
-          )}
-          {normalizeRole(user?.role) !== 'chairman' && canAccessRoute(user?.role, '/profile') && (
-            <NavItem
-              href="/profile"
-              icon={<User className="w-[17px] h-[17px]" />}
-              label="Profile"
-              active={pathname === '/profile'}
-              onClick={onCloseMobile}
-            />
-          )}
-          {canAccessRoute(user?.role, '/settings') && (
-            <NavItem
-              href="/settings"
-              icon={<Settings className="w-[17px] h-[17px]" />}
-              label="Settings"
-              active={pathname === '/settings'}
-              onClick={onCloseMobile}
-            />
-          )}
+        <nav aria-label="Main navigation" className="flex-1 px-2.5 space-y-2.5 overflow-y-auto mt-2 pb-2">
+          {navEntries.map((entry) => {
+            if (entry.kind === 'link') {
+              return (
+                <NavItem
+                  key={entry.id}
+                  href={entry.href}
+                  icon={renderSidebarIcon(entry.icon)}
+                  label={entry.label}
+                  badge={entry.badge}
+                  active={isSidebarRouteActive(pathname, entry.href, {
+                    exact: entry.exact,
+                    activePrefixes: entry.activePrefixes,
+                  })}
+                  onClick={onCloseMobile}
+                />
+              );
+            }
+
+            const hasActiveChild = isSidebarGroupActive(entry, pathname);
+            const isExpanded = isSidebarGroupExpanded({
+              group: entry,
+              pathname,
+              toggles: groupToggles,
+            });
+
+            return (
+              <NavGroup
+                key={entry.id}
+                group={entry}
+                panelId={`${navIdPrefix}-${entry.id}`}
+                pathname={pathname}
+                isExpanded={isExpanded}
+                hasActiveChild={hasActiveChild}
+                onToggle={() => handleToggleGroup(entry, isExpanded, hasActiveChild)}
+                onHoverGroup={entry.id === 'agent' ? warmAgentWorkspace : undefined}
+                onSelectChild={onCloseMobile}
+              />
+            );
+          })}
         </nav>
 
         {/* Footer */}
@@ -431,51 +474,73 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
             </span>
           </button>
 
-          <Link
-            href="/profile"
-            onClick={() => {
-              markTeamSidebarNavigation();
-              onCloseMobile?.();
-            }}
-            className={`mb-3 p-1.5 flex items-center gap-2.5 rounded-lg transition-colors cursor-pointer ${
-              pathname === '/profile' ? 'bg-[var(--bg-selected)]' : 'hover:bg-[var(--bg-hover)]'
-            }`}
-          >
-            {user?.avatar ? (
-              <img
-                src={user.avatar}
-                alt={user.name || 'User'}
-                className="w-8 h-8 rounded-full object-cover shrink-0 shadow-xs"
-                style={{ border: '1px solid var(--border-input)' }}
-              />
-            ) : (
-              <div
-                className="w-8 h-8 rounded-full flex items-center justify-center font-semibold text-[13px] shrink-0"
-                style={{
-                  background: 'var(--bg-pill)',
-                  border: '1px solid var(--border-input)',
-                  color: 'var(--text-secondary)',
-                }}
-              >
-                {(user?.name || 'U').charAt(0).toUpperCase()}
-              </div>
-            )}
-            <div className="min-w-0 flex-1">
-              <p className="text-[13px] font-medium leading-snug truncate" style={{ color: 'var(--text-primary)' }}>
-                {user?.name || 'User'}
-              </p>
-              <div className="flex items-center gap-1.5 mt-0.5">
-                <p className="text-[11px] truncate font-medium" style={{ color: 'var(--text-secondary)' }}>
-                  {roleDisplayName}
+          <div className="mb-3 flex items-center gap-1">
+            <Link
+              href="/profile"
+              onClick={() => {
+                markTeamSidebarNavigation();
+                onCloseMobile?.();
+              }}
+              className={`flex-1 min-w-0 p-1.5 flex items-center gap-2.5 rounded-lg transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--bg-banner)] ${
+                pathname === '/profile' ? 'bg-[var(--bg-selected)]' : 'hover:bg-[var(--bg-hover)]'
+              }`}
+            >
+              {user?.avatar ? (
+                <img
+                  src={user.avatar}
+                  alt={user.name || 'User'}
+                  className="w-8 h-8 rounded-full object-cover shrink-0 shadow-xs"
+                  style={{ border: '1px solid var(--border-input)' }}
+                />
+              ) : (
+                <div
+                  className="w-8 h-8 rounded-full flex items-center justify-center font-semibold text-[13px] shrink-0"
+                  style={{
+                    background: 'var(--bg-pill)',
+                    border: '1px solid var(--border-input)',
+                    color: 'var(--text-secondary)',
+                  }}
+                >
+                  {(user?.name || 'U').charAt(0).toUpperCase()}
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-medium leading-snug truncate" style={{ color: 'var(--text-primary)' }}>
+                  {user?.name || 'User'}
                 </p>
-                {isReadOnly && (
-                  <span className="text-[9px] font-bold px-1.5 py-0.2 rounded text-[#FF9500] bg-[rgba(255,149,0,0.12)] shrink-0">
-                    View Only
-                  </span>
-                )}
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <p className="text-[11px] truncate font-medium" style={{ color: 'var(--text-secondary)' }}>
+                    {roleDisplayName}
+                  </p>
+                  {isReadOnly && (
+                    <span className="text-[9px] font-bold px-1.5 py-0.2 rounded text-[#FF9500] bg-[rgba(255,149,0,0.12)] shrink-0">
+                      View Only
+                    </span>
+                  )}
+                </div>
               </div>
-            </div>
-          </Link>
+            </Link>
+
+            {canAccessRoute(user?.role, '/settings') && (
+              <Link
+                href="/settings"
+                onClick={() => {
+                  markTeamSidebarNavigation();
+                  onCloseMobile?.();
+                }}
+                aria-label="Settings"
+                title="Settings"
+                className="min-w-[44px] min-h-[44px] md:min-w-[32px] md:min-h-[32px] flex items-center justify-center rounded-lg transition-colors shrink-0 hover:opacity-80 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--bg-banner)]"
+                style={
+                  isSidebarRouteActive(pathname, '/settings')
+                    ? { background: 'var(--bg-selected)', color: 'var(--text-primary)' }
+                    : { color: 'var(--text-secondary)' }
+                }
+              >
+                <Settings className="w-[17px] h-[17px]" />
+              </Link>
+            )}
+          </div>
 
           <button
             onClick={logout}
@@ -490,22 +555,185 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
   );
 }
 
+const BADGE_TONE_STYLES: Record<SidebarBadgeTone, React.CSSProperties> = {
+  banner: {
+    background: 'var(--bg-banner)',
+  },
+  amber: {
+    background: 'var(--label-amber-bg)',
+    border: '1px solid var(--label-amber-border)',
+    color: 'var(--label-amber-text)',
+  },
+  green: {
+    background: 'var(--label-green-bg)',
+    border: '1px solid var(--label-green-border)',
+    color: 'var(--label-green-text)',
+  },
+  red: {
+    background: 'var(--label-red-bg)',
+    border: '1px solid var(--label-red-border)',
+    color: 'var(--label-red-text)',
+  },
+  neutral: {
+    background: 'var(--bg-pill)',
+    border: '1px solid var(--border-main)',
+    color: 'var(--text-secondary)',
+  },
+};
+
+function renderSidebarIcon(icon: SidebarIconKey, size: 'md' | 'sm' = 'md') {
+  const cls = size === 'sm' ? 'w-[15px] h-[15px]' : 'w-[17px] h-[17px]';
+  switch (icon) {
+    case 'inbox':
+      return <Inbox className={cls} />;
+    case 'operation-inbox':
+      return <MessageSquare className={cls} />;
+    case 'leads-management':
+      return <Users className={cls} />;
+    case 'auditions':
+      return <Calendar className={cls} />;
+    case 'pipeline':
+      return <FilterIcon className={cls} />;
+    case 'leads':
+      return <Download className={cls} />;
+    case 'reports':
+      return <BarChart2 className={cls} />;
+    case 'team-activities':
+      return <Activity className={cls} />;
+    case 'follow-ups':
+      return <ListTodo className={cls} />;
+    case 'agent':
+      return <Bot className={cls} />;
+    case 'agent-overview':
+      return <ShieldCheck className={cls} />;
+    case 'agent-leads':
+      return <Users className={cls} />;
+    case 'agent-studio':
+      return <Layers className={cls} />;
+    case 'profile':
+      return <User className={cls} />;
+  }
+}
+
+function NavBadge({ badge }: { badge: SidebarBadge }) {
+  const isSolidBanner = badge.tone === 'banner';
+  return (
+    <span
+      title={badge.title}
+      className={`flex items-center justify-center min-w-[20px] h-4 px-1.5 text-[10px] font-bold rounded-full shrink-0 ${
+        isSolidBanner ? 'text-white' : ''
+      }`}
+      style={BADGE_TONE_STYLES[badge.tone]}
+    >
+      {badge.count}
+    </span>
+  );
+}
+
+function NavGroup({
+  group,
+  panelId,
+  pathname,
+  isExpanded,
+  hasActiveChild,
+  onToggle,
+  onHoverGroup,
+  onSelectChild,
+}: {
+  group: SidebarGroupItem;
+  panelId: string;
+  pathname: string;
+  isExpanded: boolean;
+  hasActiveChild: boolean;
+  onToggle: () => void;
+  onHoverGroup?: () => void;
+  onSelectChild?: () => void;
+}) {
+  const highlightParent = hasActiveChild && !isExpanded;
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={onToggle}
+        onMouseEnter={onHoverGroup}
+        onFocus={onHoverGroup}
+        aria-expanded={isExpanded}
+        aria-controls={panelId}
+        className={`w-full flex items-center justify-between gap-2 min-h-[44px] md:min-h-[34px] px-2.5 py-1.5 text-[13px] rounded-lg transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--bg-banner)] ${
+          hasActiveChild ? 'font-medium' : ''
+        }`}
+        style={
+          highlightParent
+            ? { background: 'var(--bg-selected)', color: 'var(--text-primary)' }
+            : { color: hasActiveChild ? 'var(--text-primary)' : 'var(--text-secondary)' }
+        }
+      >
+        <div className="min-w-0 flex items-center gap-2">
+          <span
+            className="shrink-0"
+            style={{ color: hasActiveChild ? 'var(--text-primary)' : 'var(--text-muted)' }}
+          >
+            {renderSidebarIcon(group.icon, 'md')}
+          </span>
+          <span className="truncate">{group.label}</span>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {!isExpanded && group.collapsedBadge && <NavBadge badge={group.collapsedBadge} />}
+          <ChevronDown
+            className={`w-3.5 h-3.5 shrink-0 transition-transform duration-150 ${
+              isExpanded ? 'rotate-180' : ''
+            }`}
+            style={{ color: 'var(--text-muted)' }}
+          />
+        </div>
+      </button>
+
+      {isExpanded && (
+        <div
+          id={panelId}
+          role="region"
+          aria-label={group.label}
+          className="mt-1 pb-1 ms-3.5 ps-2 space-y-1"
+          style={{ borderInlineStart: '1px solid var(--border-main)' }}
+        >
+          {group.children.map((child) => (
+            <NavItem
+              key={child.id}
+              href={child.href}
+              icon={renderSidebarIcon(child.icon, 'sm')}
+              label={child.label}
+              badge={child.badge}
+              active={isSidebarRouteActive(pathname, child.href, {
+                exact: child.exact,
+                activePrefixes: child.activePrefixes,
+              })}
+              onClick={onSelectChild}
+              nested
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function NavItem({
   icon,
   label,
   active,
   badge,
-  badgeColor = '#FF3B30',
   href,
   onClick,
+  nested = false,
 }: {
   icon: React.ReactNode;
   label: string;
   active?: boolean;
-  badge?: string;
-  badgeColor?: string;
+  badge?: SidebarBadge;
   href: string;
   onClick?: () => void;
+  nested?: boolean;
 }) {
   return (
     <Link
@@ -514,30 +742,27 @@ function NavItem({
         markTeamSidebarNavigation();
         onClick?.();
       }}
-      className={`flex items-center justify-between px-2.5 py-[7px] text-[13px] rounded-lg transition-colors ${active ? 'font-medium' : ''}`}
+      className={`flex items-center justify-between gap-2 rounded-lg transition-colors text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--bg-banner)] ${
+        nested
+          ? 'min-h-[44px] md:min-h-[32px] px-2 py-1.5'
+          : 'min-h-[44px] md:min-h-[34px] px-2.5 py-1.5'
+      } ${active ? 'font-medium' : ''}`}
       style={active ? { background: 'var(--bg-selected)', color: 'var(--text-primary)' } : { color: 'var(--text-secondary)' }}
     >
-      <div className="flex items-center">
-        <span className="mr-3">
-          <div style={active ? { color: 'var(--text-primary)' } : { color: 'var(--text-muted)' }}>{icon}</div>
+      <div className="min-w-0 flex items-center gap-2">
+        <span className="shrink-0" style={active ? { color: 'var(--text-primary)' } : { color: 'var(--text-muted)' }}>
+          {icon}
         </span>
-        {label}
+        <span className="truncate">{label}</span>
       </div>
-      {badge && (
-        <span
-          className="flex items-center justify-center min-w-[20px] h-4 px-1.5 text-[10px] font-bold text-white rounded-full"
-          style={{ background: badgeColor }}
-        >
-          {badge}
-        </span>
-      )}
+      {badge && <NavBadge badge={badge} />}
     </Link>
   );
 }
 
-function FilterIcon() {
+function FilterIcon({ className = 'w-[17px] h-[17px]' }: { className?: string }) {
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-[18px] h-[18px]">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
       <line x1="4" y1="6" x2="20" y2="6"></line>
       <line x1="8" y1="12" x2="20" y2="12"></line>
       <line x1="12" y1="18" x2="20" y2="18"></line>

@@ -94,13 +94,24 @@ describe("CRM roles & permissions", () => {
     assert.deepEqual(groups.map((g) => g.key), ["chairman"]);
   });
 
-  it("restricts /claude-leads strictly to Chairman and legacy Manager/Owner aliases", () => {
-    assert.equal(canAccessRoute("chairman", "/claude-leads"), true);
-    assert.equal(canAccessRoute("manager", "/claude-leads"), true);
-    assert.equal(canAccessRoute("owner", "/claude-leads"), true);
+  it("restricts /agent/* and /claude-leads strictly to Chairman and legacy Manager/Owner aliases", () => {
+    const agentPaths = [
+      "/agent",
+      "/agent/activity",
+      "/agent/skills",
+      "/agent/sandbox",
+      "/agent/leads",
+      "/agent/studio",
+      "/claude-leads",
+    ];
+    for (const path of agentPaths) {
+      assert.equal(canAccessRoute("chairman", path), true, `chairman should access ${path}`);
+      assert.equal(canAccessRoute("manager", path), true, `manager should access ${path}`);
+      assert.equal(canAccessRoute("owner", path), true, `owner should access ${path}`);
 
-    for (const role of ["marketing", "admission_advanced", "admission_officer", "enrollment_director", "finance", "operation"]) {
-      assert.equal(canAccessRoute(role, "/claude-leads"), false, `${role} should not access /claude-leads`);
+      for (const role of ["marketing", "admission_advanced", "admission_officer", "enrollment_director", "finance", "operation"]) {
+        assert.equal(canAccessRoute(role, path), false, `${role} should not access ${path}`);
+      }
     }
   });
 

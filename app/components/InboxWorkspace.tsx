@@ -28,6 +28,8 @@ import {
   ChevronRight,
   Archive,
   ArchiveRestore,
+  Bookmark,
+  Loader2,
   RotateCcw,
   User,
   Users,
@@ -44,15 +46,20 @@ import { formatMetaErrorMessage, ParsedMetaError } from "../utils/errorParser";
 import EditableLeadName from "./EditableLeadName";
 import { InboxBucketActions, type InboxBucketAction } from "./InboxBucketActions";
 import {
+  buildBatchConversationExportFilename,
   buildConversationExportFilename,
+  formatCombinedConversationsTranscript,
   formatConversationTranscript,
+  triggerConversationsZipDownload,
   triggerTextFileDownload,
+  type BatchExportFormat,
   type ExportConversationInput,
 } from "../utils/conversationExport";
 import { LeadLabelBadges } from "./LeadLabelBadges";
 import LeadLabelsSection from "./LeadLabelsSection";
 import LeadClaudeToggleSection from "./LeadClaudeToggleSection";
 import LeadCashInSection from "./LeadCashInSection";
+import PipelineStageSection from "./PipelineStageSection";
 import {
   buildLeadNamePatchUpdates,
   getEditableLeadDisplayName,
@@ -74,8 +81,8 @@ import {
   shouldRenderLegacyTemplateFallback,
 } from "../utils/conversationMessages";
 import {
-  INBOX_FILTERS,
-  OPERATION_INBOX_FILTERS,
+  getInboxFilters,
+  getSavedConversationCount,
   type InboxFilter,
   type InboxMode,
   isConvUnassigned,
@@ -232,30 +239,6 @@ const extractPhoneFromConversation = (conv?: any | null): string => {
   return "";
 };
 
-const PIPELINE_STAGES = [
-  "New",
-  "Contacted",
-  "Qualified",
-  "Audition Booked",
-  "Attended",
-  "Enrolled",
-  "Joining Later",
-  "Unqualified",
-  "Lost",
-] as const;
-
-const PIPELINE_STAGE_COLORS: Record<string, string> = {
-  "New": "#007AFF",
-  "Contacted": "#5856D6",
-  "Qualified": "#30B0C7",
-  "Audition Booked": "#FF9500",
-  "Attended": "#34C759",
-  "Enrolled": "#30D158",
-  "Joining Later": "#F59E0B",
-  "Unqualified": "#8E8E93",
-  "Lost": "#FF3B30",
-};
-
 type MobileView = "list" | "chat" | "details";
 type DateFilterPreset = "ALL" | "TODAY" | "YESTERDAY" | "LAST_7D" | "CUSTOM";
 
@@ -313,6 +296,10 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
   const [showDetailsPanel, setShowDetailsPanel] = useState(false);
   const [inboxToast, setInboxToast] = useState<InboxToastState | null>(null);
   const [downloadingConvId, setDownloadingConvId] = useState<string | null>(null);
+  const [exportFormat, setExportFormat] = useState<BatchExportFormat>("txt");
+  const [isBatchDownloading, setIsBatchDownloading] = useState(false);
+  const [isBulkSaving, setIsBulkSaving] = useState(false);
+  const [confirmClearSaved, setConfirmClearSaved] = useState(false);
   const [syncingGroupHistory, setSyncingGroupHistory] = useState(false);
   const [isLoadingParticipants, setIsLoadingParticipants] = useState(false);
   const [showGroupHistorySync, setShowGroupHistorySync] = useState(false);
@@ -333,7 +320,10 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const chatScrollContainerRef = useRef<HTMLDivElement | null>(null);
 
-  const filters = isOperationInbox ? OPERATION_INBOX_FILTERS : INBOX_FILTERS;
+  const filters = useMemo(
+    () => getInboxFilters(inboxMode, canDownloadChat),
+    [inboxMode, canDownloadChat]
+  );
 
   const {
     admissionsConversations,
@@ -344,6 +334,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     assignableAgents,
     operationAssignableAgents,
     patchConversation,
+    bulkUpdateSavedForAgent,
+    fetchConversationsForBatchExport,
     markConversationAsRead,
     createManualLead,
     refresh,
@@ -451,9 +443,16 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     () => (isOperationInbox ? getUnreadConversationCount(conversations) : 0),
     [isOperationInbox, conversations]
   );
+  const savedConvCount = useMemo(
+    () => (canDownloadChat ? getSavedConversationCount(conversations) : 0),
+    [canDownloadChat, conversations]
+  );
   const activeBucketTotal = useMemo(
-    () => (activeFilter === "Groups" ? groupCount : getFilterBucketTotal(bucketCounts, activeFilter)),
-    [bucketCounts, activeFilter, groupCount]
+    () =>
+      activeFilter === "Groups"
+        ? groupCount
+        : getFilterBucketTotal(bucketCounts, activeFilter, savedConvCount),
+    [bucketCounts, activeFilter, groupCount, savedConvCount]
   );
 
   const labelMap = useMemo(() => new Map(labels.map((l) => [l.id, l])), [labels]);
@@ -1390,6 +1389,143 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     [authFetch, canDownloadChat, downloadingConvId, inboxMode, labels]
   );
 
+  const handleToggleSavedSingle = useCallback(
+    async (targetConv: CRMConversation) => {
+      if (!canDownloadChat || isReadOnly || !targetConv) return;
+      const nextSaved = !Boolean(targetConv.savedForAgent);
+      const displayLabel = targetConv.leadName || targetConv.name || "Conversation";
+      const res = await patchConversation(targetConv.id, { savedForAgent: nextSaved });
+      if (!res.ok) {
+        setInboxToast({
+          type: "error",
+          message: res.error || "Could not update saved state.",
+        });
+        return;
+      }
+      setInboxToast({
+        type: "success",
+        message: nextSaved
+          ? `Saved "${displayLabel}" for Agent download`
+          : `Removed "${displayLabel}" from Saved`,
+        onUndo: () => {
+          void patchConversation(targetConv.id, { savedForAgent: !nextSaved });
+          setInboxToast(null);
+        },
+      });
+    },
+    [canDownloadChat, isReadOnly, patchConversation]
+  );
+
+  const handleClearAllSaved = useCallback(async () => {
+    if (!canDownloadChat || isReadOnly || isBulkSaving) return;
+    const prevSavedIds = conversations
+      .filter((c) => Boolean(c.savedForAgent))
+      .map((c) => c.id);
+    if (prevSavedIds.length === 0) return;
+
+    setIsBulkSaving(true);
+    try {
+      const res = await bulkUpdateSavedForAgent({
+        clearAll: true,
+        inbox: inboxMode,
+      });
+      if (!res.ok) {
+        setInboxToast({
+          type: "error",
+          message: res.error || "Could not clear saved conversations.",
+        });
+        return;
+      }
+      setConfirmClearSaved(false);
+      const count = prevSavedIds.length;
+      setInboxToast({
+        type: "success",
+        message: `Cleared ${count} saved ${count === 1 ? "conversation" : "conversations"}`,
+        onUndo: () => {
+          void bulkUpdateSavedForAgent({
+            senderIds: prevSavedIds,
+            saved: true,
+            inbox: inboxMode,
+          });
+          setInboxToast(null);
+        },
+      });
+    } finally {
+      setIsBulkSaving(false);
+    }
+  }, [bulkUpdateSavedForAgent, canDownloadChat, conversations, inboxMode, isBulkSaving, isReadOnly]);
+
+  const handleDownloadBatchConversations = useCallback(
+    async (options: {
+      savedOnly?: boolean;
+      title?: string;
+      prefix?: string;
+      format?: BatchExportFormat;
+    }) => {
+      if (!canDownloadChat || isBatchDownloading) return;
+      const targetFormat = options.format ?? exportFormat;
+      setIsBatchDownloading(true);
+      try {
+        const res = await fetchConversationsForBatchExport({
+          savedOnly: options.savedOnly ?? true,
+          inbox: inboxMode,
+        });
+        if (!res.ok) {
+          setInboxToast({
+            type: "error",
+            message: res.error || "Could not download conversations.",
+          });
+          return;
+        }
+        if (res.conversations.length === 0) {
+          setInboxToast({
+            type: "error",
+            message: "No conversations found for this download.",
+          });
+          return;
+        }
+
+        const filename = buildBatchConversationExportFilename(
+          targetFormat,
+          options.prefix || `${inboxMode}-saved-conversations`
+        );
+        const transcriptOptions = {
+          labels,
+          inboxMode,
+          origin: typeof window !== "undefined" ? window.location.origin : "",
+        };
+
+        if (targetFormat === "zip") {
+          await triggerConversationsZipDownload(filename, res.conversations, transcriptOptions);
+        } else {
+          const combined = formatCombinedConversationsTranscript(res.conversations, {
+            ...transcriptOptions,
+            title: options.title,
+          });
+          triggerTextFileDownload(filename, combined);
+        }
+
+        setInboxToast({
+          type: "success",
+          message: `Downloaded ${res.conversations.length} ${
+            res.conversations.length === 1 ? "conversation" : "conversations"
+          } (${targetFormat === "zip" ? ".zip archive" : "combined .txt"})`,
+        });
+      } catch (err: unknown) {
+        setInboxToast({
+          type: "error",
+          message:
+            err instanceof Error
+              ? err.message
+              : "Could not build batch download. Please try again.",
+        });
+      } finally {
+        setIsBatchDownloading(false);
+      }
+    },
+    [canDownloadChat, exportFormat, fetchConversationsForBatchExport, inboxMode, isBatchDownloading, labels]
+  );
+
   return (
     <div
       className="flex h-full overflow-hidden"
@@ -1800,7 +1936,9 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
             {filters.map((filter) => {
               const isSelected = activeFilter === filter;
               const pillCount =
-                filter === "DONE"
+                filter === "Saved"
+                  ? savedConvCount
+                  : filter === "DONE"
                   ? bucketCounts.done
                   : filter === "Archived"
                   ? bucketCounts.archived
@@ -1815,7 +1953,10 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   type="button"
                   role="tab"
                   aria-selected={isSelected}
-                  onClick={() => setActiveFilter(filter)}
+                  onClick={() => {
+                    setConfirmClearSaved(false);
+                    setActiveFilter(filter);
+                  }}
                   className={`inline-flex items-center gap-1 text-[11px] sm:text-[10px] font-semibold px-2.5 sm:px-2 py-1.5 sm:py-0.5 min-h-[30px] sm:min-h-0 rounded-full transition-colors cursor-pointer ${
                     isSelected ? "bg-[#0066FF] text-white" : "hover:opacity-90"
                   }`}
@@ -1839,6 +1980,117 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
           </div>
         </div>
 
+        {/* Persistent Batch Export Bar on Saved Tab */}
+        {canDownloadChat && activeFilter === "Saved" && savedConvCount > 0 && (
+          <div
+            className="px-3.5 py-2.5 space-y-2 shrink-0"
+            style={{
+              background: "var(--bg-panel)",
+              borderBottom: "1px solid var(--border-main)",
+            }}
+          >
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div
+                className="inline-flex rounded-lg overflow-hidden border"
+                style={{
+                  background: "var(--bg-card)",
+                  borderColor: "var(--border-input)",
+                }}
+                role="group"
+                aria-label="Download format"
+              >
+                <button
+                  type="button"
+                  onClick={() => setExportFormat("txt")}
+                  className="min-h-[38px] sm:min-h-[28px] px-2.5 text-[10px] font-semibold cursor-pointer"
+                  style={
+                    exportFormat === "txt"
+                      ? { background: "var(--bg-selected)", color: "var(--text-primary)" }
+                      : { color: "var(--text-secondary)" }
+                  }
+                >
+                  Combined .txt
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExportFormat("zip")}
+                  className="min-h-[38px] sm:min-h-[28px] px-2.5 text-[10px] font-semibold cursor-pointer"
+                  style={
+                    exportFormat === "zip"
+                      ? { background: "var(--bg-selected)", color: "var(--text-primary)" }
+                      : { color: "var(--text-secondary)" }
+                  }
+                >
+                  .zip archive
+                </button>
+              </div>
+
+              <button
+                type="button"
+                disabled={isBatchDownloading}
+                onClick={() =>
+                  void handleDownloadBatchConversations({
+                    savedOnly: true,
+                    prefix: `${inboxMode}-saved-conversations`,
+                  })
+                }
+                className="min-h-[40px] sm:min-h-[30px] px-3 rounded-lg text-[11px] font-semibold text-white inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                style={{ background: "var(--bg-banner)" }}
+              >
+                {isBatchDownloading ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                ) : (
+                  <Download className="w-3.5 h-3.5 shrink-0" />
+                )}
+                <span>
+                  {isBatchDownloading ? "Preparing..." : `Download all (${savedConvCount})`}
+                </span>
+              </button>
+            </div>
+
+            {!isReadOnly && (
+              <div className="flex items-center justify-between gap-2 text-[11px]">
+                <span style={{ color: "var(--text-muted)" }}>
+                  Saved marks stay after download.
+                </span>
+                {confirmClearSaved ? (
+                  <div className="inline-flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={isBulkSaving}
+                      onClick={() => void handleClearAllSaved()}
+                      className="min-h-[32px] sm:min-h-[22px] px-2 rounded-md font-semibold cursor-pointer"
+                      style={{
+                        background: "var(--label-red-bg)",
+                        color: "var(--label-red-text)",
+                      }}
+                    >
+                      Confirm clear
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmClearSaved(false)}
+                      className="min-h-[32px] sm:min-h-[22px] px-2 rounded-md font-medium cursor-pointer"
+                      style={{ color: "var(--text-secondary)" }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmClearSaved(true)}
+                    className="min-h-[32px] sm:min-h-[22px] px-2 rounded-md font-medium cursor-pointer hover:underline"
+                    style={{ color: "var(--text-secondary)" }}
+                  >
+                    Clear saved
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="flex-1 min-h-0 overflow-y-auto relative">
           {filteredConversations.length === 0 ? (
             <div className="p-6 text-center">
@@ -1860,6 +2112,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   ? isOperationInbox
                     ? "No conversations found"
                     : "No leads found"
+                  : activeFilter === "Saved"
+                  ? "No saved conversations"
                   : activeFilter === "Groups"
                   ? "No WhatsApp groups"
                   : activeFilter === "Unread"
@@ -1881,6 +2135,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   ? `No conversations in ${activeFilter} with ${labelFilterDisplayText}`
                   : isDateFiltered
                   ? `No conversations in ${activeFilter} for ${dateFilterDisplayLabel}`
+                  : activeFilter === "Saved"
+                  ? "Open a conversation and choose Save to download from the Actions menu."
                   : activeFilter === "Groups"
                   ? "WhatsApp groups connected to Operation WhatsApp appear here."
                   : activeFilter === "Unread"
@@ -1975,6 +2231,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
               const showLeadTimer = Boolean(timeStr) && (!conv.isGroup || hasGroupActivity) && isLastMessageFromLead(conv);
               const convDone = isConversationDone(conv);
               const convArchived = isConversationArchived(conv);
+              const convSaved = Boolean(conv.savedForAgent);
               return (
                 <div
                   key={conv.id}
@@ -2061,6 +2318,20 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                             )}
                           </button>
                         </div>
+                      )}
+                      {canDownloadChat && convSaved && (
+                        <span
+                          title="Saved for download"
+                          aria-label="Saved for download"
+                          className="inline-flex items-center justify-center px-1 py-0.5 rounded shrink-0 border"
+                          style={{
+                            background: "var(--label-purple-bg)",
+                            borderColor: "var(--label-purple-border)",
+                            color: "var(--label-purple-text)",
+                          }}
+                        >
+                          <Bookmark className="w-3 h-3" fill="currentColor" />
+                        </span>
                       )}
                       <span
                         className="text-[9px] font-bold tracking-wide px-1.5 py-0.5 rounded"
@@ -2389,17 +2660,32 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   </select>
                 </div>
 
-                {/* Conversation Actions Dropdown (Mark as done, Archive, Download conversation) */}
+                {/* Conversation Actions Dropdown (Mark as done, Archive, Save, Download) */}
                 {(!isReadOnly || canDownloadChat) && (
                   <InboxBucketActions
                     conversationId={activeConv.id}
                     isDone={isConversationDone(activeConv)}
                     isArchived={isConversationArchived(activeConv)}
+                    isSaved={Boolean(activeConv.savedForAgent)}
+                    savedCount={savedConvCount}
                     canManageBuckets={!isReadOnly}
                     canDownload={canDownloadChat}
                     isDownloading={downloadingConvId === activeConv.id}
+                    isBatchDownloading={isBatchDownloading}
                     onAction={(action) => applyInboxBucketChange(activeConv.id, action)}
+                    onToggleSaved={
+                      canDownloadChat && !isReadOnly
+                        ? () => void handleToggleSavedSingle(activeConv)
+                        : undefined
+                    }
                     onDownload={() => void handleDownloadConversation(activeConv)}
+                    onDownloadSaved={(fmt) =>
+                      void handleDownloadBatchConversations({
+                        savedOnly: true,
+                        format: fmt,
+                        prefix: `${inboxMode}-saved-conversations`,
+                      })
+                    }
                   />
                 )}
 
@@ -3786,66 +4072,16 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
               )}
             </div>
 
-            <div className="mb-5">
-              <div className="flex items-center justify-between mb-2">
-                <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase">Pipeline</h3>
-                {activeConv.pipeline !== "direct" && (
-                  <span
-                    className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold transition-all"
-                    style={{
-                      backgroundColor: `${PIPELINE_STAGE_COLORS[activeConv.pipeline] || "#8E8E93"}18`,
-                      color: PIPELINE_STAGE_COLORS[activeConv.pipeline] || "#8E8E93",
-                      border: `1px solid ${PIPELINE_STAGE_COLORS[activeConv.pipeline] || "#8E8E93"}35`,
-                    }}
-                  >
-                    <span
-                      className="w-1.5 h-1.5 rounded-full"
-                      style={{
-                        backgroundColor: PIPELINE_STAGE_COLORS[activeConv.pipeline] || "#8E8E93",
-                      }}
-                    />
-                    {activeConv.pipeline}
-                  </span>
-                )}
-              </div>
-              {activeConv.pipeline === "direct" ? (
-                <div className="rounded-[6px] p-2.5 space-y-1.5" style={{ background: "var(--bg-input)", border: "1px solid var(--border-input)" }}>
-                  <p className="text-[11px]" style={{ color: "var(--text-secondary)" }}>
-                    No lead record — this contact messaged directly.
-                  </p>
-                  {!isReadOnly && (
-                    <button
-                      type="button"
-                      onClick={() => patchConversation(activeConv.id, { pipeline: "New" })}
-                      className="text-[11px] font-semibold text-[#0066FF] hover:underline cursor-pointer flex items-center gap-1"
-                    >
-                      + Add to pipeline
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <select
-                  disabled={isReadOnly}
-                  value={activeConv.pipeline}
-                  onChange={(e) => patchConversation(activeConv.id, { pipeline: e.target.value })}
-                  className="w-full rounded-[6px] text-[12px] py-1.5 px-2 outline-none disabled:opacity-60 cursor-pointer font-medium transition-colors"
-                  style={{
-                    border: "1px solid var(--border-input)",
-                    background: "var(--bg-input)",
-                    color: "var(--text-primary)",
-                  }}
-                >
-                  {PIPELINE_STAGES.map((stage) => (
-                    <option key={stage} value={stage}>
-                      {stage}
-                    </option>
-                  ))}
-                  {!PIPELINE_STAGES.includes(activeConv.pipeline as any) && (
-                    <option value={activeConv.pipeline}>{activeConv.pipeline}</option>
-                  )}
-                </select>
-              )}
-            </div>
+            <PipelineStageSection
+              conversationId={activeConv.id}
+              pipeline={activeConv.pipeline}
+              lostReason={activeConv.lostReason}
+              lostReasonNote={activeConv.lostReasonNote}
+              lostAt={activeConv.lostAt}
+              lostBy={activeConv.lostBy}
+              isReadOnly={isReadOnly}
+              onSavePatch={(updates) => patchConversation(activeConv.id, updates)}
+            />
 
             <div className="mb-5">
               <h3 className="text-[9px] font-bold tracking-widest text-[#0066FF] uppercase mb-2">Audition</h3>

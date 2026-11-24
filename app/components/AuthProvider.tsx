@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { clearAllCrmClientCaches } from "../utils/crmCache";
+import { clearAgentWorkspaceMemoryCache } from "../utils/agentWorkspaceCache";
 import { cleanupPushOnLogout } from "../utils/pushNotifications";
 import { postPresenceHeartbeat, resetPresenceClientSupportState } from "../utils/presenceClient";
 import {
@@ -157,6 +158,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         localStorage.removeItem(USER_KEY);
       } catch {}
       clearAllCrmClientCaches();
+      clearAgentWorkspaceMemoryCache(null);
 
       setToken(null);
       setUser(null);
@@ -290,6 +292,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           loggingOutRef.current = true;
           tokenRef.current = null;
           clearAllCrmClientCaches();
+      clearAgentWorkspaceMemoryCache(null);
           setToken(null);
           setUser(null);
           router.replace("/login");

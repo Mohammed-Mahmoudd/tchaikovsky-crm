@@ -25,8 +25,22 @@ export const OPERATION_INBOX_FILTERS = [
 
 export type InboxFilter =
   | (typeof INBOX_FILTERS)[number]
-  | (typeof OPERATION_INBOX_FILTERS)[number];
+  | (typeof OPERATION_INBOX_FILTERS)[number]
+  | "Saved";
 export type InboxMode = "admissions" | "operation";
+
+/** Returns Inbox filter tabs scoped for the current inbox mode and Chairman Saved-export permission. */
+export function getInboxFilters(
+  inboxMode: InboxMode,
+  canUseSaved: boolean
+): ReadonlyArray<InboxFilter> {
+  const base: ReadonlyArray<InboxFilter> =
+    inboxMode === "operation" ? OPERATION_INBOX_FILTERS : INBOX_FILTERS;
+  if (!canUseSaved) return base;
+  const doneIdx = base.indexOf("DONE");
+  if (doneIdx === -1) return [...base, "Saved"];
+  return [...base.slice(0, doneIdx), "Saved", ...base.slice(doneIdx)];
+}
 
 /** Returns true when a conversation or senderId represents a WhatsApp group (`@g.us` / `op_grp_...` / `grp_...`). */
 export function isGroupConversation(
@@ -68,6 +82,9 @@ export interface InboxConversationLike {
   isDone?: boolean | null;
   doneAt?: string | null;
   doneBy?: string | null;
+  savedForAgent?: boolean | null;
+  savedForAgentAt?: string | null;
+  savedForAgentBy?: string | null;
   unreadCount?: number | null;
 }
 
@@ -136,6 +153,9 @@ export function matchesInboxFilter(
   filter: InboxFilter,
   userName?: string | null
 ): boolean {
+  if (filter === "Saved") {
+    return Boolean(conv?.savedForAgent);
+  }
   if (filter === "DONE") {
     return isConversationDone(conv);
   }
@@ -193,10 +213,28 @@ export function getInboxBucketCounts(
   return { main, done, archived };
 }
 
-export function getFilterBucketTotal(counts: InboxBucketCounts, filter: InboxFilter): number {
+export function getFilterBucketTotal(
+  counts: InboxBucketCounts,
+  filter: InboxFilter,
+  savedCount = 0
+): number {
+  if (filter === "Saved") return savedCount;
   if (filter === "DONE") return counts.done;
   if (filter === "Archived") return counts.archived;
   return counts.main;
+}
+
+/** Counts all conversations marked as Saved for Agent download (including DONE & Archived). */
+export function getSavedConversationCount(
+  conversations: ReadonlyArray<InboxConversationLike>
+): number {
+  let count = 0;
+  for (let i = 0; i < conversations.length; i++) {
+    if (Boolean(conversations[i]?.savedForAgent)) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 /** Counts non-archived, non-DONE WhatsApp group chats for the Operation Groups filter badge. */

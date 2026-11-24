@@ -16,6 +16,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   UserCheck,
+  X,
 } from "lucide-react";
 import {
   type ClaudeBranchConfig,
@@ -55,6 +56,8 @@ interface ClaudeSandboxPanelProps {
   onSend: (presetText?: string) => void;
   onReset: () => void;
   onEditStudio?: () => void;
+  variant?: "card" | "drawer";
+  onClose?: () => void;
 }
 
 const STARTER_PROMPTS: ReadonlyArray<{
@@ -117,7 +120,10 @@ export function ClaudeSandboxPanel({
   onSend,
   onReset,
   onEditStudio,
+  variant = "card",
+  onClose,
 }: ClaudeSandboxPanelProps) {
+  const isDrawer = variant === "drawer";
   const [personaOpen, setPersonaOpen] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -164,12 +170,20 @@ export function ClaudeSandboxPanel({
 
   return (
     <section
-      className="rounded-xl overflow-hidden flex flex-col"
-      style={{
-        background: "var(--bg-card)",
-        border: "1px solid var(--border-main)",
-        boxShadow: "var(--shadow-card)",
-      }}
+      className={
+        isDrawer
+          ? "h-full flex flex-col overflow-hidden"
+          : "rounded-xl overflow-hidden flex flex-col"
+      }
+      style={
+        isDrawer
+          ? { background: "var(--bg-panel)" }
+          : {
+              background: "var(--bg-card)",
+              border: "1px solid var(--border-main)",
+              boxShadow: "var(--shadow-card)",
+            }
+      }
     >
       {/* Top Playground Toolbar */}
       <div
@@ -249,6 +263,22 @@ export function ClaudeSandboxPanel({
             <RotateCcw className="w-3.5 h-3.5" />
             <span>New chat</span>
           </button>
+
+          {isDrawer && onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close test sandbox"
+              className="inline-flex items-center justify-center min-w-[44px] min-h-[44px] sm:min-w-[34px] sm:min-h-[34px] rounded-lg cursor-pointer hover:bg-[var(--bg-hover)]"
+              style={{
+                background: "var(--bg-card)",
+                border: "1px solid var(--border-input)",
+                color: "var(--text-secondary)",
+              }}
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </div>
 
@@ -342,7 +372,9 @@ export function ClaudeSandboxPanel({
 
       {/* Centered AI Conversation Canvas */}
       <div
-        className="flex-1 min-h-[340px] max-h-[540px] overflow-y-auto px-3 sm:px-6 py-5"
+        className={`flex-1 overflow-y-auto px-3 sm:px-6 py-5 ${
+          isDrawer ? "min-h-0" : "min-h-[340px] max-h-[540px]"
+        }`}
         style={{ background: "var(--bg-panel)" }}
       >
         {messages.length === 0 ? (
@@ -542,10 +574,11 @@ export function ClaudeSandboxPanel({
 
       {/* Floating Claude / ChatGPT Composer Box */}
       <div
-        className="p-3 sm:p-4 space-y-2.5"
+        className="p-3 sm:p-4 space-y-2.5 shrink-0"
         style={{
           background: "var(--bg-panel)",
           borderTop: "1px solid var(--border-main)",
+          paddingBottom: isDrawer ? "calc(env(safe-area-inset-bottom, 0px) + 0.75rem)" : undefined,
         }}
       >
         {error && (

@@ -1,13 +1,13 @@
 "use client";
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import { useRouter } from "next/navigation";
 import { useAuth, Role, ROLE_OPTIONS, getRoleDisplayName, normalizeRole, canManageTeamRole, canAccessRoute, isOperationRole } from "../components/AuthProvider";
 import { organizeTeamMembersByRole, reconcileMemberPatchResponse } from "../utils/roles";
+import { resolveAgentRouteFromHash } from "../utils/agentWorkspaceCache";
 import { useCRM } from "../context/CRMContext";
 import { useBranches } from "../lib/branches";
 import { BranchSelect } from "../components/BranchSelect";
-import { ClaudeSettingsTab } from "../components/ClaudeSettingsTab";
-import { SlideOverChatDrawer, useSlideOverChatDrawer } from "../components/SlideOverChatDrawer";
 import { ChevronDown, Check, Trash2, Search, X, AlertTriangle, Bell, BellOff } from "lucide-react";
 
 interface TeamMember {
@@ -90,6 +90,7 @@ function NotificationSwitch({
 }
 
 export default function SettingsPage() {
+  const router = useRouter();
   const { user, updateCurrentUser, updateSessionToken, authFetch, canManageTeam: authCanManageTeam, roleDisplayName } = useAuth();
 
   // Profile state
@@ -98,17 +99,6 @@ export default function SettingsPage() {
 
   // Avatar state (Chairman only)
   const isChairman = normalizeRole(user?.role) === "chairman";
-  const {
-    chatId: claudeDrawerChatId,
-    showDetails: claudeShowChatDetails,
-    setShowDetails: setClaudeShowChatDetails,
-    isClosing: isClaudeDrawerClosing,
-    panelRef: claudeDrawerPanelRef,
-    open: openClaudeDrawer,
-    close: closeClaudeDrawer,
-    resetImmediate: resetClaudeDrawerImmediate,
-    handleAnimationEnd: handleClaudeDrawerAnimationEnd,
-  } = useSlideOverChatDrawer();
   const [avatarSaving, setAvatarSaving] = useState(false);
   const [avatarStatus, setAvatarStatus] = useState<{ ok: boolean; msg: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -320,8 +310,8 @@ export default function SettingsPage() {
     return () => { cancelled = true; };
   }, [branchToDelete, authFetch]);
 
-  // Settings tab: "general", "branches", or Chairman-only "claude"
-  const [activeTab, setActiveTab] = useState<"general" | "branches" | "claude">("general");
+  // Settings tab: "general" or "branches"
+  const [activeTab, setActiveTab] = useState<"general" | "branches">("general");
 
   // Region dropdown state in add branch container
   const [isRegionOpen, setIsRegionOpen] = useState(false);
@@ -354,37 +344,32 @@ export default function SettingsPage() {
   useEffect(() => {
     if (typeof window !== "undefined") {
       let cancelled = false;
-      const resolveHashTab = (): "general" | "branches" | "claude" => {
+      const syncFromHash = () => {
         const h = window.location.hash.toLowerCase();
-        if (h === "#branches") return "branches";
-        if ((h === "#claude" || h.startsWith("#claude-")) && isChairman) return "claude";
-        return "general";
+        if ((h === "#claude" || h.startsWith("#claude-")) && isChairman) {
+          router.replace(resolveAgentRouteFromHash(h));
+          return;
+        }
+        setActiveTab(h === "#branches" ? "branches" : "general");
       };
       queueMicrotask(() => {
         if (!cancelled) {
-          setActiveTab(resolveHashTab());
+          syncFromHash();
         }
       });
-      const onHashChange = () => {
-        setActiveTab(resolveHashTab());
-      };
-      window.addEventListener("hashchange", onHashChange);
+      window.addEventListener("hashchange", syncFromHash);
       return () => {
         cancelled = true;
-        window.removeEventListener("hashchange", onHashChange);
+        window.removeEventListener("hashchange", syncFromHash);
       };
     }
-  }, [isChairman]);
+  }, [isChairman, router]);
 
-  const handleTabChange = (tab: "general" | "branches" | "claude") => {
-    if (tab === "claude" && !isChairman) return;
-    if (tab !== "claude") resetClaudeDrawerImmediate();
+  const handleTabChange = (tab: "general" | "branches") => {
     setActiveTab(tab);
     if (typeof window !== "undefined") {
       if (tab === "branches") {
         window.location.hash = "branches";
-      } else if (tab === "claude") {
-        window.location.hash = "claude";
       } else {
         history.replaceState(null, "", window.location.pathname);
       }
@@ -1041,19 +1026,6 @@ export default function SettingsPage() {
             >
               Branches
             </button>
-            {isChairman && (
-              <button
-                type="button"
-                onClick={() => handleTabChange("claude")}
-                className="h-[24px] px-3 text-[11px] font-semibold rounded-[6px] transition-colors cursor-pointer"
-                style={activeTab === "claude"
-                  ? { background: "var(--bg-banner)", color: "#fff" }
-                  : { background: "transparent", color: "var(--text-secondary)" }
-                }
-              >
-                Claude
-              </button>
-            )}
           </div>
           )}
         </div>
@@ -2209,11 +2181,6 @@ export default function SettingsPage() {
           </div>
         </>
       )}
-
-      {/* ── CLAUDE TAB CONTENT (Chairman only) ─────────────────────────── */}
-      {activeTab === "claude" && isChairman && (
-        <ClaudeSettingsTab onOpenLeadChat={openClaudeDrawer} />
-      )}
       </div>
 
       {/* ── Edit User Modal ───────────────────────────────────────────────── */}
@@ -2922,18 +2889,6 @@ export default function SettingsPage() {
         </div>
       )}
       </div>
-
-      <SlideOverChatDrawer
-        chatId={claudeDrawerChatId}
-        showDetails={claudeShowChatDetails}
-        isClosing={isClaudeDrawerClosing}
-        panelRef={claudeDrawerPanelRef}
-        onToggleDetails={() => setClaudeShowChatDetails((prev) => !prev)}
-        onCloseDetails={() => setClaudeShowChatDetails(false)}
-        onClose={closeClaudeDrawer}
-        onAnimationEnd={handleClaudeDrawerAnimationEnd}
-        enableEscapeClose={!editingMember && !deactivatingMember && !deletingMember && !branchToDelete}
-      />
     </div>
   );
 }

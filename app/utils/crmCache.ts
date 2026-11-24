@@ -13,7 +13,7 @@ export const CRM_STATIC_LOCAL_STORAGE_KEYS = [
   "crm_team_metrics_cache_v1",
 ] as const;
 
-export const CRM_LOCAL_STORAGE_PREFIXES = ["crm_cash_", "crm_team_metrics_"] as const;
+export const CRM_LOCAL_STORAGE_PREFIXES = ["crm_cash_", "crm_team_metrics_", "crm_agent_"] as const;
 
 export const CRM_SESSION_STORAGE_KEYS = ["tchaikovsky_dismiss_avatar_modal"] as const;
 

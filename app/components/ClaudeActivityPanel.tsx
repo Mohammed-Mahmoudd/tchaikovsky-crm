@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   BookOpen,
@@ -19,10 +19,19 @@ import {
   getActivityOutcomeMeta,
   splitDisplayReplyChunks,
 } from "../utils/claudeAgent";
+import {
+  AGENT_CACHE_KEYS,
+  type CachedActivityPayload,
+  dedupeAgentRequest,
+  isAgentCacheFresh,
+  readAgentActivityCache,
+  readAgentMemorySnapshot,
+  writeAgentActivityCache,
+} from "../utils/agentWorkspaceCache";
 import { formatLastMessageTime } from "../utils/time";
 import { ClaudeStatusPill } from "./ClaudeUiPrimitives";
 
-type ActivityFilter = "all" | ClaudeActivityOutcome;
+export type ActivityFilter = "all" | ClaudeActivityOutcome;
 
 const FILTER_OPTIONS: ReadonlyArray<{ id: ActivityFilter; label: string }> = [
   { id: "all", label: "All" },
@@ -36,6 +45,10 @@ const FILTER_OPTIONS: ReadonlyArray<{ id: ActivityFilter; label: string }> = [
 interface ClaudeActivityPanelProps {
   onOpenLeadChat?: (senderId: string) => void;
   onOpenSkillsTab?: () => void;
+  embedded?: boolean;
+  outcomeFilter?: ActivityFilter;
+  onOutcomeFilterChange?: (next: ActivityFilter) => void;
+  onSummaryChange?: (summary: ClaudeActivitySummary) => void;
 }
 
 /**
@@ -45,24 +58,51 @@ interface ClaudeActivityPanelProps {
 export function ClaudeActivityPanel({
   onOpenLeadChat,
   onOpenSkillsTab,
+  embedded = false,
+  outcomeFilter: controlledOutcome,
+  onOutcomeFilterChange,
+  onSummaryChange,
 }: ClaudeActivityPanelProps) {
   const { authFetch } = useAuth();
 
-  const [items, setItems] = useState<ClaudeActivityItem[]>([]);
-  const [summary, setSummary] = useState<ClaudeActivitySummary>({
-    total: 0,
-    replied: 0,
-    booked: 0,
-    updated: 0,
-    escalated: 0,
-    silent: 0,
-    error: 0,
-  });
-  const [loading, setLoading] = useState(true);
+  const initialSnapshot = readAgentMemorySnapshot<CachedActivityPayload>(AGENT_CACHE_KEYS.activity);
+
+  const [items, setItems] = useState<ClaudeActivityItem[]>(() => initialSnapshot?.items ?? []);
+  const [summary, setSummary] = useState<ClaudeActivitySummary>(() =>
+    initialSnapshot?.summary ?? {
+      total: 0,
+      replied: 0,
+      booked: 0,
+      updated: 0,
+      escalated: 0,
+      silent: 0,
+      error: 0,
+    }
+  );
+  const [loading, setLoading] = useState(() => !initialSnapshot);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [outcomeFilter, setOutcomeFilter] = useState<ActivityFilter>("all");
+  const [internalOutcome, setInternalOutcome] = useState<ActivityFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const hasItemsRef = useRef(Boolean(initialSnapshot));
+  const onSummaryChangeRef = useRef(onSummaryChange);
+
+  useEffect(() => {
+    onSummaryChangeRef.current = onSummaryChange;
+  }, [onSummaryChange]);
+
+  const outcomeFilter = controlledOutcome ?? internalOutcome;
+  const setOutcomeFilter = useCallback(
+    (next: ActivityFilter) => {
+      if (onOutcomeFilterChange) {
+        onOutcomeFilterChange(next);
+      } else {
+        setInternalOutcome(next);
+      }
+    },
+    [onOutcomeFilterChange]
+  );
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -72,31 +112,73 @@ export function ClaudeActivityPanel({
   }, [searchQuery]);
 
   const fetchActivity = useCallback(
-    async (silent = false) => {
-      if (!silent) setLoading(true);
+    async ({ silent = false, force = false }: { silent?: boolean; force?: boolean } = {}) => {
+      const isDefaultQuery = outcomeFilter === "all" && !debouncedSearch;
+
+      if (!force && isDefaultQuery && isAgentCacheFresh(AGENT_CACHE_KEYS.activity)) {
+        const mem = readAgentMemorySnapshot<CachedActivityPayload>(AGENT_CACHE_KEYS.activity);
+        if (mem) {
+          hasItemsRef.current = true;
+          setItems(mem.items);
+          setSummary(mem.summary);
+          onSummaryChangeRef.current?.(mem.summary);
+          setLoading(false);
+          return;
+        }
+      }
+
+      if (!silent && !hasItemsRef.current) {
+        setLoading(true);
+      } else {
+        setRefreshing(true);
+      }
       setError(null);
+
       try {
         const params = new URLSearchParams();
         params.set("outcome", outcomeFilter);
         params.set("limit", "40");
         if (debouncedSearch) params.set("search", debouncedSearch);
 
-        const res = await authFetch(`/crm-api/claude/activity?${params.toString()}`, {
-          cache: "no-store",
+        const requestKey = `agent:activity:${outcomeFilter}:40:${debouncedSearch}`;
+        const result = await dedupeAgentRequest(requestKey, async () => {
+          const res = await authFetch(`/crm-api/claude/activity?${params.toString()}`, {
+            cache: "no-store",
+          });
+          const json = await res.json().catch(() => null);
+          if (!res.ok || !json?.success || !json.data) {
+            return { ok: false as const, error: json?.error || "Could not load agent activity." };
+          }
+          const nextItems = Array.isArray(json.data.items)
+            ? (json.data.items as ClaudeActivityItem[])
+            : [];
+          const nextSummary = json.data.summary as ClaudeActivitySummary | undefined;
+          if (isDefaultQuery && nextSummary) {
+            writeAgentActivityCache({ items: nextItems, summary: nextSummary });
+          }
+          return { ok: true as const, items: nextItems, summary: nextSummary };
         });
-        const json = await res.json().catch(() => null);
-        if (!res.ok || !json?.success || !json.data) {
-          setError(json?.error || "Could not load agent activity.");
+
+        if (!result.ok) {
+          if (!silent || !hasItemsRef.current) {
+            setError(result.error);
+          }
           return;
         }
-        setItems(Array.isArray(json.data.items) ? json.data.items : []);
-        if (json.data.summary) {
-          setSummary(json.data.summary);
+
+        hasItemsRef.current = true;
+        setItems(result.items);
+        if (result.summary) {
+          setSummary(result.summary);
+          onSummaryChangeRef.current?.(result.summary);
         }
       } catch {
-        setError("Network error while loading agent activity.");
+        if (!silent || !hasItemsRef.current) {
+          setError("Network error while loading agent activity.");
+        }
       } finally {
-        if (!silent) setLoading(false);
+        setLoading(false);
+        setRefreshing(false);
       }
     },
     [authFetch, outcomeFilter, debouncedSearch]
@@ -106,16 +188,30 @@ export function ClaudeActivityPanel({
     let cancelled = false;
     queueMicrotask(() => {
       if (cancelled) return;
-      void fetchActivity();
+      if (outcomeFilter === "all" && !debouncedSearch && !hasItemsRef.current) {
+        const cached = readAgentActivityCache();
+        if (cached) {
+          hasItemsRef.current = true;
+          setItems(cached.items);
+          setSummary(cached.summary);
+          onSummaryChangeRef.current?.(cached.summary);
+          setLoading(false);
+          void fetchActivity({ silent: true });
+          return;
+        }
+      }
+      void fetchActivity({
+        silent: hasItemsRef.current && outcomeFilter === "all" && !debouncedSearch,
+      });
     });
     return () => {
       cancelled = true;
     };
-  }, [fetchActivity]);
+  }, [debouncedSearch, fetchActivity, outcomeFilter]);
 
   return (
     <div className="space-y-4">
-      {/* Header & Summary Strip */}
+      {/* Header & Toolbar Card */}
       <section
         className="rounded-xl p-4 sm:p-5 space-y-4"
         style={{
@@ -127,10 +223,10 @@ export function ClaudeActivityPanel({
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="min-w-0">
             <h3 className="text-[14px] font-semibold" style={{ color: "var(--text-primary)" }}>
-              Live Agent Activity
+              Live Activity
             </h3>
             <p className="text-[11.5px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
-              Review every live reply Adham handled, including bookings, escalations, and skills used.
+              Review live replies Adham handled, including Discovery Session bookings, escalations, and skills used.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -138,7 +234,7 @@ export function ClaudeActivityPanel({
               <button
                 type="button"
                 onClick={onOpenSkillsTab}
-                className="inline-flex items-center gap-1.5 min-h-[44px] sm:min-h-[38px] px-3 rounded-lg text-[12px] font-medium cursor-pointer"
+                className="inline-flex items-center gap-1.5 min-h-[44px] sm:min-h-[38px] px-3 rounded-lg text-[12px] font-medium cursor-pointer hover:bg-[var(--bg-hover)]"
                 style={{
                   background: "var(--bg-input)",
                   border: "1px solid var(--border-input)",
@@ -151,42 +247,44 @@ export function ClaudeActivityPanel({
             )}
             <button
               type="button"
-              onClick={() => void fetchActivity()}
-              disabled={loading}
+              onClick={() => void fetchActivity({ force: true })}
+              disabled={loading || refreshing}
               className="inline-flex items-center gap-1.5 min-h-[44px] sm:min-h-[38px] px-3.5 rounded-lg text-[12px] font-semibold text-white cursor-pointer disabled:opacity-50"
               style={{ background: "var(--bg-banner)" }}
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+              <RefreshCw className={`w-3.5 h-3.5 ${loading || refreshing ? "animate-spin" : ""}`} />
               <span>Refresh</span>
             </button>
           </div>
         </div>
 
-        {/* Last 24h KPIs */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
-          {[
-            { label: "Turns (24h)", value: summary.total, tone: "var(--text-primary)" },
-            { label: "Sessions booked", value: summary.booked, tone: "var(--label-green-text)" },
-            { label: "Escalations", value: summary.escalated, tone: "var(--label-amber-text)" },
-            { label: "Errors", value: summary.error, tone: "var(--label-red-text)" },
-          ].map((stat) => (
-            <div
-              key={stat.label}
-              className="rounded-lg px-3.5 py-2.5"
-              style={{
-                background: "var(--bg-panel)",
-                border: "1px solid var(--border-main)",
-              }}
-            >
-              <p className="text-[11px] font-medium" style={{ color: "var(--text-secondary)" }}>
-                {stat.label}
-              </p>
-              <p className="text-[19px] font-bold mt-0.5 tabular-nums" style={{ color: stat.tone }}>
-                {stat.value}
-              </p>
-            </div>
-          ))}
-        </div>
+        {/* Last 24h KPIs (hidden when embedded in Overview which renders unified KPIs) */}
+        {!embedded && (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+            {[
+              { label: "Turns (24h)", value: summary.total, tone: "var(--text-primary)" },
+              { label: "Sessions booked", value: summary.booked, tone: "var(--label-green-text)" },
+              { label: "Escalations", value: summary.escalated, tone: "var(--label-amber-text)" },
+              { label: "Errors", value: summary.error, tone: "var(--label-red-text)" },
+            ].map((stat) => (
+              <div
+                key={stat.label}
+                className="rounded-lg px-3.5 py-2.5"
+                style={{
+                  background: "var(--bg-panel)",
+                  border: "1px solid var(--border-main)",
+                }}
+              >
+                <p className="text-[11px] font-medium" style={{ color: "var(--text-secondary)" }}>
+                  {stat.label}
+                </p>
+                <p className="text-[19px] font-bold mt-0.5 tabular-nums" style={{ color: stat.tone }}>
+                  {stat.value}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Search & Outcome Filters */}
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-2.5">
@@ -228,10 +326,12 @@ export function ClaudeActivityPanel({
                   key={opt.id}
                   type="button"
                   onClick={() => setOutcomeFilter(opt.id)}
-                  className="min-h-[40px] sm:min-h-[36px] px-3 rounded-lg text-[11px] font-semibold cursor-pointer"
+                  className={`min-h-[40px] sm:min-h-[36px] px-3 rounded-lg text-[11px] font-semibold cursor-pointer ${
+                    active ? "text-white" : "hover:bg-[var(--bg-hover)]"
+                  }`}
                   style={
                     active
-                      ? { background: "var(--bg-banner)", color: "#fff" }
+                      ? { background: "var(--bg-banner)" }
                       : {
                           background: "var(--bg-pill)",
                           border: "1px solid var(--border-input)",
@@ -273,7 +373,7 @@ export function ClaudeActivityPanel({
           </div>
           <button
             type="button"
-            onClick={() => void fetchActivity()}
+            onClick={() => void fetchActivity({ force: true })}
             className="min-h-[44px] sm:min-h-[38px] px-4 rounded-lg text-[12px] font-semibold text-white cursor-pointer"
             style={{ background: "var(--bg-banner)" }}
           >
@@ -346,7 +446,7 @@ export function ClaudeActivityPanel({
                       <button
                         type="button"
                         onClick={() => onOpenLeadChat(item.senderId)}
-                        className="inline-flex items-center gap-1 min-h-[40px] sm:min-h-[32px] px-2.5 rounded-md text-[11px] font-medium cursor-pointer"
+                        className="inline-flex items-center gap-1 min-h-[40px] sm:min-h-[32px] px-2.5 rounded-md text-[11px] font-medium cursor-pointer hover:bg-[var(--bg-hover)]"
                         style={{
                           background: "var(--bg-input)",
                           border: "1px solid var(--border-input)",
@@ -417,4 +517,3 @@ export function ClaudeActivityPanel({
     </div>
   );
 }
-

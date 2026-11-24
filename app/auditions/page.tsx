@@ -1655,6 +1655,8 @@ function AuditionsPageInner() {
       };
       if (status === 'no-show') {
         patch.notes = cleanComment ? `${cleanComment} [No-Show]` : 'No-Show';
+        patch.lostReason = 'no_show';
+        patch.lostReasonNote = '';
       }
       // Clear follow-up for non-followup outcomes; the modal handles setting it for followup outcomes
       if (!needsFollowUp(status)) {
@@ -1747,6 +1749,8 @@ function AuditionsPageInner() {
 
         if (panelStatus === 'no-show') {
           patch.notes = cleanComment ? `${cleanComment} [No-Show]` : 'No-Show';
+          patch.lostReason = 'no_show';
+          patch.lostReasonNote = '';
         }
 
         patchConversation(currentSlot.conversationId, patch);

@@ -201,7 +201,12 @@ export function canAccessRoute(role: string | undefined, pathname: string): bool
     return pathname === "/settings";
   }
 
-  if (pathname === "/claude-leads" || pathname.startsWith("/claude-leads/")) {
+  if (
+    pathname === "/agent" ||
+    pathname.startsWith("/agent/") ||
+    pathname === "/claude-leads" ||
+    pathname.startsWith("/claude-leads/")
+  ) {
     return norm === "chairman";
   }
 

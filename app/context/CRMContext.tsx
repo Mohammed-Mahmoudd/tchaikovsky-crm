@@ -15,6 +15,7 @@ import {
   type LogoutReason,
 } from "../components/AuthProvider";
 import { canUserViewConversationInStore } from "../utils/branchScope";
+import type { ExportConversationInput } from "../utils/conversationExport";
 import { formatMetaErrorMessage } from "../utils/errorParser";
 import {
   computeUnreadFromMessages,
@@ -71,6 +72,7 @@ import {
   postPresenceHeartbeat,
   resetPresenceClientSupportState,
 } from "../utils/presenceClient";
+import { formatLostReasonDisplay } from "../utils/lostReasons";
 
 export {
   computeUnreadFromMessages,
@@ -146,9 +148,16 @@ export type Conversation = {
   isDone?: boolean;
   doneAt?: string;
   doneBy?: string;
+  savedForAgent?: boolean;
+  savedForAgentAt?: string;
+  savedForAgentBy?: string;
   unreadCount?: number;
   windowLeft?: string;
   pipeline: "New" | "Contacted" | "Qualified" | "Audition Booked" | "Attended" | "Enrolled" | "Joining Later" | "Unqualified" | "Lost" | "direct";
+  lostReason?: string;
+  lostReasonNote?: string;
+  lostAt?: string;
+  lostBy?: string;
   source:
   | {
     campaign?: string;
@@ -318,6 +327,17 @@ type CRMContextType = {
     id: string,
     updates: Partial<Record<string, any>>
   ) => Promise<{ ok: boolean; error?: string }>;
+  bulkUpdateSavedForAgent: (params: {
+    senderIds?: string[];
+    saved?: boolean;
+    clearAll?: boolean;
+    inbox?: "admissions" | "operation";
+  }) => Promise<{ ok: boolean; modifiedCount?: number; error?: string }>;
+  fetchConversationsForBatchExport: (params: {
+    senderIds?: string[];
+    savedOnly?: boolean;
+    inbox?: "admissions" | "operation";
+  }) => Promise<{ ok: boolean; conversations: ExportConversationInput[]; error?: string }>;
   updateConversationClaude: (
     id: string,
     payload: {
@@ -524,6 +544,9 @@ function slimConversationsForStorage(convs: Conversation[], limit?: number): Con
     if (c.isDone) item.isDone = true;
     if (c.doneAt) item.doneAt = c.doneAt;
     if (c.doneBy) item.doneBy = c.doneBy;
+    if (c.savedForAgent) item.savedForAgent = true;
+    if (c.savedForAgentAt) item.savedForAgentAt = c.savedForAgentAt;
+    if (c.savedForAgentBy) item.savedForAgentBy = c.savedForAgentBy;
     if (c.notes) item.notes = c.notes;
     if (c.followUpNote) item.followUpNote = c.followUpNote;
     if (c.followUpDate) item.followUpDate = c.followUpDate;
@@ -538,6 +561,10 @@ function slimConversationsForStorage(convs: Conversation[], limit?: number): Con
     if (c.attendedBy) item.attendedBy = c.attendedBy;
     if (c.enrolledBy) item.enrolledBy = c.enrolledBy;
     if (c.auditionOutcome) item.auditionOutcome = c.auditionOutcome;
+    if (c.lostReason) item.lostReason = c.lostReason;
+    if (c.lostReasonNote) item.lostReasonNote = c.lostReasonNote;
+    if (c.lostAt) item.lostAt = c.lostAt;
+    if (c.lostBy) item.lostBy = c.lostBy;
     if (c.followUpTags && c.followUpTags.length > 0) item.followUpTags = c.followUpTags;
     if (c.labels && c.labels.length > 0) item.labels = c.labels;
     if (c.branch) item.branch = c.branch;
@@ -1303,6 +1330,11 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       isDone: !Boolean(c.isArchived) && Boolean(c.isDone),
       doneAt: !Boolean(c.isArchived) && c.doneAt ? String(c.doneAt) : undefined,
       doneBy: !Boolean(c.isArchived) && c.doneBy ? String(c.doneBy) : undefined,
+      savedForAgent: Boolean(c.savedForAgent),
+      savedForAgentAt:
+        c.savedForAgent && c.savedForAgentAt ? String(c.savedForAgentAt) : undefined,
+      savedForAgentBy:
+        c.savedForAgent && c.savedForAgentBy ? String(c.savedForAgentBy) : undefined,
       unreadCount: (() => {
         const rawUnread = Number(c.unreadCount) || 0;
         if (rawUnread > 0) return rawUnread;
@@ -1320,6 +1352,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         c.auditionOutcome === "joining-later" && (!c.pipeline || c.pipeline === "Contacted" || c.pipeline === "Qualified" || c.pipeline === "New")
           ? "Joining Later"
           : c.pipeline || "New",
+      lostReason: c.pipeline === "Lost" ? c.lostReason || "" : "",
+      lostReasonNote: c.pipeline === "Lost" ? c.lostReasonNote || "" : "",
+      lostAt: c.pipeline === "Lost" && c.lostAt ? String(c.lostAt) : undefined,
+      lostBy: c.pipeline === "Lost" ? c.lostBy || "" : "",
       source: c.source || "direct",
       notes: c.notes || "",
       followUpNote: c.followUpNote || "",
@@ -1721,6 +1757,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               oldConv.lastSeenAt === nextConv.lastSeenAt &&
               oldConv.unreadCount === nextConv.unreadCount &&
               oldConv.pipeline === nextConv.pipeline &&
+              (oldConv.lostReason || "") === (nextConv.lostReason || "") &&
+              (oldConv.lostReasonNote || "") === (nextConv.lostReasonNote || "") &&
+              oldConv.lostAt === nextConv.lostAt &&
+              (oldConv.lostBy || "") === (nextConv.lostBy || "") &&
               oldConv.agent === nextConv.agent &&
               oldConv.status === nextConv.status &&
               Boolean(oldConv.isArchived) === Boolean(nextConv.isArchived) &&
@@ -1729,6 +1769,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               Boolean(oldConv.isDone) === Boolean(nextConv.isDone) &&
               oldConv.doneAt === nextConv.doneAt &&
               oldConv.doneBy === nextConv.doneBy &&
+              Boolean(oldConv.savedForAgent) === Boolean(nextConv.savedForAgent) &&
+              oldConv.savedForAgentAt === nextConv.savedForAgentAt &&
+              oldConv.savedForAgentBy === nextConv.savedForAgentBy &&
               oldConv.name === nextConv.name &&
               oldConv.profileName === nextConv.profileName &&
               oldConv.leadName === nextConv.leadName &&
@@ -1911,6 +1954,22 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     )
                   : normActive.lastOutgoingAt ?? c.lastOutgoingAt,
               pipeline: (hasActivePending && pending?.updates.pipeline) || normActive.pipeline || c.pipeline,
+              lostReason:
+                hasActivePending && pending?.updates.lostReason !== undefined
+                  ? String(pending.updates.lostReason)
+                  : normActive.lostReason ?? c.lostReason,
+              lostReasonNote:
+                hasActivePending && pending?.updates.lostReasonNote !== undefined
+                  ? String(pending.updates.lostReasonNote)
+                  : normActive.lostReasonNote ?? c.lostReasonNote,
+              lostAt:
+                hasActivePending && "lostAt" in (pending?.updates || {})
+                  ? (pending?.updates.lostAt as string | undefined)
+                  : normActive.lostAt ?? c.lostAt,
+              lostBy:
+                hasActivePending && pending?.updates.lostBy !== undefined
+                  ? String(pending.updates.lostBy)
+                  : normActive.lostBy ?? c.lostBy,
               auditionDate:
                 hasActivePending && pending?.updates.auditionDate !== undefined
                   ? pending.updates.auditionDate
@@ -2010,6 +2069,18 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 hasActivePending && pending?.updates.doneBy !== undefined
                   ? (pending.updates.doneBy as string | undefined)
                   : normActive.doneBy,
+              savedForAgent:
+                hasActivePending && pending?.updates.savedForAgent !== undefined
+                  ? Boolean(pending.updates.savedForAgent)
+                  : normActive.savedForAgent,
+              savedForAgentAt:
+                hasActivePending && pending?.updates.savedForAgentAt !== undefined
+                  ? (pending.updates.savedForAgentAt as string | undefined)
+                  : normActive.savedForAgentAt,
+              savedForAgentBy:
+                hasActivePending && pending?.updates.savedForAgentBy !== undefined
+                  ? (pending.updates.savedForAgentBy as string | undefined)
+                  : normActive.savedForAgentBy,
               labels:
                 hasActivePending && pending?.updates.labels !== undefined
                   ? normalizeConversationLabelIds(pending.updates.labels)
@@ -2031,6 +2102,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             };
             if (
               mergedConv.pipeline !== c.pipeline ||
+              (mergedConv.lostReason || "") !== (c.lostReason || "") ||
+              (mergedConv.lostReasonNote || "") !== (c.lostReasonNote || "") ||
               mergedConv.auditionDate !== c.auditionDate ||
               mergedConv.auditionOutcome !== c.auditionOutcome ||
               mergedConv.followUpDate !== c.followUpDate ||
@@ -2670,6 +2743,18 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                             hasActivePendingPatch && activePendingUpdates?.doneBy !== undefined
                               ? (activePendingUpdates.doneBy as string | undefined)
                               : normRemote.doneBy,
+                          savedForAgent:
+                            hasActivePendingPatch && activePendingUpdates?.savedForAgent !== undefined
+                              ? Boolean(activePendingUpdates.savedForAgent)
+                              : normRemote.savedForAgent,
+                          savedForAgentAt:
+                            hasActivePendingPatch && activePendingUpdates && "savedForAgentAt" in activePendingUpdates
+                              ? (activePendingUpdates.savedForAgentAt as string | undefined)
+                              : normRemote.savedForAgentAt,
+                          savedForAgentBy:
+                            hasActivePendingPatch && activePendingUpdates?.savedForAgentBy !== undefined
+                              ? (activePendingUpdates.savedForAgentBy as string | undefined)
+                              : normRemote.savedForAgentBy,
                           labels:
                             hasActivePendingPatch && activePendingUpdates?.labels !== undefined
                               ? normalizeConversationLabelIds(activePendingUpdates.labels)
@@ -3132,6 +3217,58 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   new CustomEvent("crm:presence-updated", { detail: payload.data })
                 );
               }
+            } else if (payload.type === "conversations_saved_bulk" && payload.data) {
+              const {
+                senderIds: updatedIds,
+                clearAll: isClearAll,
+                inbox: targetInbox,
+                savedForAgent: nextSavedFlag,
+                savedForAgentAt: nextSavedAt,
+                savedForAgentBy: nextSavedBy,
+              } = payload.data as {
+                senderIds?: unknown;
+                clearAll?: boolean;
+                inbox?: string | null;
+                savedForAgent?: boolean;
+                savedForAgentAt?: string | null;
+                savedForAgentBy?: string;
+              };
+              const normalizedFlag = isClearAll ? false : Boolean(nextSavedFlag);
+              const normalizedAt = normalizedFlag && nextSavedAt ? String(nextSavedAt) : undefined;
+              const normalizedBy = normalizedFlag && nextSavedBy ? String(nextSavedBy) : undefined;
+              const idSet = new Set(
+                Array.isArray(updatedIds) ? updatedIds.map((item) => String(item || "")) : []
+              );
+              setConversations((prev) => {
+                let changed = false;
+                const nextList = prev.map((c) => {
+                  if (targetInbox && resolveConvInboxMode(c) !== targetInbox) {
+                    return c;
+                  }
+                  const matches = isClearAll
+                    ? Boolean(c.savedForAgent)
+                    : idSet.has(c.id) || Boolean(c.metaSenderId && idSet.has(c.metaSenderId));
+                  if (!matches) return c;
+                  const pending = pendingPatchesRef.current.get(c.id);
+                  if (
+                    pending &&
+                    Date.now() < pending.expiresAt &&
+                    pending.updates.savedForAgent !== undefined
+                  ) {
+                    return c;
+                  }
+                  changed = true;
+                  return {
+                    ...c,
+                    savedForAgent: normalizedFlag,
+                    savedForAgentAt: normalizedAt,
+                    savedForAgentBy: normalizedBy,
+                  };
+                });
+                if (!changed) return prev;
+                persistConversationsCache(nextList);
+                return nextList;
+              });
             }
           } catch (e) {
             console.warn("CRMContext: SSE message parse error", e);
@@ -3461,7 +3598,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       ) {
         updates.leadName = updates.name.trim();
       }
-      const optimisticExtras: Record<string, string> = {};
+      const optimisticExtras: Record<string, string | undefined> = {};
       const resolvedOptName = updates.leadName ?? updates.name;
       const editedLeadName =
         isAgentNameEdit &&
@@ -3534,6 +3671,36 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         else updates.pipeline = currentForSync?.auditionDate ? "Audition Booked" : "Contacted";
       }
 
+      if (updates.auditionOutcome === "no-show") {
+        if (updates.pipeline === undefined) {
+          updates.pipeline = "Lost";
+        }
+        if (updates.lostReason === undefined && !currentForSync?.lostReason) {
+          updates.lostReason = "no_show";
+        }
+      }
+
+      const nextPipelineForLost = updates.pipeline !== undefined ? updates.pipeline : currentForSync?.pipeline;
+      if (updates.pipeline !== undefined && updates.pipeline !== "Lost") {
+        updates.lostReason = "";
+        updates.lostReasonNote = "";
+        optimisticExtras.lostAt = undefined;
+        optimisticExtras.lostBy = "";
+      } else if (nextPipelineForLost === "Lost") {
+        const isEnteringLost = currentForSync?.pipeline !== "Lost";
+        if (isEnteringLost || !currentForSync?.lostAt) {
+          optimisticExtras.lostAt = new Date().toISOString();
+        }
+        if (
+          isEnteringLost ||
+          updates.lostReason !== undefined ||
+          updates.lostReasonNote !== undefined ||
+          !currentForSync?.lostBy
+        ) {
+          optimisticExtras.lostBy = (user?.name || currentForSync?.agent || "Staff").trim();
+        }
+      }
+
       const nowIso = new Date().toISOString();
       const patchPayload: Record<string, any> = { ...updates };
 
@@ -3579,6 +3746,25 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           patchPayload.doneBy = "";
           normalizedInboxOptimistic.doneAt = undefined;
           normalizedInboxOptimistic.doneBy = "";
+        }
+      }
+      if ("savedForAgent" in patchPayload) {
+        const nextSaved = Boolean(patchPayload.savedForAgent);
+        patchPayload.savedForAgent = nextSaved;
+        normalizedInboxOptimistic.savedForAgent = nextSaved;
+        if (nextSaved) {
+          const ts = patchPayload.savedForAgentAt ? String(patchPayload.savedForAgentAt) : nowIso;
+          patchPayload.savedForAgentAt = ts;
+          normalizedInboxOptimistic.savedForAgentAt = ts;
+          if (!patchPayload.savedForAgentBy && (user?.name || user?.email)) {
+            patchPayload.savedForAgentBy = String(user.name || user.email);
+          }
+          normalizedInboxOptimistic.savedForAgentBy = String(patchPayload.savedForAgentBy || "");
+        } else {
+          patchPayload.savedForAgentAt = null;
+          patchPayload.savedForAgentBy = "";
+          normalizedInboxOptimistic.savedForAgentAt = undefined;
+          normalizedInboxOptimistic.savedForAgentBy = "";
         }
       }
 
@@ -3646,17 +3832,46 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             const prevPipe = current.pipeline || "New";
             const nextPipe = String(updates.pipeline);
             const isBook = nextPipe === "Audition Booked";
+            const lostDetail =
+              nextPipe === "Lost"
+                ? formatLostReasonDisplay(
+                    updates.lostReason ?? current.lostReason,
+                    updates.lostReasonNote ?? current.lostReasonNote
+                  )
+                : "";
             generatedActivities.push({
               id: `act_${nowTs}_pipe`,
               type: isBook ? "audition_booked" : "stage_changed",
               actor: actorName,
               actorRole,
               summary: isBook ? "Booked Audition" : `Moved stage to ${nextPipe}`,
-              detail: `${prevPipe} → ${nextPipe}`,
+              detail: lostDetail ? `${prevPipe} → ${nextPipe} · ${lostDetail}` : `${prevPipe} → ${nextPipe}`,
               fromValue: prevPipe,
               toValue: nextPipe,
               timestamp: nowTs,
             });
+          } else if (
+            current.pipeline === "Lost" &&
+            (updates.lostReason !== undefined || updates.lostReasonNote !== undefined)
+          ) {
+            const prevLostDetail = formatLostReasonDisplay(current.lostReason, current.lostReasonNote);
+            const nextLostDetail = formatLostReasonDisplay(
+              updates.lostReason !== undefined ? updates.lostReason : current.lostReason,
+              updates.lostReasonNote !== undefined ? updates.lostReasonNote : current.lostReasonNote
+            );
+            if (nextLostDetail && nextLostDetail !== prevLostDetail) {
+              generatedActivities.push({
+                id: `act_${nowTs}_lost`,
+                type: "note_updated",
+                actor: actorName,
+                actorRole,
+                summary: "Updated lost reason",
+                detail: nextLostDetail,
+                fromValue: prevLostDetail,
+                toValue: nextLostDetail,
+                timestamp: nowTs,
+              });
+            }
           }
 
           if (
@@ -4625,6 +4840,193 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     [isReadOnly, createManualLead, authFetch, normalizeConversationMeta, normalizeMessages]
   );
 
+  const bulkUpdateSavedForAgent = useCallback(
+    async (params: {
+      senderIds?: string[];
+      saved?: boolean;
+      clearAll?: boolean;
+      inbox?: "admissions" | "operation";
+    }): Promise<{ ok: boolean; modifiedCount?: number; error?: string }> => {
+      if (isReadOnly) {
+        return { ok: false, error: "View-only account: modifications are disabled." };
+      }
+
+      const clearAll = Boolean(params.clearAll);
+      const cleanIds = Array.isArray(params.senderIds)
+        ? Array.from(new Set(params.senderIds.map((id) => String(id || "").trim()).filter(Boolean)))
+        : [];
+      if (!clearAll && cleanIds.length === 0) {
+        return { ok: true, modifiedCount: 0 };
+      }
+
+      const targetSaved = clearAll ? false : Boolean(params.saved);
+      const targetInbox = params.inbox;
+      const nowIso = new Date().toISOString();
+      const nextAt = targetSaved ? nowIso : undefined;
+      const nextBy = targetSaved ? String(user?.name || user?.email || "") : undefined;
+      const idSet = new Set(cleanIds);
+
+      const previousSnapshot = new Map<
+        string,
+        { savedForAgent?: boolean; savedForAgentAt?: string; savedForAgentBy?: string }
+      >();
+
+      setConversations((prev) => {
+        let changed = false;
+        const nextList = prev.map((c) => {
+          if (targetInbox && resolveConvInboxMode(c) !== targetInbox) {
+            return c;
+          }
+          const matches = clearAll
+            ? Boolean(c.savedForAgent)
+            : idSet.has(c.id) || Boolean(c.metaSenderId && idSet.has(c.metaSenderId));
+          if (!matches) return c;
+
+          if (!previousSnapshot.has(c.id)) {
+            previousSnapshot.set(c.id, {
+              savedForAgent: Boolean(c.savedForAgent),
+              savedForAgentAt: c.savedForAgentAt,
+              savedForAgentBy: c.savedForAgentBy,
+            });
+          }
+          changed = true;
+          return {
+            ...c,
+            savedForAgent: targetSaved,
+            savedForAgentAt: nextAt,
+            savedForAgentBy: nextBy,
+          };
+        });
+        if (!changed) return prev;
+        persistConversationsCache(nextList);
+        return nextList;
+      });
+
+      const patchStartedAt = Date.now();
+      const touchedIds = previousSnapshot.size > 0 ? Array.from(previousSnapshot.keys()) : cleanIds;
+      touchedIds.forEach((cid) => {
+        const existingPending = pendingPatchesRef.current.get(cid);
+        pendingPatchesRef.current.set(cid, {
+          updates: {
+            ...(existingPending ? existingPending.updates : {}),
+            savedForAgent: targetSaved,
+            savedForAgentAt: nextAt,
+            savedForAgentBy: nextBy ?? "",
+          },
+          expiresAt: patchStartedAt + 30000,
+          patchedAt: patchStartedAt,
+        });
+      });
+
+      try {
+        const reqBody = {
+          senderIds: cleanIds,
+          saved: targetSaved,
+          clearAll,
+          ...(targetInbox ? { inbox: targetInbox } : {}),
+        };
+        let res = await authFetch(`${API}/messages/saved-export/bulk`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(reqBody),
+        }).catch(() => null);
+        if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+          res = await authFetch(`${DIRECT_API}/messages/saved-export/bulk`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(reqBody),
+          }).catch(() => null);
+        }
+
+        const json = res ? await res.json().catch(() => null) : null;
+        if (!res || !res.ok || !json?.success) {
+          throw new Error(json?.error || `Failed to update saved state (HTTP ${res?.status || 0})`);
+        }
+
+        return {
+          ok: true,
+          modifiedCount: Number(json.data?.modifiedCount ?? touchedIds.length),
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Failed to update saved conversations";
+        touchedIds.forEach((cid) => {
+          pendingPatchesRef.current.delete(cid);
+        });
+        if (previousSnapshot.size > 0) {
+          setConversations((prev) => {
+            const restored = prev.map((c) => {
+              const snap = previousSnapshot.get(c.id);
+              return snap ? { ...c, ...snap } : c;
+            });
+            persistConversationsCache(restored);
+            return restored;
+          });
+        }
+        return { ok: false, error: msg };
+      }
+    },
+    [authFetch, isReadOnly, user]
+  );
+
+  const fetchConversationsForBatchExport = useCallback(
+    async (params: {
+      senderIds?: string[];
+      savedOnly?: boolean;
+      inbox?: "admissions" | "operation";
+    }): Promise<{ ok: boolean; conversations: ExportConversationInput[]; error?: string }> => {
+      try {
+        const cleanIds = Array.isArray(params.senderIds)
+          ? Array.from(new Set(params.senderIds.map((id) => String(id || "").trim()).filter(Boolean)))
+          : [];
+        const useSavedGet = Boolean(params.savedOnly) && cleanIds.length === 0;
+        const inboxQs = params.inbox ? `?inbox=${encodeURIComponent(params.inbox)}` : "";
+
+        let res: Response | null = null;
+        if (useSavedGet) {
+          res = await authFetch(`${API}/messages/saved-export${inboxQs}`, {
+            cache: "no-store",
+          }).catch(() => null);
+          if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+            res = await authFetch(`${DIRECT_API}/messages/saved-export${inboxQs}`, {
+              cache: "no-store",
+            }).catch(() => null);
+          }
+        } else {
+          const bodyPayload = {
+            senderIds: cleanIds,
+            savedOnly: Boolean(params.savedOnly),
+            ...(params.inbox ? { inbox: params.inbox } : {}),
+          };
+          res = await authFetch(`${API}/messages/export-batch`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(bodyPayload),
+            cache: "no-store",
+          }).catch(() => null);
+          if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+            res = await authFetch(`${DIRECT_API}/messages/export-batch`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(bodyPayload),
+              cache: "no-store",
+            }).catch(() => null);
+          }
+        }
+
+        const json = res ? await res.json().catch(() => null) : null;
+        if (!res || !res.ok || !json?.success) {
+          throw new Error(json?.error || `Failed to export conversations (HTTP ${res?.status || 0})`);
+        }
+        const rawList = Array.isArray(json.data) ? (json.data as ExportConversationInput[]) : [];
+        return { ok: true, conversations: rawList };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Failed to download conversations";
+        return { ok: false, conversations: [], error: msg };
+      }
+    },
+    [authFetch]
+  );
+
   const deleteConversation = useCallback(
     async (senderId: string) => {
       try {
@@ -5180,6 +5582,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         setActiveChatId,
         openChat,
         patchConversation,
+        bulkUpdateSavedForAgent,
+        fetchConversationsForBatchExport,
         updateConversationClaude,
         createManualLead,
         markConversationAsRead,

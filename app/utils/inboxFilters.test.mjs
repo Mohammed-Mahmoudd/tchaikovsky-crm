@@ -11,6 +11,8 @@ import {
   filterConversationsByInbox,
   getFilterBucketTotal,
   getGroupConversationCount,
+  getInboxFilters,
+  getSavedConversationCount,
   getUnreadConversationCount,
   getInboxBucketCounts,
   isConversationArchived,
@@ -249,6 +251,28 @@ describe("inboxFilters", () => {
       ["op_20101", "op_grp_1"]
     );
     assert.equal(getUnreadConversationCount(opList), 2);
+  });
+
+  it("exposes Saved tab only when authorized and matches saved conversations across all buckets", () => {
+    assert.equal(getInboxFilters("admissions", false).includes("Saved"), false);
+    assert.equal(getInboxFilters("operation", false).includes("Saved"), false);
+
+    const admSaved = getInboxFilters("admissions", true);
+    assert.equal(admSaved.includes("Saved"), true);
+    assert.ok(admSaved.indexOf("Saved") < admSaved.indexOf("DONE"));
+
+    const savedInMain = { ...activeWa, savedForAgent: true };
+    const savedInDone = { ...doneConv, savedForAgent: true };
+    const savedInArchive = { ...archivedConv, savedForAgent: true };
+    const unsaved = { ...activeUnassignedFb, savedForAgent: false };
+
+    const list = [savedInMain, savedInDone, savedInArchive, unsaved];
+    assert.equal(matchesInboxFilter(savedInMain, "Saved", "Chairman"), true);
+    assert.equal(matchesInboxFilter(savedInDone, "Saved", "Chairman"), true);
+    assert.equal(matchesInboxFilter(savedInArchive, "Saved", "Chairman"), true);
+    assert.equal(matchesInboxFilter(unsaved, "Saved", "Chairman"), false);
+    assert.equal(getSavedConversationCount(list), 3);
+    assert.equal(getFilterBucketTotal(getInboxBucketCounts(list), "Saved", 3), 3);
   });
 });
 

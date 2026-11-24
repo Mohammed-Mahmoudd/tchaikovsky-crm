@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   BookOpen,
@@ -14,6 +14,14 @@ import {
 } from "lucide-react";
 import { useAuth } from "./AuthProvider";
 import type { ClaudeSkillItem, PlatformAgentInfo } from "../utils/claudeAgent";
+import {
+  AGENT_CACHE_KEYS,
+  dedupeAgentRequest,
+  isAgentCacheFresh,
+  readAgentMemorySnapshot,
+  readAgentSkillsCache,
+  writeAgentSkillsCache,
+} from "../utils/agentWorkspaceCache";
 import { formatLastMessageTime } from "../utils/time";
 import { ClaudeSettingSwitch, ClaudeStatusPill } from "./ClaudeUiPrimitives";
 
@@ -70,6 +78,7 @@ interface ClaudeSkillsPanelProps {
   platformAgent: PlatformAgentInfo | null;
   hasAgentId: boolean;
   onSyncTools: () => Promise<boolean>;
+  onCountChange?: (activeCount: number, totalCount: number) => void;
 }
 
 /**
@@ -80,12 +89,15 @@ export function ClaudeSkillsPanel({
   platformAgent,
   hasAgentId,
   onSyncTools,
+  onCountChange,
 }: ClaudeSkillsPanelProps) {
   const { authFetch } = useAuth();
 
-  const [skills, setSkills] = useState<ClaudeSkillItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const initialMemorySkills = readAgentMemorySnapshot<ClaudeSkillItem[]>(AGENT_CACHE_KEYS.skills);
+  const [skills, setSkills] = useState<ClaudeSkillItem[]>(() => initialMemorySkills ?? []);
+  const [loading, setLoading] = useState(() => !initialMemorySkills);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const hasSkillsRef = useRef(Boolean(initialMemorySkills));
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [draft, setDraft] = useState<SkillDraft>(EMPTY_DRAFT);
@@ -96,38 +108,91 @@ export function ClaudeSkillsPanel({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [syncingTools, setSyncingTools] = useState(false);
+  const onCountChangeRef = useRef(onCountChange);
+  const skillsRef = useRef<ClaudeSkillItem[]>(skills);
+
+  useEffect(() => {
+    skillsRef.current = skills;
+  }, [skills]);
+
+  useEffect(() => {
+    onCountChangeRef.current = onCountChange;
+  }, [onCountChange]);
+
+  const notifyCounts = useCallback((list: ClaudeSkillItem[]) => {
+    onCountChangeRef.current?.(list.filter((s) => s.enabled).length, list.length);
+  }, []);
 
   const fetchSkills = useCallback(
-    async (silent = false) => {
-      if (!silent) setLoading(true);
-      setLoadError(null);
-      try {
-        const res = await authFetch("/crm-api/claude/skills", { cache: "no-store" });
-        const json = await res.json().catch(() => null);
-        if (!res.ok || !json?.success || !Array.isArray(json.data)) {
-          setLoadError(json?.error || "Could not load skills.");
+    async ({ silent = false, force = false }: { silent?: boolean; force?: boolean } = {}) => {
+      if (!force && isAgentCacheFresh(AGENT_CACHE_KEYS.skills)) {
+        const mem = readAgentMemorySnapshot<ClaudeSkillItem[]>(AGENT_CACHE_KEYS.skills);
+        if (mem) {
+          hasSkillsRef.current = true;
+          setSkills(mem);
+          notifyCounts(mem);
+          setLoading(false);
           return;
         }
-        setSkills(json.data);
+      }
+
+      if (!silent && !hasSkillsRef.current) setLoading(true);
+      setLoadError(null);
+      try {
+        const result = await dedupeAgentRequest("agent:skills", async () => {
+          const res = await authFetch("/crm-api/claude/skills", { cache: "no-store" });
+          const json = await res.json().catch(() => null);
+          if (!res.ok || !json?.success || !Array.isArray(json.data)) {
+            return { ok: false as const, error: json?.error || "Could not load skills." };
+          }
+          const list = json.data as ClaudeSkillItem[];
+          writeAgentSkillsCache(list);
+          return { ok: true as const, data: list };
+        });
+
+        if (!result.ok) {
+          if (!silent || !hasSkillsRef.current) {
+            setLoadError(result.error);
+          }
+          return;
+        }
+        hasSkillsRef.current = true;
+        setSkills(result.data);
+        notifyCounts(result.data);
       } catch {
-        setLoadError("Network error while loading skills.");
+        if (!silent || !hasSkillsRef.current) {
+          setLoadError("Network error while loading skills.");
+        }
       } finally {
-        if (!silent) setLoading(false);
+        setLoading(false);
       }
     },
-    [authFetch]
+    [authFetch, notifyCounts]
   );
 
   useEffect(() => {
     let cancelled = false;
     queueMicrotask(() => {
       if (cancelled) return;
-      void fetchSkills();
+      if (!hasSkillsRef.current) {
+        const cached = readAgentSkillsCache();
+        if (cached) {
+          hasSkillsRef.current = true;
+          setSkills(cached);
+          notifyCounts(cached);
+          setLoading(false);
+          void fetchSkills({ silent: true });
+          return;
+        }
+      } else {
+        notifyCounts(skillsRef.current);
+      }
+      void fetchSkills({ silent: hasSkillsRef.current });
     });
     return () => {
       cancelled = true;
     };
-  }, [fetchSkills]);
+  }, [fetchSkills, notifyCounts]);
 
   const openCreate = (template?: (typeof SKILL_TEMPLATES)[number]) => {
     setFormError(null);
@@ -214,7 +279,7 @@ export function ClaudeSkillsPanel({
           ? `Updated skill "${json.data.title}". Active sessions will use the latest rules automatically.`
           : `Created skill "${json.data.title}". Adham can now load it in live chats.`,
       });
-      await fetchSkills(true);
+      await fetchSkills({ silent: true, force: true });
     } catch {
       setFormError("Network error while saving skill.");
     } finally {
@@ -224,6 +289,12 @@ export function ClaudeSkillsPanel({
 
   const handleToggleEnabled = async (skill: ClaudeSkillItem) => {
     if (busyId) return;
+    const previous = skills;
+    const nextSkills = skills.map((s) =>
+      s._id === skill._id ? { ...s, enabled: !skill.enabled } : s
+    );
+    setSkills(nextSkills);
+    writeAgentSkillsCache(nextSkills);
     setBusyId(skill._id);
     setFeedback(null);
     try {
@@ -234,11 +305,18 @@ export function ClaudeSkillsPanel({
       });
       const json = await res.json().catch(() => null);
       if (!res.ok || !json?.success) {
+        setSkills(previous);
+        writeAgentSkillsCache(previous);
         setFeedback({ ok: false, msg: json?.error || "Could not update skill status." });
         return;
       }
-      setSkills((prev) => prev.map((s) => (s._id === skill._id ? json.data : s)));
+      const synced = previous.map((s) => (s._id === skill._id ? json.data : s));
+      setSkills(synced);
+      writeAgentSkillsCache(synced);
+      notifyCounts(synced);
     } catch {
+      setSkills(previous);
+      writeAgentSkillsCache(previous);
       setFeedback({ ok: false, msg: "Network error while updating skill." });
     } finally {
       setBusyId(null);
@@ -259,7 +337,10 @@ export function ClaudeSkillsPanel({
         return;
       }
       setConfirmDeleteId(null);
-      setSkills((prev) => prev.filter((s) => s._id !== skill._id));
+      const next = skills.filter((s) => s._id !== skill._id);
+      setSkills(next);
+      writeAgentSkillsCache(next);
+      notifyCounts(next);
       setFeedback({ ok: true, msg: `Removed skill "${skill.title}".` });
     } catch {
       setFeedback({ ok: false, msg: "Network error while deleting skill." });
@@ -314,7 +395,7 @@ export function ClaudeSkillsPanel({
           <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
               type="button"
-              onClick={() => void fetchSkills()}
+              onClick={() => void fetchSkills({ force: true })}
               disabled={loading}
               className="inline-flex items-center gap-1.5 min-h-[44px] sm:min-h-[38px] px-3 rounded-lg text-[12px] font-medium cursor-pointer disabled:opacity-50"
               style={{
@@ -623,7 +704,7 @@ export function ClaudeSkillsPanel({
           </div>
           <button
             type="button"
-            onClick={() => void fetchSkills()}
+            onClick={() => void fetchSkills({ force: true })}
             className="min-h-[44px] sm:min-h-[38px] px-4 rounded-lg text-[12px] font-semibold text-white cursor-pointer"
             style={{ background: "var(--bg-banner)" }}
           >
