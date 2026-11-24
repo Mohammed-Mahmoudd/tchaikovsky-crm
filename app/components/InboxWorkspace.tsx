@@ -27,11 +27,8 @@ import {
   ChevronDown,
   ChevronRight,
   Archive,
-  ArchiveRestore,
-  Bookmark,
   Loader2,
   RotateCcw,
-  User,
   Users,
   Tag,
 } from "lucide-react";
@@ -45,6 +42,9 @@ import { EmojiPicker, WHATSAPP_QUICK_REACTIONS, recordRecentEmoji } from "./Emoj
 import { formatMetaErrorMessage, ParsedMetaError } from "../utils/errorParser";
 import EditableLeadName from "./EditableLeadName";
 import { InboxBucketActions, type InboxBucketAction } from "./InboxBucketActions";
+import { ConversationAvatar } from "./ConversationAvatar";
+import { InboxConversationCard } from "./InboxConversationCard";
+import { getConversationAvatarUrl } from "../utils/conversationAvatar";
 import {
   buildBatchConversationExportFilename,
   buildConversationExportFilename,
@@ -55,7 +55,6 @@ import {
   type BatchExportFormat,
   type ExportConversationInput,
 } from "../utils/conversationExport";
-import { LeadLabelBadges } from "./LeadLabelBadges";
 import LeadLabelsSection from "./LeadLabelsSection";
 import LeadClaudeToggleSection from "./LeadClaudeToggleSection";
 import LeadCashInSection from "./LeadCashInSection";
@@ -184,29 +183,6 @@ const isRealPhone = (p?: string): boolean => {
   if (s.startsWith("live ") || s === "live") return false;
   const digits = p.replace(/[^\d]/g, "");
   return digits.length >= 7;
-};
-
-const getChatAvatarInitials = (name?: string | null): string => {
-  const raw = String(name || "").trim();
-  if (!raw) return "";
-  const lower = raw.toLowerCase();
-  if (
-    lower === "whatsapp contact" ||
-    lower === "instagram user" ||
-    lower === "facebook lead" ||
-    lower === "messenger user" ||
-    lower === "unknown" ||
-    lower.startsWith("live ")
-  ) {
-    return "";
-  }
-  const parts = raw
-    .split(/\s+/)
-    .map((p) => p.replace(/[^\p{L}\p{N}]/gu, ""))
-    .filter((p) => /\p{L}/u.test(p));
-  if (parts.length === 0) return "";
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return `${parts[0][0] || ""}${parts[1][0] || ""}`.toUpperCase();
 };
 
 const extractPhoneFromConversation = (conv?: any | null): string => {
@@ -351,14 +327,17 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     fetchGroupMemberProfile,
     fetchGroupMemberAvatars,
     fetchConversationAvatar,
+    queueConversationAvatars,
     openGroupMemberChat,
   } = useCRM();
 
   const conversations = isOperationInbox ? operationConversations : admissionsConversations;
   const effectiveAssignableAgents = isOperationInbox ? operationAssignableAgents : assignableAgents;
-  const [failedHeaderAvatars, setFailedHeaderAvatars] = useState<Record<string, boolean>>({});
+  const [failedAvatarUrls, setFailedAvatarUrls] = useState<Record<string, boolean>>({});
   const headerAvatarFetchRef = useRef<Set<string>>(new Set());
-  const headerAvatarErrorRefreshRef = useRef<Set<string>>(new Set());
+  const convListScrollRef = useRef<HTMLDivElement | null>(null);
+  const avatarObserverRef = useRef<IntersectionObserver | null>(null);
+  const observedAvatarNodesRef = useRef<Map<string, HTMLElement>>(new Map());
 
   // Periodic refresh every 30s to keep relative timestamps (e.g. "23m", "1 day ago") live
   const [, setTimeTick] = useState(0);
@@ -621,28 +600,94 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     return conversations.find((c) => c.id === activeChatId);
   }, [conversations, activeChatId]);
 
-  const rawHeaderAvatarUrl = !activeConv
-    ? null
-    : activeConv.isGroup && activeConv.channel === "WA"
-    ? activeConv.groupMeta?.avatarUrl || null
-    : !activeConv.isGroup
-    ? activeConv.profilePic || null
-    : null;
-  const headerAvatarUrl =
-    rawHeaderAvatarUrl && !failedHeaderAvatars[rawHeaderAvatarUrl]
-      ? rawHeaderAvatarUrl
-      : null;
+  const rawHeaderAvatarUrl = getConversationAvatarUrl(activeConv);
+  const isHeaderAvatarFailed = Boolean(rawHeaderAvatarUrl && failedAvatarUrls[rawHeaderAvatarUrl]);
+
+  const handleAvatarImageError = useCallback(
+    (convId: string, failedUrl: string) => {
+      if (failedUrl) {
+        setFailedAvatarUrls((prev) => (prev[failedUrl] ? prev : { ...prev, [failedUrl]: true }));
+      }
+      queueConversationAvatars([convId], { force: true });
+    },
+    [queueConversationAvatars]
+  );
+
+  // Eagerly resolve the top visible cards on mount, filter changes, or search updates
+  useEffect(() => {
+    const topMissingIds: string[] = [];
+    const limit = Math.min(filteredConversations.length, 16);
+    for (let i = 0; i < limit; i += 1) {
+      const conv = filteredConversations[i];
+      if (!getConversationAvatarUrl(conv)) {
+        topMissingIds.push(conv.id);
+      }
+    }
+    if (topMissingIds.length > 0) {
+      queueConversationAvatars(topMissingIds);
+    }
+  }, [filteredConversations, queueConversationAvatars]);
+
+  // Shared IntersectionObserver for cards scrolled into view
+  useEffect(() => {
+    const rootEl = convListScrollRef.current;
+    if (!rootEl || typeof IntersectionObserver === "undefined") return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visibleIds: string[] = [];
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const convId = (entry.target as HTMLElement).dataset.convAvatarId;
+          if (convId) {
+            visibleIds.push(convId);
+            observer.unobserve(entry.target);
+          }
+        }
+        if (visibleIds.length > 0) {
+          queueConversationAvatars(visibleIds);
+        }
+      },
+      { root: rootEl, rootMargin: "220px 0px", threshold: 0.01 }
+    );
+
+    avatarObserverRef.current = observer;
+    for (const node of observedAvatarNodesRef.current.values()) {
+      observer.observe(node);
+    }
+
+    return () => {
+      observer.disconnect();
+      if (avatarObserverRef.current === observer) {
+        avatarObserverRef.current = null;
+      }
+    };
+  }, [queueConversationAvatars]);
+
+  const registerAvatarObserver = useCallback(
+    (convId: string, el: HTMLElement | null, needsAvatar: boolean) => {
+      const prevEl = observedAvatarNodesRef.current.get(convId);
+      if (prevEl && prevEl !== el) {
+        avatarObserverRef.current?.unobserve(prevEl);
+        observedAvatarNodesRef.current.delete(convId);
+      }
+      if (el && needsAvatar) {
+        observedAvatarNodesRef.current.set(convId, el);
+        avatarObserverRef.current?.observe(el);
+      } else if (prevEl && !needsAvatar) {
+        avatarObserverRef.current?.unobserve(prevEl);
+        observedAvatarNodesRef.current.delete(convId);
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     if (!activeConv) return;
-    const isWaGroup = Boolean(activeConv.isGroup && activeConv.channel === "WA");
-    const hasAvatar = isWaGroup
-      ? Boolean(activeConv.groupMeta?.avatarUrl)
-      : Boolean(activeConv.profilePic);
-    if (hasAvatar) return;
+    if (getConversationAvatarUrl(activeConv)) return;
     if (headerAvatarFetchRef.current.has(activeConv.id)) return;
     headerAvatarFetchRef.current.add(activeConv.id);
-    if (isWaGroup) {
+    if (activeConv.isGroup && activeConv.channel === "WA") {
       fetchGroupParticipants(activeConv.id).catch(() => {});
     } else if (!activeConv.isGroup) {
       fetchConversationAvatar(activeConv.id).catch(() => {});
@@ -1251,18 +1296,26 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     [activeConv, canSendMessages, isReadOnly]
   );
 
-  const handleSelectConv = (id: string) => {
-    setActiveChatId(id);
-    setMobileView("chat");
-    setShowDetailsPanel(false);
-    if (isOperationInbox) {
-      markConversationAsRead(id);
-    }
-  };
+  const handleSelectConv = useCallback(
+    (id: string) => {
+      setActiveChatId(id);
+      setMobileView("chat");
+      setShowDetailsPanel(false);
+      if (isOperationInbox) {
+        markConversationAsRead(id);
+      }
+    },
+    [setActiveChatId, isOperationInbox, markConversationAsRead]
+  );
 
   const handleBackToList = () => {
     setMobileView("list");
   };
+
+  const bucketCtxRef = useRef({ conversations, activeChatId, activeFilter });
+  useEffect(() => {
+    bucketCtxRef.current = { conversations, activeChatId, activeFilter };
+  }, [conversations, activeChatId, activeFilter]);
 
   const applyInboxBucketChange = useCallback(
     (
@@ -1270,7 +1323,9 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
       action: InboxBucketAction
     ) => {
       if (isReadOnly) return;
-      const target = conversations.find((c) => c.id === convId);
+      const { conversations: currConvs, activeChatId: currActiveId, activeFilter: currFilter } =
+        bucketCtxRef.current;
+      const target = currConvs.find((c) => c.id === convId);
       if (!target) return;
 
       const prevState = {
@@ -1293,8 +1348,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
 
       const nextSimulated = { ...target, ...updates };
       if (
-        activeChatId === convId &&
-        !matchesInboxFilter(nextSimulated, activeFilter, user?.name)
+        currActiveId === convId &&
+        !matchesInboxFilter(nextSimulated, currFilter, user?.name)
       ) {
         setActiveChatId(null);
         setShowDetailsPanel(false);
@@ -1322,7 +1377,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
         },
       });
     },
-    [isReadOnly, conversations, user?.name, activeChatId, activeFilter, setActiveChatId, patchConversation]
+    [isReadOnly, user?.name, setActiveChatId, patchConversation]
   );
 
   const handleDownloadConversation = useCallback(
@@ -1535,7 +1590,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
       <div
         className={`
           flex flex-col h-full min-h-0 overflow-hidden
-          w-full md:w-[300px] lg:w-[320px] shrink-0
+          w-full md:w-[300px] lg:w-[320px] xl:w-[340px] shrink-0
           ${mobileView === "list" ? "flex" : "hidden md:flex"}
         `}
         style={{ background: "var(--bg-card)", borderRight: "1px solid var(--border-main)" }}
@@ -2091,7 +2146,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
           </div>
         )}
 
-        <div className="flex-1 min-h-0 overflow-y-auto relative">
+        <div ref={convListScrollRef} className="flex-1 min-h-0 overflow-y-auto relative">
           {filteredConversations.length === 0 ? (
             <div className="p-6 text-center">
               <div className="w-10 h-10 mx-auto mb-2 rounded-full flex items-center justify-center" style={{ background: "var(--bg-pill)" }}>
@@ -2232,151 +2287,37 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
               const convDone = isConversationDone(conv);
               const convArchived = isConversationArchived(conv);
               const convSaved = Boolean(conv.savedForAgent);
+              const cardAvatarUrl = getConversationAvatarUrl(conv);
+              const isCardAvatarFailed = Boolean(cardAvatarUrl && failedAvatarUrls[cardAvatarUrl]);
+              const subtitle = conv.isGroup
+                ? `Group · ${conv.agent}`
+                : conv.leadName && conv.leadName !== conv.name
+                ? `${conv.leadName} · ${conv.agent}`
+                : conv.phone && isRealPhone(conv.phone) && conv.phone !== conv.name
+                ? `${conv.phone} · ${conv.agent}`
+                : conv.agent;
+
               return (
-                <div
+                <InboxConversationCard
                   key={conv.id}
-                  onClick={() => handleSelectConv(conv.id)}
-                  className="group flex items-start justify-between p-3.5 cursor-pointer transition-colors"
-                  style={{
-                    borderBottom: "1px solid var(--border-main)",
-                    background: isActive ? "var(--bg-selected)" : undefined,
-                  }}
-                >
-                  <div className="min-w-0 pr-2 flex-1">
-                    <h3 className="text-[13px] font-semibold leading-tight mb-0.5 truncate flex items-center gap-1" style={{ color: "var(--text-primary)" }}>
-                      {conv.isGroup && (
-                        <svg
-                          className="w-3.5 h-3.5 shrink-0 opacity-75"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          aria-label="WhatsApp Group"
-                        >
-                          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-                          <circle cx="9" cy="7" r="4" />
-                          <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-                          <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-                        </svg>
-                      )}
-                      <span className="truncate">{conv.name}</span>
-                    </h3>
-                    <p className="text-[11px] truncate" style={{ color: isActive ? "#0066FF" : "var(--text-secondary)" }}>
-                      {conv.isGroup
-                        ? `Group · ${conv.agent}`
-                        : conv.leadName && conv.leadName !== conv.name
-                        ? `${conv.leadName} · ${conv.agent}`
-                        : conv.phone && isRealPhone(conv.phone) && conv.phone !== conv.name
-                        ? `${conv.phone} · ${conv.agent}`
-                        : conv.agent}
-                    </p>
-                    <LeadLabelBadges
-                      labelIds={conv.labels}
-                      catalog={labels}
-                      maxVisible={3}
-                      className="mt-1.5"
-                    />
-                  </div>
-                  <div className="flex flex-col items-end justify-between shrink-0 self-stretch gap-1">
-                    <div className="flex items-center gap-1">
-                      {!isReadOnly && (
-                        <div className="hidden md:flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              applyInboxBucketChange(conv.id, convDone ? "reopen" : "done");
-                            }}
-                            aria-label={convDone ? `Reopen ${conv.name}` : `Mark ${conv.name} as done`}
-                            title={convDone ? "Reopen to Inbox" : "Mark as done"}
-                            className="p-1 rounded transition-colors cursor-pointer hover:bg-[var(--bg-hover)]"
-                            style={{ color: convDone ? "#34C759" : "var(--text-secondary)" }}
-                          >
-                            {convDone ? (
-                              <RotateCcw className="w-3.5 h-3.5" />
-                            ) : (
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              applyInboxBucketChange(conv.id, convArchived ? "unarchive" : "archive");
-                            }}
-                            aria-label={convArchived ? `Unarchive ${conv.name}` : `Archive ${conv.name}`}
-                            title={convArchived ? "Unarchive" : "Archive"}
-                            className="p-1 rounded transition-colors cursor-pointer hover:bg-[var(--bg-hover)]"
-                            style={{ color: "var(--text-secondary)" }}
-                          >
-                            {convArchived ? (
-                              <ArchiveRestore className="w-3.5 h-3.5" />
-                            ) : (
-                              <Archive className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                        </div>
-                      )}
-                      {canDownloadChat && convSaved && (
-                        <span
-                          title="Saved for download"
-                          aria-label="Saved for download"
-                          className="inline-flex items-center justify-center px-1 py-0.5 rounded shrink-0 border"
-                          style={{
-                            background: "var(--label-purple-bg)",
-                            borderColor: "var(--label-purple-border)",
-                            color: "var(--label-purple-text)",
-                          }}
-                        >
-                          <Bookmark className="w-3 h-3" fill="currentColor" />
-                        </span>
-                      )}
-                      <span
-                        className="text-[9px] font-bold tracking-wide px-1.5 py-0.5 rounded"
-                        style={{
-                          background: isActive ? "var(--bg-card)" : "var(--bg-pill)",
-                          color: isActive ? "#0066FF" : "var(--text-secondary)",
-                        }}
-                      >
-                        {conv.isGroup
-                          ? "WA Group"
-                          : conv.metaChannel
-                          ? `${conv.channel} · ${conv.metaChannel}`
-                          : conv.channel}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1.5 mt-auto">
-                      {timeStr && (
-                        <span
-                          className={`inline-flex items-center gap-1 text-[10px] whitespace-nowrap ${
-                            showLeadTimer ? "font-bold" : "font-medium"
-                          }`}
-                          style={{
-                            color: isActive ? "#0066FF" : "var(--text-muted)",
-                            opacity: showLeadTimer ? 1 : isActive ? 0.9 : 0.85,
-                          }}
-                          title={showLeadTimer ? "Waiting for reply — last message from lead" : undefined}
-                        >
-                          {showLeadTimer && (
-                            <Clock
-                              className="w-3 h-3 shrink-0 stroke-[2.5]"
-                              role="img"
-                              aria-label="Waiting for reply — last message from lead"
-                            />
-                          )}
-                          <span>{timeStr}</span>
-                        </span>
-                      )}
-                      {Boolean(conv.unreadCount && conv.unreadCount > 0) && (
-                        <span className="flex items-center justify-center min-w-[16px] h-[16px] px-1 bg-[#0066FF] text-white text-[9px] font-bold rounded-full">
-                          {conv.unreadCount}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
+                  conv={conv}
+                  isActive={isActive}
+                  timeStr={timeStr}
+                  showLeadTimer={showLeadTimer}
+                  convDone={convDone}
+                  convArchived={convArchived}
+                  convSaved={convSaved}
+                  subtitle={subtitle}
+                  avatarUrl={cardAvatarUrl}
+                  isAvatarFailed={isCardAvatarFailed}
+                  isReadOnly={isReadOnly}
+                  canDownloadChat={canDownloadChat}
+                  labels={labels}
+                  onSelect={handleSelectConv}
+                  onApplyBucketChange={applyInboxBucketChange}
+                  onAvatarError={handleAvatarImageError}
+                  registerAvatarObserver={registerAvatarObserver}
+                />
               );
             })
           )}
@@ -2460,47 +2401,17 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                 </button>
                 <div className="min-w-0">
                   {(() => {
-                    const headerAvatarEl = headerAvatarUrl ? (
-                      <img
-                        src={headerAvatarUrl}
-                        alt=""
-                        referrerPolicy="no-referrer"
-                        onError={() => {
-                          const failedUrl = rawHeaderAvatarUrl;
-                          if (failedUrl) {
-                            setFailedHeaderAvatars((prev) => ({ ...prev, [failedUrl]: true }));
-                          }
-                          if (!headerAvatarErrorRefreshRef.current.has(activeConv.id)) {
-                            headerAvatarErrorRefreshRef.current.add(activeConv.id);
-                            if (activeConv.isGroup && activeConv.channel === "WA") {
-                              fetchGroupParticipants(activeConv.id, { forceRefresh: true }).catch(() => {});
-                            } else if (!activeConv.isGroup) {
-                              fetchConversationAvatar(activeConv.id, { forceRefresh: true }).catch(() => {});
-                            }
-                          }
-                        }}
-                        className="w-9 h-9 rounded-full object-cover shrink-0 border"
-                        style={{ borderColor: "var(--border-main)" }}
+                    const headerAvatarEl = (
+                      <ConversationAvatar
+                        conversationId={activeConv.id}
+                        src={rawHeaderAvatarUrl}
+                        name={activeConv.name}
+                        leadName={activeConv.leadName}
+                        isGroup={Boolean(activeConv.isGroup)}
+                        eager
+                        isFailed={isHeaderAvatarFailed}
+                        onImageError={handleAvatarImageError}
                       />
-                    ) : (
-                      <div
-                        className="w-9 h-9 rounded-full shrink-0 flex items-center justify-center border text-[12px] font-semibold"
-                        style={{
-                          background: "var(--bg-card)",
-                          borderColor: "var(--border-main)",
-                          color: "var(--text-secondary)",
-                        }}
-                        aria-label={activeConv.isGroup ? "WhatsApp Group" : activeConv.name}
-                      >
-                        {activeConv.isGroup ? (
-                          <Users className="w-4 h-4 text-[#0066FF]" />
-                        ) : (
-                          getChatAvatarInitials(activeConv.name) ||
-                          getChatAvatarInitials(activeConv.leadName) || (
-                            <User className="w-4 h-4" />
-                          )
-                        )}
-                      </div>
                     );
 
                     return activeConv.isGroup && activeConv.channel === "WA" ? (

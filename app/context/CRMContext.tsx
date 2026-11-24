@@ -73,6 +73,13 @@ import {
   resetPresenceClientSupportState,
 } from "../utils/presenceClient";
 import { formatLostReasonDisplay } from "../utils/lostReasons";
+import {
+  AVATAR_BATCH_SIZE,
+  AVATAR_ERROR_REFRESH_COOLDOWN_MS,
+  AVATAR_MISS_COOLDOWN_MS,
+  drainAvatarBatch,
+  isValidAvatarUrl,
+} from "../utils/conversationAvatar";
 
 export {
   computeUnreadFromMessages,
@@ -389,6 +396,10 @@ type CRMContextType = {
     chatId: string,
     options?: { forceRefresh?: boolean }
   ) => Promise<string | null>;
+  queueConversationAvatars: (
+    ids: string[],
+    options?: { force?: boolean }
+  ) => void;
   openGroupMemberChat: (
     groupId: string,
     participant: GroupParticipant,
@@ -1279,6 +1290,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   // ── Messages, avatars & group participant caches: live outside React state so slim polls never wipe them ──
   const messagesCacheRef = useRef<Map<string, Message[]>>(new Map());
   const profilePicCacheRef = useRef<Map<string, string>>(new Map());
+  const avatarQueueRef = useRef<Set<string>>(new Set());
+  const avatarForceQueueRef = useRef<Set<string>>(new Set());
+  const avatarInflightIdsRef = useRef<Set<string>>(new Set());
+  const avatarCheckedMissRef = useRef<Map<string, number>>(new Map());
+  const avatarErrorRefreshedRef = useRef<Map<string, number>>(new Map());
+  const avatarBatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastReadAtRef = useRef<Map<string, number>>(new Map());
   const groupParticipantsCacheRef = useRef<
     Map<string, { participants: GroupParticipant[]; groupMeta?: GroupMetaInfo }>
@@ -2370,8 +2387,27 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             : null;
         if (profilePic) {
           profilePicCacheRef.current.set(chatId, profilePic);
+          avatarCheckedMissRef.current.delete(chatId);
           setConversations((prev) =>
-            prev.map((c) => (c.id === chatId ? { ...c, profilePic } : c))
+            prev.map((c) => {
+              if (c.id !== chatId) return c;
+              if (c.isGroup && c.channel === "WA") {
+                const nextGroupMeta = {
+                  size: c.groupMeta?.size || c.groupParticipants?.length || 0,
+                  desc: c.groupMeta?.desc || "",
+                  creation: c.groupMeta?.creation ?? null,
+                  addressingMode: c.groupMeta?.addressingMode ?? null,
+                  announce: Boolean(c.groupMeta?.announce),
+                  restrict: Boolean(c.groupMeta?.restrict),
+                  isMeAdmin: Boolean(c.groupMeta?.isMeAdmin),
+                  participantsSyncedAt: c.groupMeta?.participantsSyncedAt ?? null,
+                  ...(c.groupMeta || {}),
+                  avatarUrl: profilePic,
+                };
+                return { ...c, groupMeta: nextGroupMeta };
+              }
+              return { ...c, profilePic };
+            })
           );
         }
         return profilePic;
@@ -2380,6 +2416,168 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       }
     },
     [authFetch]
+  );
+
+  const flushAvatarQueueRef = useRef<() => void>(() => {});
+
+  const flushAvatarQueue = useCallback(async () => {
+    avatarBatchTimerRef.current = null;
+    if (!token) return;
+
+    const { ids: batchIds, forceIds: batchForceIds } = drainAvatarBatch({
+      normalQueue: avatarQueueRef.current,
+      forceQueue: avatarForceQueueRef.current,
+      maxBatchSize: AVATAR_BATCH_SIZE,
+    });
+    if (batchIds.length === 0) return;
+
+    for (const id of batchIds) {
+      avatarInflightIdsRef.current.add(id);
+    }
+
+    if (
+      (avatarQueueRef.current.size > 0 || avatarForceQueueRef.current.size > 0) &&
+      !avatarBatchTimerRef.current
+    ) {
+      avatarBatchTimerRef.current = setTimeout(() => {
+        flushAvatarQueueRef.current();
+      }, 60);
+    }
+
+    try {
+      let res = await authFetch(`${API}/messages/avatars`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: batchIds, forceIds: batchForceIds }),
+      }).catch(() => null);
+      if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+        res = await authFetch(`${DIRECT_API}/messages/avatars`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: batchIds, forceIds: batchForceIds }),
+        }).catch(() => null);
+      }
+      if (!res || !res.ok) return;
+
+      const json = await res.json().catch(() => null);
+      const avatars =
+        json?.success && json?.data?.avatars && typeof json.data.avatars === "object"
+          ? (json.data.avatars as Record<string, string | null>)
+          : null;
+      if (!avatars) return;
+
+      const now = Date.now();
+      const resolvedUrls = new Map<string, string>();
+
+      for (const id of batchIds) {
+        const raw = avatars[id];
+        if (isValidAvatarUrl(raw)) {
+          const clean = raw.trim();
+          resolvedUrls.set(id, clean);
+          profilePicCacheRef.current.set(id, clean);
+          avatarCheckedMissRef.current.delete(id);
+        } else {
+          avatarCheckedMissRef.current.set(id, now);
+        }
+      }
+
+      if (resolvedUrls.size > 0) {
+        setConversations((prev) => {
+          let changed = false;
+          const next = prev.map((c) => {
+            const resolvedUrl = resolvedUrls.get(c.id);
+            if (!resolvedUrl) return c;
+            if (c.isGroup && c.channel === "WA") {
+              if (c.groupMeta?.avatarUrl === resolvedUrl) return c;
+              changed = true;
+              const nextGroupMeta = {
+                size: c.groupMeta?.size || c.groupParticipants?.length || 0,
+                desc: c.groupMeta?.desc || "",
+                creation: c.groupMeta?.creation ?? null,
+                addressingMode: c.groupMeta?.addressingMode ?? null,
+                announce: Boolean(c.groupMeta?.announce),
+                restrict: Boolean(c.groupMeta?.restrict),
+                isMeAdmin: Boolean(c.groupMeta?.isMeAdmin),
+                participantsSyncedAt: c.groupMeta?.participantsSyncedAt ?? null,
+                ...(c.groupMeta || {}),
+                avatarUrl: resolvedUrl,
+              };
+              const cachedGroup = groupParticipantsCacheRef.current.get(c.id);
+              if (cachedGroup) {
+                groupParticipantsCacheRef.current.set(c.id, {
+                  ...cachedGroup,
+                  groupMeta: nextGroupMeta,
+                });
+              }
+              return { ...c, groupMeta: nextGroupMeta };
+            }
+            if (c.profilePic === resolvedUrl) return c;
+            changed = true;
+            return { ...c, profilePic: resolvedUrl };
+          });
+          if (!changed) return prev;
+          if (!isMetaReviewer) persistConversationsCache(next);
+          return next;
+        });
+      }
+    } catch {
+      // Transient failures leave IDs uncached so a later scroll can retry cleanly
+    } finally {
+      for (const id of batchIds) {
+        avatarInflightIdsRef.current.delete(id);
+      }
+    }
+  }, [authFetch, isMetaReviewer, token]);
+
+  useEffect(() => {
+    flushAvatarQueueRef.current = () => {
+      void flushAvatarQueue();
+    };
+  }, [flushAvatarQueue]);
+
+  useEffect(() => {
+    return () => {
+      if (avatarBatchTimerRef.current) {
+        clearTimeout(avatarBatchTimerRef.current);
+        avatarBatchTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const queueConversationAvatars = useCallback(
+    (ids: string[], options?: { force?: boolean }) => {
+      if (!token || !Array.isArray(ids) || ids.length === 0) return;
+      const force = Boolean(options?.force);
+      const now = Date.now();
+      let queuedAny = false;
+
+      for (const rawId of ids) {
+        const id = typeof rawId === "string" ? rawId.trim() : "";
+        if (!id || avatarInflightIdsRef.current.has(id)) continue;
+
+        if (force) {
+          const lastForcedAt = avatarErrorRefreshedRef.current.get(id) || 0;
+          if (now - lastForcedAt < AVATAR_ERROR_REFRESH_COOLDOWN_MS) continue;
+          avatarErrorRefreshedRef.current.set(id, now);
+          avatarCheckedMissRef.current.delete(id);
+          avatarForceQueueRef.current.add(id);
+          queuedAny = true;
+        } else {
+          if (profilePicCacheRef.current.has(id)) continue;
+          const missedAt = avatarCheckedMissRef.current.get(id) || 0;
+          if (missedAt && now - missedAt < AVATAR_MISS_COOLDOWN_MS) continue;
+          avatarQueueRef.current.add(id);
+          queuedAny = true;
+        }
+      }
+
+      if (queuedAny && !avatarBatchTimerRef.current) {
+        avatarBatchTimerRef.current = setTimeout(() => {
+          flushAvatarQueueRef.current();
+        }, 50);
+      }
+    },
+    [token]
   );
 
   // ── Reset state when auth token changes (e.g. after sign-out → sign-in) ──
@@ -2404,6 +2602,11 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         lastServerRevRef.current = 0;
         messagesCacheRef.current.clear();
         profilePicCacheRef.current.clear();
+        avatarQueueRef.current.clear();
+        avatarForceQueueRef.current.clear();
+        avatarInflightIdsRef.current.clear();
+        avatarCheckedMissRef.current.clear();
+        avatarErrorRefreshedRef.current.clear();
         lastReadAtRef.current.clear();
         pendingPatchesRef.current.clear();
         recentlyCreatedRef.current.clear();
@@ -2418,6 +2621,11 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         lastServerRevRef.current = 0;
         messagesCacheRef.current.clear();
         profilePicCacheRef.current.clear();
+        avatarQueueRef.current.clear();
+        avatarForceQueueRef.current.clear();
+        avatarInflightIdsRef.current.clear();
+        avatarCheckedMissRef.current.clear();
+        avatarErrorRefreshedRef.current.clear();
         lastReadAtRef.current.clear();
         pendingPatchesRef.current.clear();
         recentlyCreatedRef.current.clear();
@@ -2769,6 +2977,16 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                           claudePausedAt: normRemote.claudePausedAt,
                           claudeLastRepliedAt: normRemote.claudeLastRepliedAt,
                           claudeLastError: normRemote.claudeLastError,
+                          profilePic:
+                            normRemote.profilePic ??
+                            profilePicCacheRef.current.get(conversationId) ??
+                            existing.profilePic,
+                          groupMeta:
+                            normRemote.groupMeta &&
+                            !normRemote.groupMeta.avatarUrl &&
+                            existing.groupMeta?.avatarUrl
+                              ? { ...normRemote.groupMeta, avatarUrl: existing.groupMeta.avatarUrl }
+                              : normRemote.groupMeta || existing.groupMeta,
                         }
                       : {}),
                     lastMessageAt: Math.max(
@@ -3083,19 +3301,44 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 })
               );
             } else if (payload.type === "conversation_avatar_updated" && payload.data) {
-              const { conversationId, profilePic } = payload.data;
-              if (
-                !conversationId ||
-                typeof profilePic !== "string" ||
-                !/^https?:\/\//i.test(profilePic.trim())
-              ) {
+              const { conversationId, profilePic, avatarUrl, isGroup } = payload.data;
+              const rawPic = isGroup ? avatarUrl || profilePic : profilePic;
+              if (!conversationId || !isValidAvatarUrl(rawPic)) {
                 return;
               }
-              const cleanPic = profilePic.trim();
+              const cleanPic = rawPic.trim();
               profilePicCacheRef.current.set(conversationId, cleanPic);
-              setConversations((prev) =>
-                prev.map((c) => (c.id === conversationId ? { ...c, profilePic: cleanPic } : c))
-              );
+              avatarCheckedMissRef.current.delete(conversationId);
+              setConversations((prev) => {
+                const next = prev.map((c) => {
+                  if (c.id !== conversationId) return c;
+                  if (c.isGroup || isGroup) {
+                    const nextGroupMeta = {
+                      size: c.groupMeta?.size || c.groupParticipants?.length || 0,
+                      desc: c.groupMeta?.desc || "",
+                      creation: c.groupMeta?.creation ?? null,
+                      addressingMode: c.groupMeta?.addressingMode ?? null,
+                      announce: Boolean(c.groupMeta?.announce),
+                      restrict: Boolean(c.groupMeta?.restrict),
+                      isMeAdmin: Boolean(c.groupMeta?.isMeAdmin),
+                      participantsSyncedAt: c.groupMeta?.participantsSyncedAt ?? null,
+                      ...(c.groupMeta || {}),
+                      avatarUrl: cleanPic,
+                    };
+                    const cachedGroup = groupParticipantsCacheRef.current.get(conversationId);
+                    if (cachedGroup) {
+                      groupParticipantsCacheRef.current.set(conversationId, {
+                        ...cachedGroup,
+                        groupMeta: nextGroupMeta,
+                      });
+                    }
+                    return { ...c, groupMeta: nextGroupMeta };
+                  }
+                  return { ...c, profilePic: cleanPic };
+                });
+                if (!isMetaReviewer) persistConversationsCache(next);
+                return next;
+              });
             } else if (payload.type === "group_participants_updated" && payload.data) {
               const { conversationId, groupParticipants, groupMeta } = payload.data;
               if (!conversationId || !Array.isArray(groupParticipants)) return;
@@ -5603,6 +5846,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         fetchGroupMemberProfile,
         fetchGroupMemberAvatars,
         fetchConversationAvatar,
+        queueConversationAvatars,
         openGroupMemberChat,
         pushSupported,
         pushEnabled,
