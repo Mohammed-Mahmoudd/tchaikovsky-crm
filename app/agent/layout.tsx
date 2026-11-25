@@ -9,6 +9,7 @@ import { ClaudeStatusPill } from "../components/ClaudeUiPrimitives";
 import { SlideOverChatDrawer, useSlideOverChatDrawer } from "../components/SlideOverChatDrawer";
 import { AgentSandboxDrawer, useAgentSandboxDrawer } from "../components/agent/AgentSandboxDrawer";
 import { AgentWorkspaceProvider, useAgentCore } from "../context/AgentWorkspaceContext";
+import { resolveLeadAgentScopeForPath } from "../utils/followupAgent";
 
 const PAGE_META: Record<string, { title: string; subtitle: string }> = {
   "/agent": {
@@ -22,6 +23,10 @@ const PAGE_META: Record<string, { title: string; subtitle: string }> = {
   "/agent/studio": {
     title: "Agent Studio",
     subtitle: "Configure Adham's playbook, trained skills, guardrails, and branch discovery slots.",
+  },
+  "/agent/follow-up": {
+    title: "Follow-up",
+    subtitle: "Manage Adham's follow-ups, instructions, skills, and assigned Contacted leads.",
   },
 };
 
@@ -164,6 +169,7 @@ function AgentLayoutInner({
 
   const meta = PAGE_META[pathname] ?? PAGE_META["/agent"];
   const isOverview = pathname === "/agent";
+  const isFollowUpPage = pathname === "/agent/follow-up";
   const isSetupComplete = Boolean(
     statusData?.connection.hasApiKey && statusData?.connection.hasAgentId
   );
@@ -198,7 +204,7 @@ function AgentLayoutInner({
             </div>
 
             <div className="flex flex-wrap items-center gap-2 shrink-0">
-              {!isOverview && settingsDraft && (
+              {!isOverview && !isFollowUpPage && settingsDraft && (
                 <>
                   <ClaudeStatusPill
                     label={
@@ -254,20 +260,22 @@ function AgentLayoutInner({
                 </Link>
               )}
 
-              <button
-                type="button"
-                onClick={onOpenSandbox}
-                className="inline-flex items-center gap-1.5 min-h-[44px] sm:min-h-[36px] px-3 rounded-lg text-[11.5px] font-semibold cursor-pointer hover:bg-[var(--bg-hover)]"
-                style={{
-                  background: "var(--bg-card)",
-                  border: "1px solid var(--border-input)",
-                  color: "var(--text-primary)",
-                  boxShadow: "var(--shadow-card)",
-                }}
-              >
-                <Sparkles className="w-3.5 h-3.5" style={{ color: "var(--bg-banner)" }} />
-                <span>Test Adham</span>
-              </button>
+              {!isFollowUpPage && (
+                <button
+                  type="button"
+                  onClick={onOpenSandbox}
+                  className="inline-flex items-center gap-1.5 min-h-[44px] sm:min-h-[36px] px-3 rounded-lg text-[11.5px] font-semibold cursor-pointer hover:bg-[var(--bg-hover)]"
+                  style={{
+                    background: "var(--bg-card)",
+                    border: "1px solid var(--border-input)",
+                    color: "var(--text-primary)",
+                    boxShadow: "var(--shadow-card)",
+                  }}
+                >
+                  <Sparkles className="w-3.5 h-3.5" style={{ color: "var(--bg-banner)" }} />
+                  <span>Test Adham</span>
+                </button>
+              )}
 
               {isOverview && (
                 <Link
@@ -295,6 +303,7 @@ function AgentLayoutInner({
         onCloseDetails={() => chatDrawer.setShowDetails(false)}
         onClose={chatDrawer.close}
         onAnimationEnd={chatDrawer.handleAnimationEnd}
+        agentScope={resolveLeadAgentScopeForPath(pathname)}
       />
 
       <AgentSandboxDrawer

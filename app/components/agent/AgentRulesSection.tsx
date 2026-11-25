@@ -1,8 +1,9 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import { AlertCircle, Check, ExternalLink } from "lucide-react";
 import { useAgentCore } from "../../context/AgentWorkspaceContext";
+import { resolveClaudeSendMode } from "../../utils/claudeAgent";
 import { ClaudeSettingSwitch, ClaudeStatusPill } from "../ClaudeUiPrimitives";
 import { AgentWorkspaceError, AgentWorkspaceLoading } from "./AgentShellHelpers";
 
@@ -26,6 +27,8 @@ export function AgentRulesSection() {
     handleCreateAgentOnPlatform,
   } = useAgentCore();
 
+  const [confirmAutoMode, setConfirmAutoMode] = useState(false);
+
   if (loadingStatus && !statusData) {
     return <AgentWorkspaceLoading label="Loading Rules and Guardrails" />;
   }
@@ -44,6 +47,17 @@ export function AgentRulesSection() {
   }
 
   const { connection, platformAgent } = statusData;
+  const currentSendMode = resolveClaudeSendMode(settingsDraft);
+
+  const handleModeSelect = (nextMode: "draft" | "auto") => {
+    if (nextMode === currentSendMode) return;
+    if (nextMode === "auto") {
+      setConfirmAutoMode(true);
+      return;
+    }
+    setConfirmAutoMode(false);
+    updateSettingsDraft((prev) => ({ ...prev, sendMode: "draft" }));
+  };
 
   return (
     <div className="space-y-4">
@@ -63,6 +77,110 @@ export function AgentRulesSection() {
           <p className="text-[11.5px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
             Control how Adham works alongside your admission officers.
           </p>
+        </div>
+
+        {/* How Adham sends messages (Draft vs Auto-send) */}
+        <div className="space-y-2 pt-1">
+          <span className="block text-[12px] font-semibold" style={{ color: "var(--text-primary)" }}>
+            How Adham sends messages
+          </span>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => handleModeSelect("draft")}
+              className="text-left rounded-lg p-3.5 cursor-pointer transition-colors"
+              style={{
+                background:
+                  currentSendMode === "draft" ? "var(--bg-selected)" : "var(--bg-panel)",
+                border: `1px solid ${
+                  currentSendMode === "draft"
+                    ? "var(--label-blue-border)"
+                    : "var(--border-main)"
+                }`,
+              }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[13px] font-semibold" style={{ color: "var(--text-primary)" }}>
+                  Draft before sending (Default)
+                </span>
+                {currentSendMode === "draft" && (
+                  <ClaudeStatusPill label="Active" tone="blue" />
+                )}
+              </div>
+              <p className="text-[11.5px] mt-1" style={{ color: "var(--text-secondary)" }}>
+                Adham writes a draft message in the chat composer for you to review and send, then turns off automatically.
+              </p>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleModeSelect("auto")}
+              className="text-left rounded-lg p-3.5 cursor-pointer transition-colors"
+              style={{
+                background:
+                  currentSendMode === "auto" ? "var(--bg-selected)" : "var(--bg-panel)",
+                border: `1px solid ${
+                  currentSendMode === "auto"
+                    ? "var(--label-amber-border)"
+                    : "var(--border-main)"
+                }`,
+              }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[13px] font-semibold" style={{ color: "var(--text-primary)" }}>
+                  Send automatically
+                </span>
+                {currentSendMode === "auto" && (
+                  <ClaudeStatusPill label="Active" tone="amber" />
+                )}
+              </div>
+              <p className="text-[11.5px] mt-1" style={{ color: "var(--text-secondary)" }}>
+                Adham replies directly to leads and stays active on the conversation after the first message is sent.
+              </p>
+            </button>
+          </div>
+
+          {confirmAutoMode && (
+            <div
+              className="rounded-lg p-3.5 space-y-2.5"
+              style={{
+                background: "var(--label-amber-bg)",
+                border: "1px solid var(--label-amber-border)",
+              }}
+            >
+              <p className="text-[12px] font-semibold" style={{ color: "var(--label-amber-text)" }}>
+                Turn on automatic sending?
+              </p>
+              <p className="text-[11.5px]" style={{ color: "var(--text-primary)" }}>
+                When active on a chat, Adham will reply directly to the lead without waiting in the composer draft box.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    updateSettingsDraft((prev) => ({ ...prev, sendMode: "auto" }));
+                    setConfirmAutoMode(false);
+                  }}
+                  className="min-h-[38px] px-3 rounded-lg text-[11.5px] font-semibold text-white cursor-pointer"
+                  style={{ background: "var(--bg-banner)" }}
+                >
+                  Use automatic sending
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmAutoMode(false)}
+                  className="min-h-[38px] px-3 rounded-lg text-[11.5px] font-medium cursor-pointer"
+                  style={{
+                    background: "var(--bg-card)",
+                    border: "1px solid var(--border-input)",
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  Keep draft before sending
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="space-y-3.5 pt-1">

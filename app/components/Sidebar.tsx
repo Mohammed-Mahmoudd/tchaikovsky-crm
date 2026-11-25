@@ -24,6 +24,7 @@ import {
   Bot,
   ShieldCheck,
   Layers,
+  Repeat,
 } from 'lucide-react';
 
 import { useCRM } from '../context/CRMContext';
@@ -94,7 +95,7 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
     if (normalizeRole(user?.role) !== 'chairman' || agentWarmStartedRef.current) return;
     agentWarmStartedRef.current = true;
 
-    const agentRoutes = ['/agent', '/agent/leads', '/agent/studio'];
+    const agentRoutes = ['/agent', '/agent/leads', '/agent/studio', '/agent/follow-up'];
     for (const route of agentRoutes) {
       router.prefetch(route);
     }
@@ -610,6 +611,8 @@ function renderSidebarIcon(icon: SidebarIconKey, size: 'md' | 'sm' = 'md') {
       return <Users className={cls} />;
     case 'agent-studio':
       return <Layers className={cls} />;
+    case 'agent-follow-up':
+      return <Repeat className={cls} />;
     case 'profile':
       return <User className={cls} />;
   }

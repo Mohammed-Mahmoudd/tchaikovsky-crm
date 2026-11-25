@@ -209,6 +209,8 @@ export type Conversation = {
   claudePausedAt?: string | null;
   claudeLastRepliedAt?: string | null;
   claudeLastError?: string;
+  claudeDraftText?: string;
+  claudeDraftAt?: string | null;
   messages: Message[];
   createdAt?: string;
   updatedAt?: string;
@@ -352,6 +354,7 @@ type CRMContextType = {
       claudePaused?: boolean;
       reason?: string;
       resetSession?: boolean;
+      clearDraft?: boolean;
       triggerReply?: boolean;
     }
   ) => Promise<{
@@ -359,6 +362,7 @@ type CRMContextType = {
     error?: string;
     autoReplyTriggered?: boolean;
     autoReplySkippedReason?: string | null;
+    sendMode?: "draft" | "auto";
   }>;
   createManualLead: (input: CreateManualLeadInput) => Promise<CreateManualLeadResult>;
   markConversationAsRead: (id: string) => Promise<void>;
@@ -1462,6 +1466,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       claudePausedAt: c.claudePausedAt ? String(c.claudePausedAt) : null,
       claudeLastRepliedAt: c.claudeLastRepliedAt ? String(c.claudeLastRepliedAt) : null,
       claudeLastError: typeof c.claudeLastError === "string" ? c.claudeLastError : "",
+      claudeDraftText: typeof c.claudeDraftText === "string" ? c.claudeDraftText : "",
+      claudeDraftAt: c.claudeDraftAt ? String(c.claudeDraftAt) : null,
       groupParticipants: Array.isArray(c.groupParticipants) ? c.groupParticipants : undefined,
       groupMeta: c.groupMeta || undefined,
     };
@@ -2108,6 +2114,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               claudePausedAt: normActive.claudePausedAt,
               claudeLastRepliedAt: normActive.claudeLastRepliedAt,
               claudeLastError: normActive.claudeLastError,
+              claudeDraftText: normActive.claudeDraftText,
+              claudeDraftAt: normActive.claudeDraftAt,
               lastReadAt: isOpActive
                 ? Math.max(effectiveActiveReadAt || 0, c.lastReadAt || 0) || undefined
                 : c.lastReadAt,
@@ -2977,6 +2985,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                           claudePausedAt: normRemote.claudePausedAt,
                           claudeLastRepliedAt: normRemote.claudeLastRepliedAt,
                           claudeLastError: normRemote.claudeLastError,
+                          claudeDraftText: normRemote.claudeDraftText,
+                          claudeDraftAt: normRemote.claudeDraftAt,
                           profilePic:
                             normRemote.profilePic ??
                             profilePicCacheRef.current.get(conversationId) ??
@@ -3469,6 +3479,26 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             } else if (payload.type === "claude_settings_updated") {
               if (typeof window !== "undefined") {
                 window.dispatchEvent(new CustomEvent("crm:claude-settings-updated"));
+              }
+            } else if (payload.type === "followup_updated" && payload.data) {
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(
+                  new CustomEvent("crm:followup-updated", { detail: payload.data })
+                );
+              }
+            } else if (payload.type === "followup_settings_updated") {
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("crm:followup-settings-updated"));
+              }
+            } else if (payload.type === "followup_skills_updated") {
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("crm:followup-skills-updated"));
+              }
+            } else if (payload.type === "followup_activity_updated" && payload.data) {
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(
+                  new CustomEvent("crm:followup-activity-updated", { detail: payload.data })
+                );
               }
             } else if (payload.type === "conversations_saved_bulk" && payload.data) {
               const {
@@ -4575,6 +4605,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         claudePaused?: boolean;
         reason?: string;
         resetSession?: boolean;
+        clearDraft?: boolean;
         triggerReply?: boolean;
       }
     ): Promise<{
@@ -4582,6 +4613,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       error?: string;
       autoReplyTriggered?: boolean;
       autoReplySkippedReason?: string | null;
+      sendMode?: "draft" | "auto";
     }> => {
       if (isReadOnly) {
         return { ok: false, error: "View-only account: modifications are disabled." };
@@ -4618,6 +4650,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     claudePausedAt: norm.claudePausedAt,
                     claudeLastRepliedAt: norm.claudeLastRepliedAt,
                     claudeLastError: norm.claudeLastError,
+                    claudeDraftText: norm.claudeDraftText,
+                    claudeDraftAt: norm.claudeDraftAt,
                   }
                 : c
             );
@@ -4630,6 +4664,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           autoReplyTriggered: Boolean(json.autoReplyTriggered),
           autoReplySkippedReason:
             typeof json.autoReplySkippedReason === "string" ? json.autoReplySkippedReason : null,
+          sendMode: json.sendMode === "auto" || json.sendMode === "draft" ? json.sendMode : undefined,
         };
       } catch {
         return { ok: false, error: "Network error while updating Claude status." };

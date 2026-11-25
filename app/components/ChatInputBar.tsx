@@ -20,7 +20,10 @@ import { ComposerAssistBar, FormatAction } from "./ComposerAssistBar";
 import { FastRepliesPopover } from "./FastRepliesPopover";
 import { FastReplyModal } from "./FastReplyModal";
 import { GroupMentionPopover } from "./GroupMentionPopover";
-import { useAuth } from "./AuthProvider";
+import { ComposerAgentControl, type ComposerAgentNotice } from "./ComposerAgentControl";
+import { useAuth, normalizeRole } from "./AuthProvider";
+import type { LeadAgentScope } from "../utils/followupAgent";
+import type { ComposerAgentId } from "../utils/composerAgent";
 import {
   applyMentionSelection,
   detectMentionTrigger,
@@ -299,6 +302,14 @@ interface ChatInputBarProps {
   onCancelReply?: () => void;
   onJumpToMessage?: (id: string) => void;
   externalDroppedFiles?: { files: File[]; timestamp: number } | null;
+  inboxMode?: "admissions" | "operation";
+  agentScope?: LeadAgentScope;
+  claudeEnabled?: boolean;
+  claudePaused?: boolean;
+  pipeline?: string;
+  onDraftGenerated?: (agent: ComposerAgentId, text: string) => void;
+  onAgentGeneratingChange?: (agent: ComposerAgentId | null) => void;
+  agentRewriteRequest?: { id: number; agent: ComposerAgentId } | null;
 }
 
 export const ChatInputBar = React.memo(function ChatInputBar({
@@ -328,13 +339,24 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   onCancelReply,
   onJumpToMessage,
   externalDroppedFiles,
+  inboxMode = "admissions",
+  agentScope = "both",
+  claudeEnabled = false,
+  claudePaused = false,
+  pipeline = "",
+  onDraftGenerated,
+  onAgentGeneratingChange,
+  agentRewriteRequest = null,
 }: ChatInputBarProps) {
-  const { authFetch } = useAuth();
+  const { user, authFetch } = useAuth();
+  const isChairman = normalizeRole(user?.role) === "chairman";
   // Local state completely isolated from parent page — typing does NOT re-render chat or sidebar
   const [text, setText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
+  const [showAgentTray, setShowAgentTray] = useState(false);
+  const [agentNotice, setAgentNotice] = useState<ComposerAgentNotice | null>(null);
   const [queuedAttachments, setQueuedAttachments] = useState<QueuedAttachment[]>([]);
   const [selectedMentions, setSelectedMentions] = useState<ComposerMentionItem[]>([]);
   const [mentionAll, setMentionAll] = useState(false);
@@ -415,11 +437,14 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     setIsSending(false);
     setShowEmojiPicker(false);
     setShowAttachMenu(false);
+    setShowAgentTray(false);
+    setAgentNotice(null);
+    onAgentGeneratingChange?.(null);
     setQueuedAttachments([]);
     if (typeof window !== "undefined" && window.innerWidth >= 768) {
       inputRef.current?.focus();
     }
-  }, [chatId]);
+  }, [chatId, onAgentGeneratingChange]);
 
   // Close attach popover when clicking outside
   useEffect(() => {
@@ -778,6 +803,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     setIsSending(true);
     setShowEmojiPicker(false);
     setShowAttachMenu(false);
+    setShowAgentTray(false);
     // Optimistically clear immediately so the user can keep typing without waiting
     setText("");
     setSelectedMentions([]);
@@ -848,6 +874,30 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   const isWindowClosed = windowLeft === "Closed";
   const isDisabled = isSending || isReadOnly || !canSendMessages;
   const hasQueuedAttachments = queuedAttachments.length > 0;
+  const showAgentControl = Boolean(
+    isChairman &&
+      !isGroup &&
+      inboxMode !== "operation" &&
+      !chatId.startsWith("op_") &&
+      !editingMessage &&
+      !isReadOnly &&
+      canSendMessages
+  );
+
+  // Auto-dismiss calm info notices after 5s
+  useEffect(() => {
+    if (!agentNotice || agentNotice.tone !== "info") return;
+    const t = setTimeout(() => setAgentNotice(null), 5000);
+    return () => clearTimeout(t);
+  }, [agentNotice]);
+
+  const handleInsertAgentDraft = useCallback(
+    (agent: ComposerAgentId, draftText: string) => {
+      setAgentNotice(null);
+      onDraftGenerated?.(agent, draftText);
+    },
+    [onDraftGenerated]
+  );
 
   // ── Fast Replies trigger detection and matching ─────────────────────────
   const slashMatch = useMemo(() => {
@@ -1541,6 +1591,42 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         />
       )}
 
+      {/* AI Agent Notice Banner */}
+      {showAgentControl && agentNotice && (
+        <div
+          className="rounded-lg px-3 py-1.5 mb-2 flex items-center justify-between gap-2 border text-[11.5px]"
+          style={
+            agentNotice.tone === "error"
+              ? {
+                  background: "var(--label-red-bg)",
+                  borderColor: "var(--label-red-border)",
+                  color: "var(--label-red-text)",
+                }
+              : agentNotice.tone === "warning"
+              ? {
+                  background: "var(--label-amber-bg)",
+                  borderColor: "var(--label-amber-border)",
+                  color: "var(--label-amber-text)",
+                }
+              : {
+                  background: "var(--bg-pill)",
+                  borderColor: "var(--border-input)",
+                  color: "var(--text-secondary)",
+                }
+          }
+        >
+          <span className="min-w-0 break-words">{agentNotice.message}</span>
+          <button
+            type="button"
+            onClick={() => setAgentNotice(null)}
+            aria-label="Dismiss agent message"
+            className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/10 shrink-0 cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {isWindowClosed ? (
         <div
           className="rounded-[8px] p-4 text-[12px] text-center"
@@ -1561,6 +1647,28 @@ export const ChatInputBar = React.memo(function ChatInputBar({
               onClose={() => setShowEmojiPicker(false)}
               position="top"
               align="left"
+            />
+          )}
+
+          {/* Far-Left AI Agent Control */}
+          {showAgentControl && (
+            <ComposerAgentControl
+              chatId={chatId}
+              agentScope={agentScope}
+              claudeEnabled={claudeEnabled}
+              claudePaused={claudePaused}
+              pipeline={pipeline}
+              disabled={isDisabled}
+              isExpanded={showAgentTray}
+              onToggleExpanded={(next) => {
+                setShowAttachMenu(false);
+                setShowEmojiPicker(false);
+                setShowAgentTray((prev) => (typeof next === "boolean" ? next : !prev));
+              }}
+              onInsertDraft={handleInsertAgentDraft}
+              onStatusNotice={setAgentNotice}
+              onGeneratingChange={(agent) => onAgentGeneratingChange?.(agent)}
+              rewriteRequest={agentRewriteRequest}
             />
           )}
 
@@ -1609,6 +1717,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
                 disabled={isDisabled}
                 onClick={() => {
                   setShowEmojiPicker(false);
+                  setShowAgentTray(false);
                   setShowAttachMenu((prev) => !prev);
                 }}
                 title="Attach photo or file"
@@ -1635,6 +1744,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
             disabled={isDisabled}
             onClick={() => {
               setShowAttachMenu(false);
+              setShowAgentTray(false);
               setShowEmojiPicker((prev) => !prev);
             }}
             title="Emoji"

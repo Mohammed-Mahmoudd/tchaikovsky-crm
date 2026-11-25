@@ -20,6 +20,13 @@ import {
   writeAgentSkillsCache,
   writeAgentStatusCache,
   invalidateAgentActivityQueryCache,
+  readFollowUpStatusCache,
+  writeFollowUpStatusCache,
+  readFollowUpQueueQueryCache,
+  writeFollowUpQueueQueryCache,
+  invalidateFollowUpQueueQueryCache,
+  readScopedAgentCache,
+  writeScopedAgentCache,
 } from "./agentWorkspaceCache.ts";
 
 function createMemoryStorage() {
@@ -178,5 +185,86 @@ describe("agentWorkspaceCache", () => {
     assert.equal(readAgentActivityQueryCache(qKey, 15_000, 30_000), null);
     invalidateAgentActivityQueryCache();
     assert.equal(readAgentActivityQueryCache(qKey, 15_000, 15_000), null);
+  });
+
+  it("persists Follow-up status and per-query queue caches and invalidates them cleanly", () => {
+    const storage = createMemoryStorage();
+    const statusPayload = {
+      connection: {
+        hasApiKey: true,
+        hasAgentId: true,
+        agentIdSource: "synced",
+        agentId: "ag_fu_1",
+        hasEnvironmentId: true,
+        dryRun: true,
+      },
+      settings: {
+        key: "default",
+        enabled: false,
+        sendMode: "approval",
+        autoEnrollSilentLeads: false,
+        initialDelayHours: 24,
+        cadenceDays: [1, 3, 7],
+        maxAttempts: 3,
+        dailyCap: 25,
+        minGapSeconds: 90,
+        businessHoursStart: 10,
+        businessHoursEnd: 21,
+        allowedChannels: ["WA", "FB", "IG"],
+        pauseOnHumanReply: true,
+        stopOnReply: true,
+        allowAutoBooking: true,
+        autoBookDiscovery: false,
+        environmentId: "env_1",
+        lastSyncedAgentId: "ag_fu_1",
+        lastSyncedAt: null,
+      },
+      platformAgent: null,
+      platformError: null,
+      availableModels: [],
+      playbookDefaults: {
+        name: "Adham — Tchaikovsky Follow-up",
+        model: "claude-sonnet-4-6",
+        system: "prompt",
+      },
+    };
+
+    writeFollowUpStatusCache(statusPayload, storage);
+    assert.equal(readAgentMemorySnapshot(AGENT_CACHE_KEYS.followupStatus)?.connection.agentId, "ag_fu_1");
+    clearAgentWorkspaceMemoryCache(null);
+    assert.equal(readFollowUpStatusCache(60_000, storage)?.settings.dailyCap, 25);
+
+    const queueKey = "leads:channel=ALL&stage=Contacted&page=1";
+    const queuePayload = {
+      items: [],
+      pagination: { page: 1, limit: 30, totalFiltered: 1202, totalPages: 41 },
+      summary: {
+        total: 2653,
+        waReady: 900,
+        meta24h: 102,
+        meta7d: 200,
+        metaExpired: 1451,
+        enrolled: 2,
+        draftReady: 1,
+        scheduled: 1,
+        waitingReply: 0,
+        replied: 0,
+        completed: 0,
+        paused: 0,
+        sentToday: 0,
+        dailyCap: 25,
+        withinBusinessHours: true,
+      },
+    };
+
+    writeFollowUpQueueQueryCache(queueKey, queuePayload, 20_000);
+    writeScopedAgentCache(AGENT_CACHE_KEYS.followupQueueLeads, queuePayload, storage);
+    assert.equal(readFollowUpQueueQueryCache(queueKey, 15_000, 25_000)?.summary.draftReady, 1);
+    assert.equal(readFollowUpQueueQueryCache(queueKey, 15_000, 40_000), null);
+    assert.equal(readScopedAgentCache(AGENT_CACHE_KEYS.followupQueueLeads, 60_000, storage)?.pagination.totalFiltered, 1202);
+
+    invalidateFollowUpQueueQueryCache(storage);
+    assert.equal(readFollowUpQueueQueryCache(queueKey, 15_000, 25_000), null);
+    assert.equal(readScopedAgentCache(AGENT_CACHE_KEYS.followupQueueLeads, 60_000, storage), null);
   });
 });

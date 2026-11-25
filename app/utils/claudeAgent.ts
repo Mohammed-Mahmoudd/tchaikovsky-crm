@@ -21,8 +21,11 @@ export interface ClaudeBranchConfig {
   active: boolean;
 }
 
+export type ClaudeSendMode = "draft" | "auto";
+
 export interface ClaudeSettingsData {
   enabled: boolean;
+  sendMode?: ClaudeSendMode;
   pauseOnHumanReply: boolean;
   allowAutoBooking: boolean;
   allowLeadUpdates: boolean;
@@ -32,6 +35,13 @@ export interface ClaudeSettingsData {
   environmentId?: string;
   lastSyncedAgentId?: string;
   branches: ClaudeBranchConfig[];
+}
+
+/** Resolves the Admission Agent delivery mode, defaulting safely to "draft". */
+export function resolveClaudeSendMode(
+  settings?: { sendMode?: string | null } | null
+): ClaudeSendMode {
+  return settings?.sendMode === "auto" ? "auto" : "draft";
 }
 
 export interface PlatformAgentInfo {
@@ -434,6 +444,8 @@ const TOOL_DISPLAY_LABELS: Record<string, string> = {
   update_lead_details: "Updated lead CRM details (simulated)",
   escalate_to_human: "Escalated to human admission officer (simulated)",
   get_skill_guidance: "Loaded trained skill guidance",
+  schedule_next_followup: "Scheduled next follow-up (simulated)",
+  stop_followup: "Stopped follow-up sequence (simulated)",
 };
 
 /** Formats Managed Agent tool names into friendly disclosure labels in the Sandbox. */
@@ -447,7 +459,11 @@ export type ClaudeActivityOutcome =
   | "updated"
   | "escalated"
   | "silent"
-  | "error";
+  | "error"
+  | "draft"
+  | "followup_draft"
+  | "followup_sent"
+  | "skipped";
 
 export type ClaudeActivityFilter = "all" | "attention" | ClaudeActivityOutcome;
 export type ClaudeActivityWindow = "24h" | "all";
@@ -579,6 +595,11 @@ export function getActivityOutcomeMeta(outcome: ClaudeActivityOutcome): {
   tone: "green" | "blue" | "amber" | "red" | "slate";
 } {
   if (outcome === "booked") return { label: "Booked session", tone: "green" };
+  if (outcome === "followup_sent") return { label: "Follow-up sent", tone: "green" };
+  if (outcome === "draft" || outcome === "followup_draft") {
+    return { label: "Draft ready", tone: "blue" };
+  }
+  if (outcome === "skipped") return { label: "Skipped", tone: "slate" };
   if (outcome === "escalated") return { label: "Escalated", tone: "amber" };
   if (outcome === "silent") return { label: "Silent handoff", tone: "slate" };
   if (outcome === "updated") return { label: "Updated CRM", tone: "blue" };
@@ -617,11 +638,18 @@ export interface ClaudeActivationNoteResult {
 /** Formats user-facing feedback when enabling or resuming Adham AI on a lead. */
 export function formatClaudeActivationNote(
   verb: "Enabled" | "Resumed",
-  res: { autoReplyTriggered?: boolean; autoReplySkippedReason?: string | null }
+  res: {
+    autoReplyTriggered?: boolean;
+    autoReplySkippedReason?: string | null;
+    sendMode?: ClaudeSendMode;
+  }
 ): ClaudeActivationNoteResult {
   if (res.autoReplyTriggered) {
     return {
-      message: `${verb}. Adham is reading the chat and replying now.`,
+      message:
+        res.sendMode === "draft"
+          ? "Adham is writing a draft in the chat composer."
+          : `${verb}. Adham is reading the chat and replying now.`,
       tone: "info",
     };
   }

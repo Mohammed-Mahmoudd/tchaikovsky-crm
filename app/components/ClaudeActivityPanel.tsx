@@ -30,8 +30,10 @@ import {
   readAgentActivityCache,
   readAgentActivityQueryCache,
   readAgentMemorySnapshot,
+  readScopedAgentCache,
   writeAgentActivityCache,
   writeAgentActivityQueryCache,
+  writeScopedAgentCache,
 } from "../utils/agentWorkspaceCache";
 import { formatLastMessageTime } from "../utils/time";
 import { ClaudeStatusPill } from "./ClaudeUiPrimitives";
@@ -66,6 +68,12 @@ interface ClaudeActivityPanelProps {
   onOutcomeFilterChange?: (next: ClaudeActivityFilter) => void;
   onWindowFilterChange?: (next: ClaudeActivityWindow) => void;
   onSummaryChange?: (summary: ClaudeActivitySummary) => void;
+  apiBasePath?: string;
+  cacheKeyPrefix?: string;
+  sseEventName?: string;
+  emptySubtitle?: string;
+  filterOptions?: ReadonlyArray<{ id: ClaudeActivityFilter; label: string }>;
+  simpleMode?: boolean;
 }
 
 /**
@@ -80,10 +88,18 @@ export function ClaudeActivityPanel({
   onOutcomeFilterChange,
   onWindowFilterChange,
   onSummaryChange,
+  apiBasePath = "/crm-api/claude",
+  cacheKeyPrefix = "agent",
+  sseEventName = "crm:claude-activity-updated",
+  emptySubtitle = "Turns appear here automatically whenever Adham replies, books, updates, or escalates a lead.",
+  filterOptions = FILTER_OPTIONS,
+  simpleMode = false,
 }: ClaudeActivityPanelProps) {
   const { authFetch } = useAuth();
+  const baseCacheKey =
+    cacheKeyPrefix === "agent" ? AGENT_CACHE_KEYS.activity : `${cacheKeyPrefix}_activity_v1`;
 
-  const initialSnapshot = readAgentMemorySnapshot<CachedActivityPayload>(AGENT_CACHE_KEYS.activity);
+  const initialSnapshot = readAgentMemorySnapshot<CachedActivityPayload>(baseCacheKey);
 
   const [items, setItems] = useState<ClaudeActivityItem[]>(() => initialSnapshot?.items ?? []);
   const [summary, setSummary] = useState<ClaudeActivitySummary>(
@@ -141,7 +157,7 @@ export function ClaudeActivityPanel({
     async ({ silent = false, force = false }: { silent?: boolean; force?: boolean } = {}) => {
       const isDefaultQuery =
         outcomeFilter === "all" && windowFilter === "all" && !debouncedSearch;
-      const requestKey = `agent:activity:${outcomeFilter}:${windowFilter}:40:${debouncedSearch}`;
+      const requestKey = `${cacheKeyPrefix}:activity:${outcomeFilter}:${windowFilter}:40:${debouncedSearch}`;
 
       if (!force) {
         const cachedQuery = readAgentActivityQueryCache(requestKey);
@@ -156,7 +172,7 @@ export function ClaudeActivityPanel({
         }
 
         if (isDefaultQuery) {
-          const mem = readAgentMemorySnapshot<CachedActivityPayload>(AGENT_CACHE_KEYS.activity);
+          const mem = readAgentMemorySnapshot<CachedActivityPayload>(baseCacheKey);
           if (mem) {
             hasItemsRef.current = true;
             setItems(mem.items);
@@ -166,8 +182,10 @@ export function ClaudeActivityPanel({
           }
         } else {
           const baseSnapshot =
-            readAgentMemorySnapshot<CachedActivityPayload>(AGENT_CACHE_KEYS.activity) ??
-            readAgentActivityCache();
+            readAgentMemorySnapshot<CachedActivityPayload>(baseCacheKey) ??
+            (cacheKeyPrefix === "agent"
+              ? readAgentActivityCache()
+              : readScopedAgentCache<CachedActivityPayload>(baseCacheKey));
           if (baseSnapshot) {
             const optimistic = filterCachedActivityItems(baseSnapshot.items, {
               outcome: outcomeFilter,
@@ -196,7 +214,7 @@ export function ClaudeActivityPanel({
         if (debouncedSearch) params.set("search", debouncedSearch);
 
         const result = await dedupeAgentRequest(requestKey, async () => {
-          const res = await authFetch(`/crm-api/claude/activity?${params.toString()}`, {
+          const res = await authFetch(`${apiBasePath}/activity?${params.toString()}`, {
             cache: "no-store",
           });
           const json = await res.json().catch(() => null);
@@ -209,7 +227,11 @@ export function ClaudeActivityPanel({
           const nextSummary = (json.data.summary as ClaudeActivitySummary | undefined) ?? EMPTY_SUMMARY;
           writeAgentActivityQueryCache(requestKey, { items: nextItems, summary: nextSummary });
           if (isDefaultQuery) {
-            writeAgentActivityCache({ items: nextItems, summary: nextSummary });
+            if (cacheKeyPrefix === "agent") {
+              writeAgentActivityCache({ items: nextItems, summary: nextSummary });
+            } else {
+              writeScopedAgentCache(baseCacheKey, { items: nextItems, summary: nextSummary });
+            }
           }
           return { ok: true as const, items: nextItems, summary: nextSummary };
         });
@@ -234,7 +256,7 @@ export function ClaudeActivityPanel({
         setRefreshing(false);
       }
     },
-    [authFetch, debouncedSearch, outcomeFilter, windowFilter]
+    [apiBasePath, authFetch, baseCacheKey, cacheKeyPrefix, debouncedSearch, outcomeFilter, windowFilter]
   );
 
   useEffect(() => {
@@ -247,7 +269,10 @@ export function ClaudeActivityPanel({
         !debouncedSearch &&
         !hasItemsRef.current
       ) {
-        const cached = readAgentActivityCache();
+        const cached =
+          cacheKeyPrefix === "agent"
+            ? readAgentActivityCache()
+            : readScopedAgentCache<CachedActivityPayload>(baseCacheKey);
         if (cached) {
           hasItemsRef.current = true;
           setItems(cached.items);
@@ -265,7 +290,7 @@ export function ClaudeActivityPanel({
     return () => {
       cancelled = true;
     };
-  }, [debouncedSearch, fetchActivity, outcomeFilter, windowFilter]);
+  }, [baseCacheKey, cacheKeyPrefix, debouncedSearch, fetchActivity, outcomeFilter, windowFilter]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -273,11 +298,11 @@ export function ClaudeActivityPanel({
       invalidateAgentActivityQueryCache();
       void fetchActivity({ silent: true, force: true });
     };
-    window.addEventListener("crm:claude-activity-updated", handleLiveActivityUpdate);
+    window.addEventListener(sseEventName, handleLiveActivityUpdate);
     return () => {
-      window.removeEventListener("crm:claude-activity-updated", handleLiveActivityUpdate);
+      window.removeEventListener(sseEventName, handleLiveActivityUpdate);
     };
-  }, [fetchActivity]);
+  }, [fetchActivity, sseEventName]);
 
   const toggleExpanded = useCallback((id: string) => {
     setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -300,7 +325,7 @@ export function ClaudeActivityPanel({
   const activeOutcomeLabel =
     outcomeFilter === "attention"
       ? "Escalated & Errors"
-      : FILTER_OPTIONS.find((opt) => opt.id === outcomeFilter)?.label ?? "All";
+      : filterOptions.find((opt) => opt.id === outcomeFilter)?.label ?? "All";
 
   return (
     <section
@@ -457,7 +482,7 @@ export function ClaudeActivityPanel({
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
-            {FILTER_OPTIONS.map((opt) => {
+            {filterOptions.map((opt) => {
               const active = outcomeFilter === opt.id;
               return (
                 <button
@@ -572,7 +597,7 @@ export function ClaudeActivityPanel({
             <p className="text-[12px] max-w-md mx-auto" style={{ color: "var(--text-secondary)" }}>
               {windowFilter === "24h"
                 ? "No matching turns in the last 24 hours. Try switching to All recent."
-                : "Turns appear here automatically whenever Adham replies, books, updates, or escalates a lead."}
+                : emptySubtitle}
             </p>
             {hasActiveFilters && (
               <button
@@ -676,7 +701,7 @@ export function ClaudeActivityPanel({
                         className="text-[10.5px] font-semibold uppercase tracking-wide"
                         style={{ color: "var(--text-muted)" }}
                       >
-                        Lead
+                        {simpleMode ? "Context" : "Lead"}
                       </span>
                       <p
                         dir="auto"
@@ -730,7 +755,7 @@ export function ClaudeActivityPanel({
                   </div>
 
                   {/* Expandable Details (Skills & Full Text / Debug Latency) */}
-                  {hasDetails && (
+                  {(simpleMode ? hasLongText : hasDetails) && (
                     <div className="flex flex-col gap-1">
                       <div className="flex items-center justify-between gap-2">
                         <button
@@ -748,14 +773,14 @@ export function ClaudeActivityPanel({
                           />
                         </button>
 
-                        {!isExpanded && skillsUsed.length > 0 && (
+                        {!simpleMode && !isExpanded && skillsUsed.length > 0 && (
                           <span className="text-[11px] truncate" style={{ color: "var(--text-muted)" }}>
                             {skillsUsed.length} skill{skillsUsed.length === 1 ? "" : "s"} used
                           </span>
                         )}
                       </div>
 
-                      {isExpanded && (skillsUsed.length > 0 || (item.durationMs && item.durationMs > 0)) && (
+                      {!simpleMode && isExpanded && (skillsUsed.length > 0 || (item.durationMs && item.durationMs > 0)) && (
                         <div
                           className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] pt-0.5"
                           style={{ color: "var(--text-muted)" }}

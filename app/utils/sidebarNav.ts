@@ -12,6 +12,7 @@ export type SidebarIconKey =
   | "agent-overview"
   | "agent-leads"
   | "agent-studio"
+  | "agent-follow-up"
   | "profile";
 
 export type SidebarBadgeTone = "banner" | "amber" | "green" | "red" | "neutral";
@@ -380,6 +381,13 @@ export function buildSidebarNav({
         standaloneLabel: "Agent Studio",
         icon: "agent-studio",
         activePrefixes: ["/agent/skills"],
+      },
+      {
+        id: "agent-follow-up",
+        href: "/agent/follow-up",
+        label: "Follow-up",
+        standaloneLabel: "Agent Follow-up",
+        icon: "agent-follow-up",
       },
     ],
   });

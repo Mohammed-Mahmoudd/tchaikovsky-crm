@@ -35,7 +35,13 @@ import {
 import { useBranches } from "../lib/branches";
 import { BranchSelect } from "./BranchSelect";
 import { ChatInputBar, OutgoingAttachmentPayload, formatFileSize } from "./ChatInputBar";
+import { DraftMessageBubble } from "./DraftMessageBubble";
 import { GroupInfoPanel } from "./GroupInfoPanel";
+import {
+  type ChatTimelineDraft,
+  type ComposerAgentId,
+  resolveChatDraftState,
+} from "../utils/composerAgent";
 import { renderWhatsAppText } from "../utils/messageFormatting";
 import type { GroupParticipant, MessageMention } from "../utils/groupMentions";
 import { EmojiPicker, WHATSAPP_QUICK_REACTIONS, recordRecentEmoji } from "./EmojiPicker";
@@ -56,7 +62,6 @@ import {
   type ExportConversationInput,
 } from "../utils/conversationExport";
 import LeadLabelsSection from "./LeadLabelsSection";
-import LeadClaudeToggleSection from "./LeadClaudeToggleSection";
 import LeadCashInSection from "./LeadCashInSection";
 import PipelineStageSection from "./PipelineStageSection";
 import {
@@ -329,6 +334,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     fetchConversationAvatar,
     queueConversationAvatars,
     openGroupMemberChat,
+    updateConversationClaude,
   } = useCRM();
 
   const conversations = isOperationInbox ? operationConversations : admissionsConversations;
@@ -774,6 +780,31 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
   const dragDepthRef = useRef(0);
 
   // Scroll only the inner chat container so outer <main>/layout containers can never be scrolled
+  const [localTimelineDraft, setLocalTimelineDraft] = useState<ChatTimelineDraft | null>(null);
+  const [dismissedServerDraft, setDismissedServerDraft] = useState<{
+    chatId: string;
+    text: string;
+  } | null>(null);
+  const [agentGenerating, setAgentGenerating] = useState<ComposerAgentId | null>(null);
+  const [isSendingTimelineDraft, setIsSendingTimelineDraft] = useState(false);
+  const [agentRewriteRequest, setAgentRewriteRequest] = useState<{
+    id: number;
+    agent: ComposerAgentId;
+  } | null>(null);
+
+  const isStrictChairman = normalizeRole(user?.role) === "chairman";
+  const activeTimelineDraft = useMemo(() => {
+    if (!activeConv || !isStrictChairman || activeConv.isGroup || isOperationInbox) {
+      return null;
+    }
+    return resolveChatDraftState({
+      chatId: activeConv.id,
+      localDraft: localTimelineDraft,
+      serverDraftText: activeConv.claudeDraftText,
+      dismissedServerDraft,
+    });
+  }, [activeConv, dismissedServerDraft, isOperationInbox, isStrictChairman, localTimelineDraft]);
+
   const scrollChildIntoChatContainer = useCallback(
     (el: HTMLElement, block: "center" | "nearest", behavior: ScrollBehavior = "smooth") => {
       const container = chatScrollContainerRef.current;
@@ -988,6 +1019,20 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     return () => clearTimeout(timer);
   }, [replyingTo, scrollToBottom, scrollChildIntoChatContainer]);
 
+  const prevTimelineDraftSigRef = useRef<string>("");
+  useEffect(() => {
+    const sig = activeTimelineDraft ? `${activeTimelineDraft.chatId}:${activeTimelineDraft.text}` : "";
+    if (!sig || sig === prevTimelineDraftSigRef.current) {
+      prevTimelineDraftSigRef.current = sig;
+      return;
+    }
+    prevTimelineDraftSigRef.current = sig;
+    const t = setTimeout(() => {
+      scrollToBottom("smooth");
+    }, 40);
+    return () => clearTimeout(t);
+  }, [activeTimelineDraft, scrollToBottom]);
+
   const handleRefreshParticipants = useCallback(async () => {
     if (!activeConv || !activeConv.isGroup || activeConv.channel !== "WA") return;
     setIsLoadingParticipants(true);
@@ -1194,6 +1239,56 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
       finalizeOptimisticMessages,
     ]
   );
+
+  const handleSendTimelineDraft = useCallback(
+    async (draftTextToSend: string) => {
+      if (!activeConv || !draftTextToSend.trim() || isSendingTimelineDraft) return;
+      const targetChatId = activeConv.id;
+      const prevLocal = localTimelineDraft;
+      const prevServerDraft = activeConv.claudeDraftText || "";
+      const draftAgent = activeTimelineDraft?.agent || "admissions";
+
+      setIsSendingTimelineDraft(true);
+      if (prevServerDraft) {
+        setDismissedServerDraft({ chatId: targetChatId, text: prevServerDraft });
+      }
+      setLocalTimelineDraft(null);
+
+      const ok = await handleSendReply(draftTextToSend);
+      setIsSendingTimelineDraft(false);
+
+      if (ok) {
+        if (prevServerDraft) {
+          void updateConversationClaude(targetChatId, { clearDraft: true });
+        }
+      } else {
+        setDismissedServerDraft(null);
+        setLocalTimelineDraft(
+          prevLocal && prevLocal.chatId === targetChatId
+            ? prevLocal
+            : { chatId: targetChatId, agent: draftAgent, text: draftTextToSend }
+        );
+      }
+    },
+    [
+      activeConv,
+      activeTimelineDraft?.agent,
+      handleSendReply,
+      isSendingTimelineDraft,
+      localTimelineDraft,
+      updateConversationClaude,
+    ]
+  );
+
+  const handleDiscardTimelineDraft = useCallback(() => {
+    if (!activeConv) return;
+    const targetChatId = activeConv.id;
+    setLocalTimelineDraft(null);
+    if (activeConv.claudeDraftText) {
+      setDismissedServerDraft({ chatId: targetChatId, text: activeConv.claudeDraftText });
+      void updateConversationClaude(targetChatId, { clearDraft: true });
+    }
+  }, [activeConv, updateConversationClaude]);
 
   const handleSaveEditMessage = useCallback(
     async (
@@ -3518,6 +3613,31 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   );
                 });
               })()}
+              {activeTimelineDraft && (
+                <DraftMessageBubble
+                  agent={activeTimelineDraft.agent}
+                  text={activeTimelineDraft.text}
+                  channel={activeConv.channel}
+                  isRewriting={agentGenerating === activeTimelineDraft.agent}
+                  isSending={isSendingTimelineDraft}
+                  canSend={canSendMessages && !isReadOnly}
+                  onUpdateText={(nextText) =>
+                    setLocalTimelineDraft({
+                      chatId: activeConv.id,
+                      agent: activeTimelineDraft.agent,
+                      text: nextText,
+                    })
+                  }
+                  onSend={handleSendTimelineDraft}
+                  onRewrite={() =>
+                    setAgentRewriteRequest((prev) => ({
+                      id: (prev?.id || 0) + 1,
+                      agent: activeTimelineDraft.agent,
+                    }))
+                  }
+                  onDiscard={handleDiscardTimelineDraft}
+                />
+              )}
               <div ref={messagesEndRef} className="h-3 shrink-0" />
             </div>
 
@@ -3591,6 +3711,20 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
               onCancelReply={() => setReplyingTo(null)}
               onJumpToMessage={scrollToMessage}
               externalDroppedFiles={droppedFilesForInput}
+              inboxMode={inboxMode}
+              agentScope="both"
+              claudeEnabled={Boolean(activeConv.claudeEnabled)}
+              claudePaused={Boolean(activeConv.claudePaused)}
+              pipeline={activeConv.pipeline}
+              onDraftGenerated={(agent, draftText) => {
+                setLocalTimelineDraft({
+                  chatId: activeConv.id,
+                  agent,
+                  text: draftText,
+                });
+              }}
+              onAgentGeneratingChange={setAgentGenerating}
+              agentRewriteRequest={agentRewriteRequest}
             />
           </>
         ) : (
@@ -3694,17 +3828,6 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
               isReadOnly={isReadOnly}
               onUpdateLabels={(nextIds) => patchConversation(activeConv.id, { labels: nextIds })}
             />
-
-            {!isOperationInbox && (
-              <LeadClaudeToggleSection
-                conversationId={activeConv.id}
-                claudeEnabled={activeConv.claudeEnabled}
-                claudePaused={activeConv.claudePaused}
-                claudePausedReason={activeConv.claudePausedReason}
-                claudeLastRepliedAt={activeConv.claudeLastRepliedAt}
-                claudeLastError={activeConv.claudeLastError}
-              />
-            )}
 
             <div className="mb-5">
               <div className="flex items-center justify-between mb-2">

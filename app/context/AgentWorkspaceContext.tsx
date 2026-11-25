@@ -546,6 +546,7 @@ export function AgentWorkspaceProvider({
       setSettingsFeedback(null);
       const payload = {
         enabled: overrideDraft?.enabled ?? settingsDraft.enabled,
+        sendMode: overrideDraft?.sendMode ?? settingsDraft.sendMode ?? "draft",
         pauseOnHumanReply: overrideDraft?.pauseOnHumanReply ?? settingsDraft.pauseOnHumanReply,
         allowAutoBooking: overrideDraft?.allowAutoBooking ?? settingsDraft.allowAutoBooking,
         allowLeadUpdates: overrideDraft?.allowLeadUpdates ?? settingsDraft.allowLeadUpdates,

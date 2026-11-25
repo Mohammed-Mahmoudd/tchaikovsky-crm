@@ -16,7 +16,6 @@ import { useBranches } from "../lib/branches";
 import { BranchSelect } from "./BranchSelect";
 import EditableLeadName from "./EditableLeadName";
 import LeadLabelsSection from "./LeadLabelsSection";
-import LeadClaudeToggleSection from "./LeadClaudeToggleSection";
 import LeadCashInSection from "./LeadCashInSection";
 import PipelineStageSection from "./PipelineStageSection";
 import {
@@ -238,17 +237,6 @@ export function ConversationDetailsSidebar({
         isReadOnly={isReadOnly}
         onUpdateLabels={(nextIds) => patchConversation(conversation.id, { labels: nextIds })}
       />
-
-      {!isOperationConv && (
-        <LeadClaudeToggleSection
-          conversationId={conversation.id}
-          claudeEnabled={conversation.claudeEnabled}
-          claudePaused={conversation.claudePaused}
-          claudePausedReason={conversation.claudePausedReason}
-          claudeLastRepliedAt={conversation.claudeLastRepliedAt}
-          claudeLastError={conversation.claudeLastError}
-        />
-      )}
 
       {/* Optional Open Conversation button (e.g. In standalone details view) */}
       {showOpenConversationButton && onOpenConversation && (

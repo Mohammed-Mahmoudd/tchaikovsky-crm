@@ -12,6 +12,7 @@ import {
   type ClaudeActivitySummary,
   type ClaudeActivityWindow,
   formatClaudePausedReason,
+  resolveClaudeSendMode,
   selectAttentionLeads,
 } from "../../utils/claudeAgent";
 import {
@@ -100,6 +101,7 @@ export function AgentOverviewPanel() {
 
   const { connection, platformError } = statusData;
   const isSetupComplete = connection.hasApiKey && connection.hasAgentId;
+  const admissionSendMode = resolveClaudeSendMode(settingsDraft);
   const overviewStatusTone = !isSetupComplete
     ? "red"
     : settingsDraft.enabled
@@ -113,6 +115,8 @@ export function AgentOverviewPanel() {
 
   const statusLine = !isSetupComplete
     ? "Create or connect the Adham AI assistant to start automatic replies."
+    : admissionSendMode === "draft"
+    ? "Draft mode is active — click Admission Adham in any chat composer to prepare a draft."
     : settingsDraft.enabled
     ? `Active across ${leadCounts.activeCount} active lead${leadCounts.activeCount === 1 ? "" : "s"}${
         leadCounts.pausedCount > 0 ? ` · ${leadCounts.pausedCount} paused` : ""
@@ -171,6 +175,15 @@ export function AgentOverviewPanel() {
                 Automatic replies
               </p>
               <ClaudeStatusPill label={overviewStatusLabel} tone={overviewStatusTone} />
+              <Link
+                href="/agent/studio?section=rules"
+                className="inline-flex items-center hover:opacity-80"
+              >
+                <ClaudeStatusPill
+                  label={admissionSendMode === "draft" ? "Draft mode" : "Auto-send"}
+                  tone={admissionSendMode === "draft" ? "blue" : "amber"}
+                />
+              </Link>
               {connection.dryRun && <ClaudeStatusPill label="Dry run" tone="amber" />}
               {!settingsDraft.allowAutoBooking && (
                 <Link

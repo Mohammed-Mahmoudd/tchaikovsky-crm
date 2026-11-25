@@ -16,11 +16,12 @@ interface ClaudePromptEditorProps {
   defaultPrompt: string;
   defaultName: string;
   onResetToDefaults: (name: string, system: string) => void;
+  allowRawMode?: boolean;
 }
 
 /**
  * Structured, easy-to-read editor for Adham's Playbook instructions.
- * Renders clean readable cards by default while offering a 1-click Raw Prompt mode.
+ * Renders clean readable cards by default while offering a 1-click Raw Prompt mode when allowed.
  */
 export function ClaudePromptEditor({
   value,
@@ -28,6 +29,7 @@ export function ClaudePromptEditor({
   defaultPrompt,
   defaultName,
   onResetToDefaults,
+  allowRawMode = true,
 }: ClaudePromptEditorProps) {
   const [viewMode, setViewMode] = useState<"readable" | "raw">("readable");
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
@@ -119,46 +121,48 @@ export function ClaudePromptEditor({
 
         <div className="flex flex-wrap items-center gap-2">
           {/* Mode Switcher */}
-          <div
-            className="inline-flex rounded-lg p-0.5"
-            style={{
-              background: "var(--bg-input)",
-              border: "1px solid var(--border-input)",
-            }}
-          >
-            <button
-              type="button"
-              onClick={() => {
-                setEditingId(null);
-                setViewMode("readable");
+          {allowRawMode && (
+            <div
+              className="inline-flex rounded-lg p-0.5"
+              style={{
+                background: "var(--bg-input)",
+                border: "1px solid var(--border-input)",
               }}
-              className="inline-flex items-center gap-1.5 min-h-[34px] px-2.5 rounded-md text-[11px] font-semibold cursor-pointer"
-              style={
-                viewMode === "readable"
-                  ? { background: "var(--bg-card)", color: "var(--text-primary)", boxShadow: "var(--shadow-card)" }
-                  : { color: "var(--text-secondary)" }
-              }
             >
-              <Eye className="w-3.5 h-3.5" />
-              <span>Readable view</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setEditingId(null);
-                setViewMode("raw");
-              }}
-              className="inline-flex items-center gap-1.5 min-h-[34px] px-2.5 rounded-md text-[11px] font-semibold cursor-pointer"
-              style={
-                viewMode === "raw"
-                  ? { background: "var(--bg-card)", color: "var(--text-primary)", boxShadow: "var(--shadow-card)" }
-                  : { color: "var(--text-secondary)" }
-              }
-            >
-              <Code2 className="w-3.5 h-3.5" />
-              <span>Raw prompt</span>
-            </button>
-          </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingId(null);
+                  setViewMode("readable");
+                }}
+                className="inline-flex items-center gap-1.5 min-h-[34px] px-2.5 rounded-md text-[11px] font-semibold cursor-pointer"
+                style={
+                  viewMode === "readable"
+                    ? { background: "var(--bg-card)", color: "var(--text-primary)", boxShadow: "var(--shadow-card)" }
+                    : { color: "var(--text-secondary)" }
+                }
+              >
+                <Eye className="w-3.5 h-3.5" />
+                <span>Readable view</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingId(null);
+                  setViewMode("raw");
+                }}
+                className="inline-flex items-center gap-1.5 min-h-[34px] px-2.5 rounded-md text-[11px] font-semibold cursor-pointer"
+                style={
+                  viewMode === "raw"
+                    ? { background: "var(--bg-card)", color: "var(--text-primary)", boxShadow: "var(--shadow-card)" }
+                    : { color: "var(--text-secondary)" }
+                }
+              >
+                <Code2 className="w-3.5 h-3.5" />
+                <span>Raw prompt</span>
+              </button>
+            </div>
+          )}
 
           {!confirmReset ? (
             <button
@@ -197,7 +201,7 @@ export function ClaudePromptEditor({
         </div>
       </div>
 
-      {viewMode === "raw" ? (
+      {allowRawMode && viewMode === "raw" ? (
         <textarea
           id="claude-system-prompt"
           rows={16}
@@ -215,7 +219,11 @@ export function ClaudePromptEditor({
         <div className="space-y-2.5">
           {/* Expand/Collapse Quick Bar */}
           <div className="flex items-center justify-between gap-2 text-[11px]" style={{ color: "var(--text-muted)" }}>
-            <span>Click any section to edit individual rules without touching markdown syntax.</span>
+            <span>
+              {allowRawMode
+                ? "Click any section to edit individual rules without touching markdown syntax."
+                : "Click any section to view or edit Adham's instructions."}
+            </span>
             <div className="flex items-center gap-2 shrink-0">
               <button
                 type="button"

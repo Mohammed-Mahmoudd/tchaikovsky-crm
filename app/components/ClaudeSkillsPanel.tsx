@@ -19,18 +19,20 @@ import {
   dedupeAgentRequest,
   isAgentCacheFresh,
   readAgentMemorySnapshot,
-  readAgentSkillsCache,
-  writeAgentSkillsCache,
+  readScopedAgentCache,
+  writeScopedAgentCache,
 } from "../utils/agentWorkspaceCache";
 import { formatLastMessageTime } from "../utils/time";
 import { ClaudeSettingSwitch, ClaudeStatusPill } from "./ClaudeUiPrimitives";
 
-const SKILL_TEMPLATES: ReadonlyArray<{
+export interface SkillTemplateItem {
   title: string;
   whenToUse: string;
   instructions: string;
   examples: string;
-}> = [
+}
+
+const SKILL_TEMPLATES: ReadonlyArray<SkillTemplateItem> = [
   {
     title: "Price-First Objection Handling",
     whenToUse: "When a lead asks for prices before sharing their age group, child's age, or preferred branch.",
@@ -79,6 +81,14 @@ interface ClaudeSkillsPanelProps {
   hasAgentId: boolean;
   onSyncTools: () => Promise<boolean>;
   onCountChange?: (activeCount: number, totalCount: number) => void;
+  apiBasePath?: string;
+  cacheKey?: string;
+  templates?: ReadonlyArray<SkillTemplateItem>;
+  headingTitle?: string;
+  headingSubtitle?: string;
+  agentDisplayName?: string;
+  sseEventName?: string;
+  simpleMode?: boolean;
 }
 
 /**
@@ -90,10 +100,18 @@ export function ClaudeSkillsPanel({
   hasAgentId,
   onSyncTools,
   onCountChange,
+  apiBasePath = "/crm-api/claude",
+  cacheKey = AGENT_CACHE_KEYS.skills,
+  templates = SKILL_TEMPLATES,
+  headingTitle = "Trained Skills",
+  headingSubtitle = "Teach Adham focused playbooks and dialogue examples for specific situations. Adham loads only the matching skill during live chats, keeping core rules clear and conflict-free.",
+  agentDisplayName = "Adham",
+  sseEventName = "crm:claude-skills-updated",
+  simpleMode = false,
 }: ClaudeSkillsPanelProps) {
   const { authFetch } = useAuth();
 
-  const initialMemorySkills = readAgentMemorySnapshot<ClaudeSkillItem[]>(AGENT_CACHE_KEYS.skills);
+  const initialMemorySkills = readAgentMemorySnapshot<ClaudeSkillItem[]>(cacheKey);
   const [skills, setSkills] = useState<ClaudeSkillItem[]>(() => initialMemorySkills ?? []);
   const [loading, setLoading] = useState(() => !initialMemorySkills);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -125,8 +143,8 @@ export function ClaudeSkillsPanel({
 
   const fetchSkills = useCallback(
     async ({ silent = false, force = false }: { silent?: boolean; force?: boolean } = {}) => {
-      if (!force && isAgentCacheFresh(AGENT_CACHE_KEYS.skills)) {
-        const mem = readAgentMemorySnapshot<ClaudeSkillItem[]>(AGENT_CACHE_KEYS.skills);
+      if (!force && isAgentCacheFresh(cacheKey)) {
+        const mem = readAgentMemorySnapshot<ClaudeSkillItem[]>(cacheKey);
         if (mem) {
           hasSkillsRef.current = true;
           setSkills(mem);
@@ -139,14 +157,14 @@ export function ClaudeSkillsPanel({
       if (!silent && !hasSkillsRef.current) setLoading(true);
       setLoadError(null);
       try {
-        const result = await dedupeAgentRequest("agent:skills", async () => {
-          const res = await authFetch("/crm-api/claude/skills", { cache: "no-store" });
+        const result = await dedupeAgentRequest(`agent:skills:${apiBasePath}`, async () => {
+          const res = await authFetch(`${apiBasePath}/skills`, { cache: "no-store" });
           const json = await res.json().catch(() => null);
           if (!res.ok || !json?.success || !Array.isArray(json.data)) {
             return { ok: false as const, error: json?.error || "Could not load skills." };
           }
           const list = json.data as ClaudeSkillItem[];
-          writeAgentSkillsCache(list);
+          writeScopedAgentCache(cacheKey, list);
           return { ok: true as const, data: list };
         });
 
@@ -167,7 +185,7 @@ export function ClaudeSkillsPanel({
         setLoading(false);
       }
     },
-    [authFetch, notifyCounts]
+    [apiBasePath, authFetch, cacheKey, notifyCounts]
   );
 
   useEffect(() => {
@@ -175,7 +193,7 @@ export function ClaudeSkillsPanel({
     queueMicrotask(() => {
       if (cancelled) return;
       if (!hasSkillsRef.current) {
-        const cached = readAgentSkillsCache();
+        const cached = readScopedAgentCache<ClaudeSkillItem[]>(cacheKey);
         if (cached) {
           hasSkillsRef.current = true;
           setSkills(cached);
@@ -192,7 +210,18 @@ export function ClaudeSkillsPanel({
     return () => {
       cancelled = true;
     };
-  }, [fetchSkills, notifyCounts]);
+  }, [cacheKey, fetchSkills, notifyCounts]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handleUpdated = () => {
+      void fetchSkills({ silent: true, force: true });
+    };
+    window.addEventListener(sseEventName, handleUpdated);
+    return () => {
+      window.removeEventListener(sseEventName, handleUpdated);
+    };
+  }, [fetchSkills, sseEventName]);
 
   const openCreate = (template?: (typeof SKILL_TEMPLATES)[number]) => {
     setFormError(null);
@@ -253,7 +282,7 @@ export function ClaudeSkillsPanel({
 
     try {
       const isEdit = Boolean(draft.id);
-      const url = isEdit ? `/crm-api/claude/skills/${draft.id}` : "/crm-api/claude/skills";
+      const url = isEdit ? `${apiBasePath}/skills/${draft.id}` : `${apiBasePath}/skills`;
       const res = await authFetch(url, {
         method: isEdit ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
@@ -276,8 +305,8 @@ export function ClaudeSkillsPanel({
       setFeedback({
         ok: true,
         msg: isEdit
-          ? `Updated skill "${json.data.title}". Active sessions will use the latest rules automatically.`
-          : `Created skill "${json.data.title}". Adham can now load it in live chats.`,
+          ? `Updated skill "${json.data.title}".`
+          : `Created skill "${json.data.title}". ${agentDisplayName} can now use it.`,
       });
       await fetchSkills({ silent: true, force: true });
     } catch {
@@ -294,11 +323,11 @@ export function ClaudeSkillsPanel({
       s._id === skill._id ? { ...s, enabled: !skill.enabled } : s
     );
     setSkills(nextSkills);
-    writeAgentSkillsCache(nextSkills);
+    writeScopedAgentCache(cacheKey, nextSkills);
     setBusyId(skill._id);
     setFeedback(null);
     try {
-      const res = await authFetch(`/crm-api/claude/skills/${skill._id}`, {
+      const res = await authFetch(`${apiBasePath}/skills/${skill._id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: !skill.enabled }),
@@ -306,17 +335,17 @@ export function ClaudeSkillsPanel({
       const json = await res.json().catch(() => null);
       if (!res.ok || !json?.success) {
         setSkills(previous);
-        writeAgentSkillsCache(previous);
+        writeScopedAgentCache(cacheKey, previous);
         setFeedback({ ok: false, msg: json?.error || "Could not update skill status." });
         return;
       }
       const synced = previous.map((s) => (s._id === skill._id ? json.data : s));
       setSkills(synced);
-      writeAgentSkillsCache(synced);
+      writeScopedAgentCache(cacheKey, synced);
       notifyCounts(synced);
     } catch {
       setSkills(previous);
-      writeAgentSkillsCache(previous);
+      writeScopedAgentCache(cacheKey, previous);
       setFeedback({ ok: false, msg: "Network error while updating skill." });
     } finally {
       setBusyId(null);
@@ -328,7 +357,7 @@ export function ClaudeSkillsPanel({
     setBusyId(skill._id);
     setFeedback(null);
     try {
-      const res = await authFetch(`/crm-api/claude/skills/${skill._id}`, {
+      const res = await authFetch(`${apiBasePath}/skills/${skill._id}`, {
         method: "DELETE",
       });
       const json = await res.json().catch(() => null);
@@ -339,7 +368,7 @@ export function ClaudeSkillsPanel({
       setConfirmDeleteId(null);
       const next = skills.filter((s) => s._id !== skill._id);
       setSkills(next);
-      writeAgentSkillsCache(next);
+      writeScopedAgentCache(cacheKey, next);
       notifyCounts(next);
       setFeedback({ ok: true, msg: `Removed skill "${skill.title}".` });
     } catch {
@@ -357,7 +386,7 @@ export function ClaudeSkillsPanel({
     setSyncingTools(false);
     setFeedback(
       ok
-        ? { ok: true, msg: "Synced CRM skills tool to Adham on platform.claude.com." }
+        ? { ok: true, msg: `Synced CRM skills tool to ${agentDisplayName} on platform.claude.com.` }
         : { ok: false, msg: "Could not sync tools to platform.claude.com." }
     );
   };
@@ -380,7 +409,7 @@ export function ClaudeSkillsPanel({
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <h3 className="text-[14px] font-semibold" style={{ color: "var(--text-primary)" }}>
-                Trained Skills
+                {headingTitle}
               </h3>
               <ClaudeStatusPill
                 label={`${activeCount} active`}
@@ -388,7 +417,7 @@ export function ClaudeSkillsPanel({
               />
             </div>
             <p className="text-[11.5px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
-              Teach Adham focused playbooks and dialogue examples for specific situations. Adham loads only the matching skill during live chats, keeping core rules clear and conflict-free.
+              {headingSubtitle}
             </p>
           </div>
 
@@ -420,7 +449,7 @@ export function ClaudeSkillsPanel({
         </div>
 
         {/* Tool sync notice if platform.claude.com agent doesn't have get_skill_guidance attached yet */}
-        {needsToolSync && (
+        {!simpleMode && needsToolSync && (
           <div
             className="rounded-lg p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-[12px]"
             style={{
@@ -478,7 +507,7 @@ export function ClaudeSkillsPanel({
               Quick starter templates
             </p>
             <div className="flex flex-wrap gap-2">
-              {SKILL_TEMPLATES.map((tpl) => (
+              {templates.map((tpl) => (
                 <button
                   key={tpl.title}
                   type="button"
@@ -755,12 +784,14 @@ export function ClaudeSkillsPanel({
                         label={skill.enabled ? "Active" : "Off"}
                         tone={skill.enabled ? "green" : "slate"}
                       />
-                      <span
-                        className="text-[10.5px] font-mono px-2 py-0.5 rounded"
-                        style={{ background: "var(--bg-pill)", color: "var(--text-secondary)" }}
-                      >
-                        {skill.slug}
-                      </span>
+                      {!simpleMode && (
+                        <span
+                          className="text-[10.5px] font-mono px-2 py-0.5 rounded"
+                          style={{ background: "var(--bg-pill)", color: "var(--text-secondary)" }}
+                        >
+                          {skill.slug}
+                        </span>
+                      )}
                     </div>
 
                     <p dir="auto" className="text-[12px]" style={{ color: "var(--text-secondary)" }}>

@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useCRM } from "../context/CRMContext";
 import { ConversationChatView } from "./ConversationChatView";
 import { ConversationDetailsSidebar } from "./ConversationDetailsSidebar";
+import type { LeadAgentScope } from "../utils/followupAgent";
 
 export interface UseSlideOverChatDrawerOptions {
   initialChatId?: string | null;
@@ -112,6 +113,7 @@ export interface SlideOverChatDrawerProps {
   extraHeaderActions?: React.ReactNode;
   onOpenBookingModal?: () => void;
   hideDetailsToggle?: boolean;
+  agentScope?: LeadAgentScope;
 }
 
 /**
@@ -132,6 +134,7 @@ export function SlideOverChatDrawer({
   extraHeaderActions,
   onOpenBookingModal,
   hideDetailsToggle = false,
+  agentScope = "both",
 }: SlideOverChatDrawerProps) {
   const { conversations } = useCRM();
 
@@ -193,6 +196,7 @@ export function SlideOverChatDrawer({
             <ConversationChatView
               conversationId={chatId}
               onClose={onClose}
+              agentScope={agentScope}
               extraHeaderActions={
                 hideDetailsToggle ? (
                   extraHeaderActions ? <div className="flex items-center gap-1.5">{extraHeaderActions}</div> : undefined

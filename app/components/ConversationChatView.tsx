@@ -24,6 +24,7 @@ import {
 import { useCRM, Message, Conversation } from "../context/CRMContext";
 import {
   useAuth,
+  normalizeRole,
   isDirectorOrChairmanRole,
   isAdmissionRole,
   canAccessInbox,
@@ -31,7 +32,13 @@ import {
 } from "./AuthProvider";
 import { resolveConvInboxMode } from "../utils/inboxFilters";
 import { ChatInputBar, OutgoingAttachmentPayload, formatFileSize } from "./ChatInputBar";
+import { DraftMessageBubble } from "./DraftMessageBubble";
 import { GroupInfoPanel } from "./GroupInfoPanel";
+import {
+  type ChatTimelineDraft,
+  type ComposerAgentId,
+  resolveChatDraftState,
+} from "../utils/composerAgent";
 import { renderWhatsAppText } from "../utils/messageFormatting";
 import type { MessageMention } from "../utils/groupMentions";
 import { EmojiPicker, WHATSAPP_QUICK_REACTIONS, recordRecentEmoji } from "./EmojiPicker";
@@ -41,6 +48,7 @@ import InstagramMedia from "./InstagramMedia";
 import { VoiceNotePlayer } from "./VoiceNotePlayer";
 import { ChatDateDivider } from "./ChatDateDivider";
 import { buildChatDateDividerLabels, formatChatMessageTooltip } from "../utils/time";
+import type { LeadAgentScope } from "../utils/followupAgent";
 import {
   buildConfirmedReplyMessages,
   getWhatsAppGhostDisplayMode,
@@ -125,6 +133,7 @@ export interface ConversationChatViewProps {
   showBackToDetails?: boolean;
   extraHeaderActions?: React.ReactNode;
   className?: string;
+  agentScope?: LeadAgentScope;
 }
 
 export const ConversationChatView = React.memo(function ConversationChatView({
@@ -134,6 +143,7 @@ export const ConversationChatView = React.memo(function ConversationChatView({
   showBackToDetails = false,
   extraHeaderActions,
   className = "",
+  agentScope = "both",
 }: ConversationChatViewProps) {
   const {
     conversations,
@@ -152,6 +162,7 @@ export const ConversationChatView = React.memo(function ConversationChatView({
     fetchGroupMemberProfile,
     fetchGroupMemberAvatars,
     openGroupMemberChat,
+    updateConversationClaude,
   } = useCRM();
 
   const { user, token, authFetch, isReadOnly } = useAuth();
@@ -224,6 +235,29 @@ export const ConversationChatView = React.memo(function ConversationChatView({
   const dragDepthRef = useRef(0);
   const [isLoadingMessages, setIsLoadingMessages] = useState<boolean>(false);
   const isNavigatingToFullChatRef = useRef<boolean>(false);
+  const [localTimelineDraft, setLocalTimelineDraft] = useState<ChatTimelineDraft | null>(null);
+  const [dismissedServerDraft, setDismissedServerDraft] = useState<{
+    chatId: string;
+    text: string;
+  } | null>(null);
+  const [agentGenerating, setAgentGenerating] = useState<ComposerAgentId | null>(null);
+  const [isSendingTimelineDraft, setIsSendingTimelineDraft] = useState(false);
+  const [agentRewriteRequest, setAgentRewriteRequest] = useState<{
+    id: number;
+    agent: ComposerAgentId;
+  } | null>(null);
+
+  const isStrictChairman = normalizeRole(user?.role) === "chairman";
+  const activeTimelineDraft = useMemo(() => {
+    if (!activeConv || !isStrictChairman || activeConv.isGroup) return null;
+    if (resolveConvInboxMode(activeConv) === "operation") return null;
+    return resolveChatDraftState({
+      chatId: activeConv.id,
+      localDraft: localTimelineDraft,
+      serverDraftText: activeConv.claudeDraftText,
+      dismissedServerDraft,
+    });
+  }, [activeConv, dismissedServerDraft, isStrictChairman, localTimelineDraft]);
 
   // Smooth-scroll viewport to referenced original message
   const scrollToMessage = useCallback((targetId: string) => {
@@ -387,6 +421,20 @@ export const ConversationChatView = React.memo(function ConversationChatView({
 
     return () => clearTimeout(timer);
   }, [replyingTo]);
+
+  const prevTimelineDraftSigRef = useRef<string>("");
+  useEffect(() => {
+    const sig = activeTimelineDraft ? `${activeTimelineDraft.chatId}:${activeTimelineDraft.text}` : "";
+    if (!sig || sig === prevTimelineDraftSigRef.current) {
+      prevTimelineDraftSigRef.current = sig;
+      return;
+    }
+    prevTimelineDraftSigRef.current = sig;
+    const t = setTimeout(() => {
+      scrollToBottom("smooth");
+    }, 40);
+    return () => clearTimeout(t);
+  }, [activeTimelineDraft, scrollToBottom]);
 
   // Sending reply with 0ms optimistic message insertion & server sync
   const handleRefreshParticipants = useCallback(async () => {
@@ -567,6 +615,56 @@ export const ConversationChatView = React.memo(function ConversationChatView({
       finalizeOptimisticMessages,
     ]
   );
+
+  const handleSendTimelineDraft = useCallback(
+    async (draftTextToSend: string) => {
+      if (!activeConv || !draftTextToSend.trim() || isSendingTimelineDraft) return;
+      const targetChatId = activeConv.id;
+      const prevLocal = localTimelineDraft;
+      const prevServerDraft = activeConv.claudeDraftText || "";
+      const draftAgent = activeTimelineDraft?.agent || "admissions";
+
+      setIsSendingTimelineDraft(true);
+      if (prevServerDraft) {
+        setDismissedServerDraft({ chatId: targetChatId, text: prevServerDraft });
+      }
+      setLocalTimelineDraft(null);
+
+      const ok = await handleSendReply(draftTextToSend);
+      setIsSendingTimelineDraft(false);
+
+      if (ok) {
+        if (prevServerDraft) {
+          void updateConversationClaude(targetChatId, { clearDraft: true });
+        }
+      } else {
+        setDismissedServerDraft(null);
+        setLocalTimelineDraft(
+          prevLocal && prevLocal.chatId === targetChatId
+            ? prevLocal
+            : { chatId: targetChatId, agent: draftAgent, text: draftTextToSend }
+        );
+      }
+    },
+    [
+      activeConv,
+      activeTimelineDraft?.agent,
+      handleSendReply,
+      isSendingTimelineDraft,
+      localTimelineDraft,
+      updateConversationClaude,
+    ]
+  );
+
+  const handleDiscardTimelineDraft = useCallback(() => {
+    if (!activeConv) return;
+    const targetChatId = activeConv.id;
+    setLocalTimelineDraft(null);
+    if (activeConv.claudeDraftText) {
+      setDismissedServerDraft({ chatId: targetChatId, text: activeConv.claudeDraftText });
+      void updateConversationClaude(targetChatId, { clearDraft: true });
+    }
+  }, [activeConv, updateConversationClaude]);
 
   const handleSaveEditMessage = useCallback(
     async (
@@ -1635,6 +1733,31 @@ export const ConversationChatView = React.memo(function ConversationChatView({
           );
         });
         })()}
+        {activeTimelineDraft && (
+          <DraftMessageBubble
+            agent={activeTimelineDraft.agent}
+            text={activeTimelineDraft.text}
+            channel={activeConv.channel}
+            isRewriting={agentGenerating === activeTimelineDraft.agent}
+            isSending={isSendingTimelineDraft}
+            canSend={canSendMessages && !isReadOnly}
+            onUpdateText={(nextText) =>
+              setLocalTimelineDraft({
+                chatId: activeConv.id,
+                agent: activeTimelineDraft.agent,
+                text: nextText,
+              })
+            }
+            onSend={handleSendTimelineDraft}
+            onRewrite={() =>
+              setAgentRewriteRequest((prev) => ({
+                id: (prev?.id || 0) + 1,
+                agent: activeTimelineDraft.agent,
+              }))
+            }
+            onDiscard={handleDiscardTimelineDraft}
+          />
+        )}
         <div ref={messagesEndRef} className="h-3 shrink-0" />
       </div>
 
@@ -1702,6 +1825,20 @@ export const ConversationChatView = React.memo(function ConversationChatView({
         onCancelReply={() => setReplyingTo(null)}
         onJumpToMessage={scrollToMessage}
         externalDroppedFiles={droppedFilesForInput}
+        inboxMode={resolveConvInboxMode(activeConv)}
+        agentScope={agentScope}
+        claudeEnabled={Boolean(activeConv.claudeEnabled)}
+        claudePaused={Boolean(activeConv.claudePaused)}
+        pipeline={activeConv.pipeline}
+        onDraftGenerated={(agent, draftText) => {
+          setLocalTimelineDraft({
+            chatId: activeConv.id,
+            agent,
+            text: draftText,
+          });
+        }}
+        onAgentGeneratingChange={setAgentGenerating}
+        agentRewriteRequest={agentRewriteRequest}
       />
 
       {/* Photo Lightbox */}

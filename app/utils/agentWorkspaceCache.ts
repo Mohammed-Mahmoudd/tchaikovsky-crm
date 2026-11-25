@@ -5,12 +5,16 @@ import type {
   ClaudeSkillItem,
   ClaudeStatusPayload,
 } from "./claudeAgent";
+import type { FollowUpLeadsResponse, FollowUpStatusPayload } from "./followupAgent";
 
 export const AGENT_CACHE_KEYS = {
   status: "crm_agent_status_v1",
   leads: "crm_agent_leads_v1",
   skills: "crm_agent_skills_v1",
   activity: "crm_agent_activity_v1",
+  followupStatus: "crm_followup_status_v1",
+  followupQueueReview: "crm_followup_queue_review_v1",
+  followupQueueLeads: "crm_followup_queue_leads_v1",
 } as const;
 
 export const AGENT_CACHE_DEFAULT_TTL_MS = 5 * 60 * 1000;
@@ -34,8 +38,10 @@ export interface AgentStorageAdapter {
 
 const memoryCache = new Map<string, CacheEnvelope<unknown>>();
 const activityQueryCache = new Map<string, CacheEnvelope<CachedActivityPayload>>();
+const followUpQueueQueryCache = new Map<string, CacheEnvelope<FollowUpLeadsResponse>>();
 const inFlightRequests = new Map<string, Promise<unknown>>();
 const MAX_ACTIVITY_QUERY_CACHE = 24;
+const MAX_FOLLOWUP_QUERY_CACHE = 24;
 
 function getDefaultStorage(): AgentStorageAdapter | null {
   if (typeof window === "undefined") return null;
@@ -172,6 +178,24 @@ export function writeAgentSkillsCache(
   writeEnvelope(AGENT_CACHE_KEYS.skills, data, Date.now(), storage);
 }
 
+/** Reads a generic scoped workspace cache entry by key. */
+export function readScopedAgentCache<T>(
+  key: string,
+  ttlMs = AGENT_CACHE_DEFAULT_TTL_MS,
+  storage?: AgentStorageAdapter | null
+): T | null {
+  return readEnvelope<T>(key, ttlMs, Date.now(), storage)?.data ?? null;
+}
+
+/** Writes a generic scoped workspace cache entry by key. */
+export function writeScopedAgentCache<T>(
+  key: string,
+  data: T,
+  storage?: AgentStorageAdapter | null
+): void {
+  writeEnvelope(key, data, Date.now(), storage);
+}
+
 export function readAgentActivityCache(
   ttlMs = AGENT_CACHE_DEFAULT_TTL_MS,
   storage?: AgentStorageAdapter | null
@@ -219,12 +243,70 @@ export function invalidateAgentActivityQueryCache(): void {
   memoryCache.delete(AGENT_CACHE_KEYS.activity);
 }
 
+/** Reads an in-memory cached Follow-up leads/review query response when within the freshness window. */
+export function readFollowUpQueueQueryCache(
+  queryKey: string,
+  freshWindowMs = AGENT_FRESH_WINDOW_MS,
+  now = Date.now()
+): FollowUpLeadsResponse | null {
+  const entry = followUpQueueQueryCache.get(queryKey);
+  if (!entry || now - entry.updatedAt > freshWindowMs) return null;
+  return entry.data;
+}
+
+/** Stores a bounded in-memory Follow-up leads/review query response for instant tab/filter switching. */
+export function writeFollowUpQueueQueryCache(
+  queryKey: string,
+  data: FollowUpLeadsResponse,
+  now = Date.now()
+): void {
+  if (followUpQueueQueryCache.has(queryKey)) {
+    followUpQueueQueryCache.delete(queryKey);
+  }
+  followUpQueueQueryCache.set(queryKey, { updatedAt: now, data });
+  if (followUpQueueQueryCache.size > MAX_FOLLOWUP_QUERY_CACHE) {
+    const oldest = followUpQueueQueryCache.keys().next().value;
+    if (oldest) followUpQueueQueryCache.delete(oldest);
+  }
+}
+
+/** Clears cached Follow-up queue queries (and persistent review/leads snapshots if storage is passed). */
+export function invalidateFollowUpQueueQueryCache(
+  storage: AgentStorageAdapter | null = getDefaultStorage()
+): void {
+  followUpQueueQueryCache.clear();
+  memoryCache.delete(AGENT_CACHE_KEYS.followupQueueReview);
+  memoryCache.delete(AGENT_CACHE_KEYS.followupQueueLeads);
+  if (!storage) return;
+  try {
+    storage.removeItem(AGENT_CACHE_KEYS.followupQueueReview);
+    storage.removeItem(AGENT_CACHE_KEYS.followupQueueLeads);
+  } catch {}
+}
+
+/** Reads cached Follow-up workspace status (settings + connection + optional platform agent). */
+export function readFollowUpStatusCache(
+  ttlMs = AGENT_CACHE_DEFAULT_TTL_MS,
+  storage?: AgentStorageAdapter | null
+): FollowUpStatusPayload | null {
+  return readEnvelope<FollowUpStatusPayload>(AGENT_CACHE_KEYS.followupStatus, ttlMs, Date.now(), storage)?.data ?? null;
+}
+
+/** Writes Follow-up workspace status to memory + localStorage for instant reload recovery. */
+export function writeFollowUpStatusCache(
+  data: FollowUpStatusPayload,
+  storage?: AgentStorageAdapter | null
+): void {
+  writeEnvelope(AGENT_CACHE_KEYS.followupStatus, data, Date.now(), storage);
+}
+
 /** Clears the in-memory and optional persisted Agent caches (e.g. on logout or test reset). */
 export function clearAgentWorkspaceMemoryCache(
   storage: AgentStorageAdapter | null = getDefaultStorage()
 ): void {
   memoryCache.clear();
   activityQueryCache.clear();
+  followUpQueueQueryCache.clear();
   inFlightRequests.clear();
   if (!storage) return;
   for (const key of Object.values(AGENT_CACHE_KEYS)) {

@@ -78,6 +78,7 @@ describe("sidebarNav", () => {
             { label: "Overview", href: "/agent" },
             { label: "Leads", href: "/agent/leads" },
             { label: "Studio", href: "/agent/studio" },
+            { label: "Follow-up", href: "/agent/follow-up" },
           ],
         },
       ]
