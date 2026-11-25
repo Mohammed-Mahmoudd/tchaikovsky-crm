@@ -449,6 +449,9 @@ export type ClaudeActivityOutcome =
   | "silent"
   | "error";
 
+export type ClaudeActivityFilter = "all" | "attention" | ClaudeActivityOutcome;
+export type ClaudeActivityWindow = "24h" | "all";
+
 export interface ClaudeActivityItem {
   _id: string;
   senderId: string;
@@ -460,11 +463,88 @@ export interface ClaudeActivityItem {
   incomingText: string;
   replyText: string;
   outcome: ClaudeActivityOutcome;
+  actionSummary?: string;
   skillsUsed?: string[];
   toolTraces?: ClaudeToolTrace[];
   errorMessage?: string;
   durationMs?: number;
   createdAt: string;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Filters cached live-activity items client-side for instant filter/window switches before revalidation. */
+export function filterCachedActivityItems(
+  items: ReadonlyArray<ClaudeActivityItem>,
+  options: {
+    outcome?: ClaudeActivityFilter;
+    window?: ClaudeActivityWindow;
+    search?: string;
+    nowMs?: number;
+  }
+): ClaudeActivityItem[] {
+  const { outcome = "all", window = "all", search = "", nowMs = Date.now() } = options;
+  const cleanSearch = search.trim().toLowerCase();
+  const cutoff = nowMs - DAY_MS;
+
+  return items.filter((item) => {
+    if (outcome === "attention") {
+      if (item.outcome !== "escalated" && item.outcome !== "error") return false;
+    } else if (outcome !== "all" && item.outcome !== outcome) {
+      return false;
+    }
+
+    if (window === "24h") {
+      const ts = item.createdAt ? new Date(item.createdAt).getTime() : 0;
+      if (!Number.isFinite(ts) || ts < cutoff) return false;
+    }
+
+    if (cleanSearch) {
+      const haystack = [
+        item.leadName,
+        item.senderId,
+        item.branch,
+        item.incomingText,
+        item.replyText,
+        item.actionSummary,
+        ...(Array.isArray(item.skillsUsed) ? item.skillsUsed : []),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      if (!haystack.includes(cleanSearch)) return false;
+    }
+
+    return true;
+  });
+}
+
+/** Returns assigned/paused leads currently requiring staff attention (errors first, then escalations). */
+export function selectAttentionLeads(leads: ReadonlyArray<ClaudeLeadRow>): ClaudeLeadRow[] {
+  const filtered = leads.filter((lead) => {
+    const hasError = Boolean(lead.claudeLastError && lead.claudeLastError.trim());
+    const isEscalatedPause =
+      Boolean(lead.claudeEnabled) &&
+      Boolean(lead.claudePaused) &&
+      typeof lead.claudePausedReason === "string" &&
+      lead.claudePausedReason.startsWith("escalated:");
+    return hasError || isEscalatedPause;
+  });
+
+  return filtered.sort((a, b) => {
+    const aErr = Boolean(a.claudeLastError && a.claudeLastError.trim()) ? 1 : 0;
+    const bErr = Boolean(b.claudeLastError && b.claudeLastError.trim()) ? 1 : 0;
+    if (aErr !== bErr) return bErr - aErr;
+    return (b.lastMessageAt || 0) - (a.lastMessageAt || 0);
+  });
+}
+
+/** Formats a skill slug into a calm readable label for expandable details. */
+export function formatSkillDisplayLabel(slug: string): string {
+  const clean = String(slug || "").trim();
+  if (!clean) return "";
+  const words = clean.replace(/[-_]+/g, " ").trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
 export interface ClaudeActivitySummary {

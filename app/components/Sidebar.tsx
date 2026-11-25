@@ -122,8 +122,8 @@ export function Sidebar({ isMobileOpen, onCloseMobile }: SidebarProps) {
       }).catch(() => {});
     }
     if (!isAgentCacheFresh(AGENT_CACHE_KEYS.activity)) {
-      void dedupeAgentRequest('agent:activity:all:40:', async () => {
-        const res = await authFetch('/crm-api/claude/activity?outcome=all&limit=40', { cache: 'no-store' });
+      void dedupeAgentRequest('agent:activity:all:all:40:', async () => {
+        const res = await authFetch('/crm-api/claude/activity?outcome=all&window=all&limit=40', { cache: 'no-store' });
         const json = res.ok ? await res.json().catch(() => null) : null;
         if (json?.success && json.data) {
           const payload = {

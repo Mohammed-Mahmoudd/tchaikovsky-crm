@@ -16,6 +16,9 @@ import {
   formatDurationLabel,
   formatClaudeActivationNote,
   splitDisplayReplyChunks,
+  filterCachedActivityItems,
+  selectAttentionLeads,
+  formatSkillDisplayLabel,
 } from "./claudeAgent.ts";
 
 test("formatClaudePausedReason returns readable labels for pause codes", () => {
@@ -171,5 +174,70 @@ test("filterClaudeLeadCandidates, summarizeClaudeLeadCounts, and mergeAssignedCl
     }).tone,
     "warning"
   );
+});
+
+test("filterCachedActivityItems, selectAttentionLeads, and formatSkillDisplayLabel support Overview filters", () => {
+  const nowMs = Date.UTC(2026, 10, 25, 12, 0, 0);
+  const items = [
+    {
+      _id: "a1",
+      senderId: "s1",
+      leadName: "Noura",
+      channel: "WA",
+      branch: "Riyadh Park Mall",
+      incomingText: "Book Friday",
+      replyText: "Booked!",
+      outcome: "booked",
+      actionSummary: "Booked Riyadh Park Mall · Fri 5 PM",
+      createdAt: new Date(nowMs - 2 * 60 * 60 * 1000).toISOString(),
+    },
+    {
+      _id: "a2",
+      senderId: "s2",
+      leadName: "Omar",
+      channel: "IG",
+      branch: "Jeddah",
+      incomingText: "Discount please",
+      replyText: "Escalating",
+      outcome: "escalated",
+      createdAt: new Date(nowMs - 4 * 60 * 60 * 1000).toISOString(),
+    },
+    {
+      _id: "a3",
+      senderId: "s3",
+      leadName: "Lama",
+      channel: "FB",
+      incomingText: "Hi",
+      replyText: "",
+      outcome: "error",
+      errorMessage: "Timeout",
+      createdAt: new Date(nowMs - 48 * 60 * 60 * 1000).toISOString(),
+    },
+  ];
+
+  assert.deepEqual(
+    filterCachedActivityItems(items, { outcome: "attention", window: "all", nowMs }).map((i) => i._id),
+    ["a2", "a3"]
+  );
+  assert.deepEqual(
+    filterCachedActivityItems(items, { outcome: "attention", window: "24h", nowMs }).map((i) => i._id),
+    ["a2"]
+  );
+  assert.deepEqual(
+    filterCachedActivityItems(items, { search: "riyadh", nowMs }).map((i) => i._id),
+    ["a1"]
+  );
+
+  const attention = selectAttentionLeads([
+    { senderId: "1", channel: "WA", claudeEnabled: true, claudePaused: true, claudePausedReason: "staff_replied", lastMessageAt: 900 },
+    { senderId: "2", channel: "WA", claudeEnabled: true, claudePaused: true, claudePausedReason: "escalated:Discount", lastMessageAt: 500 },
+    { senderId: "3", channel: "IG", claudeEnabled: true, claudePaused: false, claudeLastError: "API timeout", lastMessageAt: 300 },
+  ]);
+  assert.deepEqual(
+    attention.map((l) => l.senderId),
+    ["3", "2"]
+  );
+
+  assert.equal(formatSkillDisplayLabel("price-first-objection-handling"), "Price first objection handling");
 });
 

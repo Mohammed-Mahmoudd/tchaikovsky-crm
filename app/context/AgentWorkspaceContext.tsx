@@ -380,8 +380,10 @@ export function AgentWorkspaceProvider({
       setLoadError(null);
 
       try {
-        const result = await dedupeAgentRequest("agent:status", async () => {
-          const res = await authFetch("/crm-api/claude/status", { cache: "no-store" });
+        const statusUrl = force ? "/crm-api/claude/status?refresh=1" : "/crm-api/claude/status";
+        const dedupeKey = force ? "agent:status:refresh" : "agent:status";
+        const result = await dedupeAgentRequest(dedupeKey, async () => {
+          const res = await authFetch(statusUrl, { cache: "no-store" });
           const json = await res.json().catch(() => null);
           if (!res.ok || !json?.success || !json.data) {
             return { ok: false as const, error: json?.error || "Could not load Agent configuration." };
@@ -473,6 +475,17 @@ export function AgentWorkspaceProvider({
       cancelled = true;
     };
   }, [fetchStatus, hydrateFromPayload, isChairman]);
+
+  useEffect(() => {
+    if (!isChairman || typeof window === "undefined") return;
+    const handleSettingsUpdated = () => {
+      void fetchStatus({ silent: true, force: true });
+    };
+    window.addEventListener("crm:claude-settings-updated", handleSettingsUpdated);
+    return () => {
+      window.removeEventListener("crm:claude-settings-updated", handleSettingsUpdated);
+    };
+  }, [fetchStatus, isChairman]);
 
   const updateSettingsDraft = useCallback(
     (updater: (prev: ClaudeSettingsData) => ClaudeSettingsData) => {

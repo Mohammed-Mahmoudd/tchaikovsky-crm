@@ -6,6 +6,7 @@ import {
   dedupeAgentRequest,
   isAgentCacheFresh,
   readAgentActivityCache,
+  readAgentActivityQueryCache,
   readAgentLeadsCache,
   readAgentMemorySnapshot,
   readAgentSkillsCache,
@@ -14,9 +15,11 @@ import {
   resolveAgentRouteFromHash,
   resolveAgentStudioSection,
   writeAgentActivityCache,
+  writeAgentActivityQueryCache,
   writeAgentLeadsCache,
   writeAgentSkillsCache,
   writeAgentStatusCache,
+  invalidateAgentActivityQueryCache,
 } from "./agentWorkspaceCache.ts";
 
 function createMemoryStorage() {
@@ -163,5 +166,17 @@ describe("agentWorkspaceCache", () => {
 
     clearAgentWorkspaceMemoryCache(storage);
     assert.equal(readAgentStatusCache(60_000, storage), null);
+
+    // Per-filter query cache stores, expires, and invalidates cleanly
+    const qKey = "agent:activity:booked:24h:40:";
+    const qPayload = {
+      items: [],
+      summary: { total: 2, replied: 1, booked: 1, updated: 0, escalated: 0, silent: 0, error: 0 },
+    };
+    writeAgentActivityQueryCache(qKey, qPayload, 10_000);
+    assert.equal(readAgentActivityQueryCache(qKey, 15_000, 15_000)?.summary.booked, 1);
+    assert.equal(readAgentActivityQueryCache(qKey, 15_000, 30_000), null);
+    invalidateAgentActivityQueryCache();
+    assert.equal(readAgentActivityQueryCache(qKey, 15_000, 15_000), null);
   });
 });

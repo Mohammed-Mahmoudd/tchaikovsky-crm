@@ -33,7 +33,9 @@ export interface AgentStorageAdapter {
 }
 
 const memoryCache = new Map<string, CacheEnvelope<unknown>>();
+const activityQueryCache = new Map<string, CacheEnvelope<CachedActivityPayload>>();
 const inFlightRequests = new Map<string, Promise<unknown>>();
+const MAX_ACTIVITY_QUERY_CACHE = 24;
 
 function getDefaultStorage(): AgentStorageAdapter | null {
   if (typeof window === "undefined") return null;
@@ -184,11 +186,45 @@ export function writeAgentActivityCache(
   writeEnvelope(AGENT_CACHE_KEYS.activity, data, Date.now(), storage);
 }
 
+/** Reads an in-memory cached activity query response when within the freshness window. */
+export function readAgentActivityQueryCache(
+  queryKey: string,
+  freshWindowMs = AGENT_FRESH_WINDOW_MS,
+  now = Date.now()
+): CachedActivityPayload | null {
+  const entry = activityQueryCache.get(queryKey);
+  if (!entry || now - entry.updatedAt > freshWindowMs) return null;
+  return entry.data;
+}
+
+/** Stores a bounded in-memory activity query result for instant filter switching. */
+export function writeAgentActivityQueryCache(
+  queryKey: string,
+  data: CachedActivityPayload,
+  now = Date.now()
+): void {
+  if (activityQueryCache.has(queryKey)) {
+    activityQueryCache.delete(queryKey);
+  }
+  activityQueryCache.set(queryKey, { updatedAt: now, data });
+  if (activityQueryCache.size > MAX_ACTIVITY_QUERY_CACHE) {
+    const oldest = activityQueryCache.keys().next().value;
+    if (oldest) activityQueryCache.delete(oldest);
+  }
+}
+
+/** Invalidates in-memory activity query caches (e.g. on live SSE update or manual refresh). */
+export function invalidateAgentActivityQueryCache(): void {
+  activityQueryCache.clear();
+  memoryCache.delete(AGENT_CACHE_KEYS.activity);
+}
+
 /** Clears the in-memory and optional persisted Agent caches (e.g. on logout or test reset). */
 export function clearAgentWorkspaceMemoryCache(
   storage: AgentStorageAdapter | null = getDefaultStorage()
 ): void {
   memoryCache.clear();
+  activityQueryCache.clear();
   inFlightRequests.clear();
   if (!storage) return;
   for (const key of Object.values(AGENT_CACHE_KEYS)) {

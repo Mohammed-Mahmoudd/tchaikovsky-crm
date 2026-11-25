@@ -3,7 +3,7 @@
 import React, { Suspense, useCallback, useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { AlertCircle, Bot, Sparkles } from "lucide-react";
+import { AlertCircle, Bot, SlidersHorizontal, Sparkles, UserPlus } from "lucide-react";
 import { useAuth, normalizeRole } from "../components/AuthProvider";
 import { ClaudeStatusPill } from "../components/ClaudeUiPrimitives";
 import { SlideOverChatDrawer, useSlideOverChatDrawer } from "../components/SlideOverChatDrawer";
@@ -13,7 +13,7 @@ import { AgentWorkspaceProvider, useAgentCore } from "../context/AgentWorkspaceC
 const PAGE_META: Record<string, { title: string; subtitle: string }> = {
   "/agent": {
     title: "Overview",
-    subtitle: "Monitor Adham AI status, automatic replies, and live admissions activity.",
+    subtitle: "Adham AI admissions control and live activity.",
   },
   "/agent/leads": {
     title: "Agent Leads",
@@ -198,7 +198,7 @@ function AgentLayoutInner({
             </div>
 
             <div className="flex flex-wrap items-center gap-2 shrink-0">
-              {settingsDraft && (
+              {!isOverview && settingsDraft && (
                 <>
                   <ClaudeStatusPill
                     label={
@@ -216,28 +216,42 @@ function AgentLayoutInner({
                         : "amber"
                     }
                   />
-                  {!isOverview && (
-                    <button
-                      type="button"
-                      disabled={savingSettings}
-                      onClick={() => void handleToggleMaster()}
-                      className={`min-h-[44px] sm:min-h-[36px] px-3 rounded-lg text-[11.5px] font-semibold cursor-pointer disabled:opacity-50 ${
-                        settingsDraft.enabled ? "" : "text-white"
-                      }`}
-                      style={
-                        settingsDraft.enabled
-                          ? {
-                              background: "var(--bg-card)",
-                              border: "1px solid var(--border-input)",
-                              color: "var(--text-primary)",
-                            }
-                          : { background: "var(--bg-banner)" }
-                      }
-                    >
-                      {settingsDraft.enabled ? "Turn OFF" : "Turn ON"}
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    disabled={savingSettings}
+                    onClick={() => void handleToggleMaster()}
+                    className={`min-h-[44px] sm:min-h-[36px] px-3 rounded-lg text-[11.5px] font-semibold cursor-pointer disabled:opacity-50 ${
+                      settingsDraft.enabled ? "" : "text-white"
+                    }`}
+                    style={
+                      settingsDraft.enabled
+                        ? {
+                            background: "var(--bg-card)",
+                            border: "1px solid var(--border-input)",
+                            color: "var(--text-primary)",
+                          }
+                        : { background: "var(--bg-banner)" }
+                    }
+                  >
+                    {settingsDraft.enabled ? "Turn OFF" : "Turn ON"}
+                  </button>
                 </>
+              )}
+
+              {isOverview && (
+                <Link
+                  href="/agent/studio"
+                  className="inline-flex items-center gap-1.5 min-h-[44px] sm:min-h-[36px] px-3 rounded-lg text-[11.5px] font-medium hover:bg-[var(--bg-hover)]"
+                  style={{
+                    background: "var(--bg-card)",
+                    border: "1px solid var(--border-input)",
+                    color: "var(--text-primary)",
+                    boxShadow: "var(--shadow-card)",
+                  }}
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5" style={{ color: "var(--text-secondary)" }} />
+                  <span>Studio</span>
+                </Link>
               )}
 
               <button
@@ -254,6 +268,17 @@ function AgentLayoutInner({
                 <Sparkles className="w-3.5 h-3.5" style={{ color: "var(--bg-banner)" }} />
                 <span>Test Adham</span>
               </button>
+
+              {isOverview && (
+                <Link
+                  href="/agent/leads?mode=assign"
+                  className="inline-flex items-center gap-1.5 min-h-[44px] sm:min-h-[36px] px-3.5 rounded-lg text-[11.5px] font-semibold text-white"
+                  style={{ background: "var(--bg-banner)" }}
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                  <span>Assign leads</span>
+                </Link>
+              )}
             </div>
           </header>
 

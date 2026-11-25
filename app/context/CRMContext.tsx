@@ -3460,6 +3460,16 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   new CustomEvent("crm:presence-updated", { detail: payload.data })
                 );
               }
+            } else if (payload.type === "claude_activity_updated" && payload.data) {
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(
+                  new CustomEvent("crm:claude-activity-updated", { detail: payload.data })
+                );
+              }
+            } else if (payload.type === "claude_settings_updated") {
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("crm:claude-settings-updated"));
+              }
             } else if (payload.type === "conversations_saved_bulk" && payload.data) {
               const {
                 senderIds: updatedIds,
