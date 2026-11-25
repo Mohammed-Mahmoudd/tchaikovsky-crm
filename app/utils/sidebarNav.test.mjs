@@ -89,6 +89,10 @@ describe("sidebarNav", () => {
     assert.equal(entries[1].kind === "group" && entries[1].collapsedBadge?.count, 10);
     assert.equal(entries[2].kind === "group" && entries[2].collapsedBadge, undefined);
     assert.equal(entries[3].kind === "group" && entries[3].collapsedBadge, undefined);
+
+    const agentChildren = entries[3].kind === "group" ? entries[3].children : [];
+    assert.equal(agentChildren.find((c) => c.id === "agent-follow-up")?.separatorBefore, true);
+    assert.equal(agentChildren.find((c) => c.id === "agent-studio")?.separatorBefore, undefined);
   });
 
   it("organizes Admission Officer with direct Inbox link, Leads Management dropdown, and Profile", () => {

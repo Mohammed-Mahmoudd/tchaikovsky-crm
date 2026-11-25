@@ -701,19 +701,28 @@ function NavGroup({
           style={{ borderInlineStart: '1px solid var(--border-main)' }}
         >
           {group.children.map((child) => (
-            <NavItem
+            <div
               key={child.id}
-              href={child.href}
-              icon={renderSidebarIcon(child.icon, 'sm')}
-              label={child.label}
-              badge={child.badge}
-              active={isSidebarRouteActive(pathname, child.href, {
-                exact: child.exact,
-                activePrefixes: child.activePrefixes,
-              })}
-              onClick={onSelectChild}
-              nested
-            />
+              className={child.separatorBefore ? 'mt-2.5 pt-2' : undefined}
+              style={
+                child.separatorBefore
+                  ? { borderTop: '1px solid var(--border-main)' }
+                  : undefined
+              }
+            >
+              <NavItem
+                href={child.href}
+                icon={renderSidebarIcon(child.icon, 'sm')}
+                label={child.label}
+                badge={child.badge}
+                active={isSidebarRouteActive(pathname, child.href, {
+                  exact: child.exact,
+                  activePrefixes: child.activePrefixes,
+                })}
+                onClick={onSelectChild}
+                nested
+              />
+            </div>
           ))}
         </div>
       )}

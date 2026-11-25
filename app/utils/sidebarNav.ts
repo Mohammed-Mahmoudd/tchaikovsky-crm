@@ -40,6 +40,7 @@ export interface SidebarLeafItem {
   badge?: SidebarBadge;
   exact?: boolean;
   activePrefixes?: ReadonlyArray<string>;
+  separatorBefore?: boolean;
 }
 
 export interface SidebarGroupItem {
@@ -70,6 +71,7 @@ interface CandidateChild {
   badge?: SidebarBadge;
   exact?: boolean;
   activePrefixes?: ReadonlyArray<string>;
+  separatorBefore?: boolean;
 }
 
 function buildPositiveBadge(
@@ -134,6 +136,7 @@ function resolveGroupOrLeaf({
       badge: child.badge,
       exact: child.exact,
       activePrefixes: child.activePrefixes,
+      separatorBefore: child.separatorBefore,
     })),
     collapsedBadge,
   };
@@ -388,6 +391,7 @@ export function buildSidebarNav({
         label: "Follow-up",
         standaloneLabel: "Agent Follow-up",
         icon: "agent-follow-up",
+        separatorBefore: true,
       },
     ],
   });
