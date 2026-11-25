@@ -1,10 +1,8 @@
 "use client";
 
 import React from "react";
-import { RefreshCw, Wrench } from "lucide-react";
 import { useAgentCore, useAgentStudioDraft } from "../../context/AgentWorkspaceContext";
 import { ClaudePromptEditor } from "../ClaudePromptEditor";
-import { ClaudeStatusPill } from "../ClaudeUiPrimitives";
 import { AgentWorkspaceError, AgentWorkspaceLoading } from "./AgentShellHelpers";
 
 /**
@@ -44,7 +42,7 @@ export function AgentPlaybookSection() {
     return <AgentWorkspaceLoading label="Loading Playbook and Model" />;
   }
 
-  const { connection, platformAgent, availableModels, playbookDefaults } = statusData;
+  const { connection, availableModels, playbookDefaults } = statusData;
 
   return (
     <section
@@ -151,64 +149,6 @@ export function AgentPlaybookSection() {
           defaultName={playbookDefaults.name}
           onResetToDefaults={resetStudioDefaults}
         />
-
-        {/* Collapsed Developer & Sync Details */}
-        <details
-          className="rounded-lg overflow-hidden text-[11.5px]"
-          style={{
-            background: "var(--bg-panel)",
-            border: "1px solid var(--border-main)",
-          }}
-        >
-          <summary
-            className="px-3 py-2 cursor-pointer flex items-center justify-between gap-2 font-medium select-none hover:bg-[var(--bg-hover)]"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            <span>Developer &amp; sync details</span>
-            <span className="text-[10.5px]" style={{ color: "var(--text-muted)" }}>
-              {platformAgent ? `v${platformAgent.version} · ` : ""}
-              {agentSystem.length.toLocaleString()} chars
-            </span>
-          </summary>
-          <div
-            className="px-3 py-3 space-y-2.5"
-            style={{ borderTop: "1px solid var(--border-main)", background: "var(--bg-card)" }}
-          >
-            {platformAgent && platformAgent.attachedCrmTools.length > 0 && (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span
-                  className="text-[11px] font-medium inline-flex items-center gap-1 me-1"
-                  style={{ color: "var(--text-secondary)" }}
-                >
-                  <Wrench className="w-3 h-3" /> Attached CRM tools:
-                </span>
-                {platformAgent.attachedCrmTools.map((toolName) => (
-                  <ClaudeStatusPill key={toolName} label={toolName} tone="slate" />
-                ))}
-              </div>
-            )}
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
-                {platformAgent && !platformAgent.hasAllCrmTools
-                  ? "Tools not yet synced to latest definition."
-                  : "All CRM booking & escalation tools attached."}
-              </span>
-              <button
-                type="button"
-                onClick={() => void fetchStatus({ force: true })}
-                className="inline-flex items-center gap-1.5 min-h-[40px] sm:min-h-[34px] px-3 rounded-lg text-[11px] font-medium cursor-pointer hover:bg-[var(--bg-hover)]"
-                style={{
-                  background: "var(--bg-input)",
-                  border: "1px solid var(--border-input)",
-                  color: "var(--text-primary)",
-                }}
-              >
-                <RefreshCw className="w-3 h-3" />
-                <span>Reload from Claude</span>
-              </button>
-            </div>
-          </div>
-        </details>
 
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1">
           <div className="min-w-0">

@@ -1,15 +1,13 @@
 "use client";
 
 import React, { useState } from "react";
-import { AlertCircle, Check, ExternalLink } from "lucide-react";
 import { useAgentCore } from "../../context/AgentWorkspaceContext";
 import { resolveClaudeSendMode } from "../../utils/claudeAgent";
 import { ClaudeSettingSwitch, ClaudeStatusPill } from "../ClaudeUiPrimitives";
 import { AgentWorkspaceError, AgentWorkspaceLoading } from "./AgentShellHelpers";
 
 /**
- * Studio section for operational handoff guardrails, escalation alert settings,
- * and technical Claude Platform connection details.
+ * Studio section for operational handoff guardrails and escalation alert settings.
  */
 export function AgentRulesSection() {
   const {
@@ -20,11 +18,8 @@ export function AgentRulesSection() {
     updateSettingsDraft,
     savingSettings,
     settingsFeedback,
-    creatingAgent,
-    createFeedback,
     fetchStatus,
     saveGlobalSettings,
-    handleCreateAgentOnPlatform,
   } = useAgentCore();
 
   const [confirmAutoMode, setConfirmAutoMode] = useState(false);
@@ -46,7 +41,6 @@ export function AgentRulesSection() {
     return <AgentWorkspaceLoading label="Loading Rules and Guardrails" />;
   }
 
-  const { connection, platformAgent } = statusData;
   const currentSendMode = resolveClaudeSendMode(settingsDraft);
 
   const handleModeSelect = (nextMode: "draft" | "auto") => {
@@ -337,133 +331,6 @@ export function AgentRulesSection() {
             >
               {savingSettings ? "Saving..." : "Save rules"}
             </button>
-          </div>
-        </div>
-      </section>
-
-      {/* Technical & Connection Details Card */}
-      <section
-        className="rounded-xl p-4 sm:p-5 space-y-3.5"
-        style={{
-          background: "var(--bg-card)",
-          border: "1px solid var(--border-main)",
-          boxShadow: "var(--shadow-card)",
-        }}
-      >
-        <div>
-          <h3 className="text-[13.5px] font-semibold" style={{ color: "var(--text-primary)" }}>
-            Technical &amp; connection details
-          </h3>
-          <p className="text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
-            Environment status, silent CRM label mapping, and Claude Platform console access.
-          </p>
-        </div>
-
-        {!connection.hasAgentId && connection.hasApiKey && (
-          <div
-            className="rounded-lg p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-            style={{
-              background: "var(--bg-panel)",
-              border: "1px solid var(--border-main)",
-            }}
-          >
-            <p className="text-[12px]" style={{ color: "var(--text-secondary)" }}>
-              Adham is not created yet on platform.claude.com.
-            </p>
-            <button
-              type="button"
-              disabled={creatingAgent}
-              onClick={() => void handleCreateAgentOnPlatform()}
-              className="min-h-[44px] sm:min-h-[38px] px-4 rounded-lg text-[12px] font-semibold text-white shrink-0 cursor-pointer disabled:opacity-50"
-              style={{ background: "var(--bg-banner)" }}
-            >
-              {creatingAgent ? "Creating..." : "Create Adham Agent"}
-            </button>
-          </div>
-        )}
-
-        {createFeedback && (
-          <div
-            className="rounded-lg p-3 flex items-start gap-2 text-[12px]"
-            style={{
-              background: createFeedback.ok ? "var(--label-green-bg)" : "var(--label-red-bg)",
-              border: `1px solid ${createFeedback.ok ? "var(--label-green-border)" : "var(--label-red-border)"}`,
-              color: createFeedback.ok ? "var(--label-green-text)" : "var(--label-red-text)",
-            }}
-          >
-            {createFeedback.ok ? (
-              <Check className="w-4 h-4 shrink-0 mt-0.5" />
-            ) : (
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-            )}
-            <span className="break-words min-w-0">{createFeedback.msg}</span>
-          </div>
-        )}
-
-        <div className="flex flex-wrap items-center gap-2">
-          <ClaudeStatusPill
-            label={connection.hasApiKey ? "ANTHROPIC_API_KEY ready" : "API key missing"}
-            tone={connection.hasApiKey ? "green" : "red"}
-          />
-          {connection.agentId && (
-            <ClaudeStatusPill label={`Agent: ${connection.agentId}`} tone="blue" />
-          )}
-          {platformAgent && <ClaudeStatusPill label={`v${platformAgent.version}`} tone="slate" />}
-          {connection.dryRun && <ClaudeStatusPill label="MESSAGING_DRY_RUN ON" tone="amber" />}
-        </div>
-
-        <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3 pt-1">
-          <div className="flex-1 max-w-sm">
-            <label
-              htmlFor="studio-existing-student-label"
-              className="block text-[11px] font-medium mb-1"
-              style={{ color: "var(--text-secondary)" }}
-            >
-              Silent existing-student CRM label
-            </label>
-            <input
-              id="studio-existing-student-label"
-              type="text"
-              value={settingsDraft.existingStudentLabelName}
-              onChange={(e) =>
-                updateSettingsDraft((prev) => ({
-                  ...prev,
-                  existingStudentLabelName: e.target.value,
-                }))
-              }
-              placeholder="Existing student"
-              className="w-full min-h-[44px] sm:min-h-[38px] px-3 text-[16px] sm:text-[12px] rounded-lg outline-none"
-              style={{
-                background: "var(--bg-input)",
-                border: "1px solid var(--border-input)",
-                color: "var(--text-primary)",
-              }}
-            />
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              disabled={savingSettings}
-              onClick={() => void saveGlobalSettings()}
-              className="min-h-[44px] sm:min-h-[38px] px-3.5 rounded-lg text-[11.5px] font-semibold text-white cursor-pointer disabled:opacity-50"
-              style={{ background: "var(--bg-banner)" }}
-            >
-              Save label
-            </button>
-            <a
-              href="https://platform.claude.com"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 min-h-[44px] sm:min-h-[38px] px-3 rounded-lg text-[11.5px] font-medium hover:bg-[var(--bg-hover)]"
-              style={{
-                background: "var(--bg-input)",
-                border: "1px solid var(--border-input)",
-                color: "var(--text-primary)",
-              }}
-            >
-              <span>Open Claude Platform</span>
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
           </div>
         </div>
       </section>

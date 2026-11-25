@@ -176,7 +176,6 @@ export function FollowUpPlaybookSection({
           defaultPrompt={playbookDefaults.system}
           defaultName={playbookDefaults.name}
           onResetToDefaults={onResetDefaults}
-          allowRawMode={false}
         />
 
         {agentFeedback && (
