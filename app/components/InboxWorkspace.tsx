@@ -352,15 +352,6 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     return () => clearInterval(timer);
   }, []);
 
-  // Sync mobileView when navigated from another page (e.g. Pipeline, Leads, Follow-ups)
-  const prevActiveChatId = useRef<string | null>(null);
-  useEffect(() => {
-    if (activeChatId && activeChatId !== prevActiveChatId.current) {
-      prevActiveChatId.current = activeChatId;
-      setMobileView("chat");
-    }
-  }, [activeChatId]);
-
   // Close date filter popover when clicking outside or pressing Escape
   useEffect(() => {
     if (!showDatePopover) return;
@@ -606,6 +597,34 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     return conversations.find((c) => c.id === activeChatId);
   }, [conversations, activeChatId]);
 
+  const activeChatIdRef = useRef<string | null>(activeConv?.id ?? null);
+  useEffect(() => {
+    const currentId = activeConv?.id ?? null;
+    activeChatIdRef.current = currentId;
+    return () => {
+      if (activeChatIdRef.current === currentId) {
+        activeChatIdRef.current = null;
+      }
+    };
+  }, [activeConv?.id]);
+
+  // Sync mobileView when navigated from another page (e.g. Pipeline, Leads, Follow-ups),
+  // but never trap mobile users on a blank chat view when activeChatId belongs to the other inbox.
+  const prevActiveChatId = useRef<string | null>(null);
+  const hasActiveConvInInbox = Boolean(activeConv);
+  useEffect(() => {
+    if (activeChatId && hasActiveConvInInbox) {
+      if (activeChatId !== prevActiveChatId.current) {
+        prevActiveChatId.current = activeChatId;
+        setMobileView("chat");
+      }
+      return;
+    }
+    prevActiveChatId.current = null;
+    setMobileView((prev) => (prev === "list" ? prev : "list"));
+    setShowDetailsPanel(false);
+  }, [activeChatId, hasActiveConvInInbox]);
+
   const rawHeaderAvatarUrl = getConversationAvatarUrl(activeConv);
   const isHeaderAvatarFailed = Boolean(rawHeaderAvatarUrl && failedAvatarUrls[rawHeaderAvatarUrl]);
 
@@ -774,9 +793,13 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
   const [lightboxImage, setLightboxImage] = useState<{ url: string; fileName?: string } | null>(null);
   const [isDraggingOverChat, setIsDraggingOverChat] = useState(false);
   const [droppedFilesForInput, setDroppedFilesForInput] = useState<{
+    chatId: string;
     files: File[];
     timestamp: number;
   } | null>(null);
+  const handleClearDroppedFiles = useCallback(() => {
+    setDroppedFilesForInput(null);
+  }, []);
   const dragDepthRef = useRef(0);
 
   // Scroll only the inner chat container so outer <main>/layout containers can never be scrolled
@@ -900,6 +923,9 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     setReplyingTo(null);
     setActiveReactionMenu(null);
     setFullEmojiMenu(null);
+    setDroppedFilesForInput(null);
+    setIsDraggingOverChat(false);
+    dragDepthRef.current = 0;
     setShowGroupHistorySync(false);
     setGroupInfoModalState({ open: false, initialMember: null });
   }, [activeChatId]);
@@ -1211,17 +1237,21 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
           finalizeOptimisticMessages(chatId, tempIds);
           const data = await res.json().catch(() => null);
           const parsed = formatMetaErrorMessage(data || { error: `Request failed (HTTP ${res.status})` });
-          setSendError(parsed);
+          if (activeChatIdRef.current === chatId) {
+            setSendError(parsed);
+          }
           return false;
         }
       } catch (err) {
         console.error("Failed to send reply:", err);
         finalizeOptimisticMessages(chatId, tempIds);
-        setSendError({
-          title: "Network error",
-          message: "Could not reach the server to send your reply.",
-          actionHint: "Please check your internet connection and try again.",
-        });
+        if (activeChatIdRef.current === chatId) {
+          setSendError({
+            title: "Network error",
+            message: "Could not reach the server to send your reply.",
+            actionHint: "Please check your internet connection and try again.",
+          });
+        }
         return false;
       }
     },
@@ -1297,15 +1327,20 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
       mentionPayload?: { mentions?: MessageMention[]; mentionAll?: boolean }
     ): Promise<boolean> => {
       if (!activeConv || isReadOnly) return false;
-      setEditingMessage(null);
+      const originChatId = activeConv.id;
       setSendError(null);
-      const res = await editMessage(activeConv.id, messageId, newText, mentionPayload);
+      const res = await editMessage(originChatId, messageId, newText, mentionPayload);
       if (!res.ok) {
-        setSendError({
-          title: "Could not edit message",
-          message: res.error || "WhatsApp only allows editing messages within 15 minutes of sending.",
-        });
+        if (activeChatIdRef.current === originChatId) {
+          setSendError({
+            title: "Could not edit message",
+            message: res.error || "WhatsApp only allows editing messages within 15 minutes of sending.",
+          });
+        }
         return false;
+      }
+      if (activeChatIdRef.current === originChatId) {
+        setEditingMessage((prev) => (prev?.id === messageId ? null : prev));
       }
       return true;
     },
@@ -1314,6 +1349,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
 
   const handleConfirmUnsendMessage = useCallback(async () => {
     if (!activeConv || !unsendingMessage || isReadOnly || isUnsending) return;
+    const originChatId = activeConv.id;
     const targetId = unsendingMessage.id;
     setIsUnsending(true);
     setSendError(null);
@@ -1322,8 +1358,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     setUnsendingMessage(null);
 
     try {
-      const res = await unsendMessage(activeConv.id, targetId);
-      if (!res.ok) {
+      const res = await unsendMessage(originChatId, targetId);
+      if (!res.ok && activeChatIdRef.current === originChatId) {
         setSendError({
           title: "Could not delete message",
           message: res.error || "WhatsApp only allows deleting messages within 48 hours of sending.",
@@ -1362,7 +1398,9 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
       setEditingMessage(null);
       const isIncoming = Boolean(msg.isIncoming);
       const quoteAuthor = isIncoming
-        ? activeConv.leadName || activeConv.profileName || activeConv.name || "Customer"
+        ? activeConv.isGroup
+          ? msg.senderName || "Group Member"
+          : activeConv.leadName || activeConv.profileName || activeConv.name || "Customer"
         : "You";
 
       setReplyingTo({
@@ -2422,7 +2460,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
       {/* ── MIDDLE: Conversation Detail ── */}
       <div
         onDragEnter={(e) => {
-          if (!activeConv || isReadOnly || !canSendMessages) return;
+          if (!activeConv || isReadOnly || !canSendMessages || editingMessage) return;
           if (e.dataTransfer?.types?.includes("Files")) {
             e.preventDefault();
             dragDepthRef.current += 1;
@@ -2430,14 +2468,14 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
           }
         }}
         onDragOver={(e) => {
-          if (!activeConv || isReadOnly || !canSendMessages) return;
+          if (!activeConv || isReadOnly || !canSendMessages || editingMessage) return;
           if (e.dataTransfer?.types?.includes("Files")) {
             e.preventDefault();
             e.dataTransfer.dropEffect = "copy";
           }
         }}
         onDragLeave={(e) => {
-          if (!activeConv || isReadOnly || !canSendMessages) return;
+          if (!activeConv || isReadOnly || !canSendMessages || editingMessage) return;
           if (e.dataTransfer?.types?.includes("Files")) {
             e.preventDefault();
             dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
@@ -2447,13 +2485,13 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
           }
         }}
         onDrop={(e) => {
-          if (!activeConv || isReadOnly || !canSendMessages) return;
+          if (!activeConv || isReadOnly || !canSendMessages || editingMessage) return;
           e.preventDefault();
           dragDepthRef.current = 0;
           setIsDraggingOverChat(false);
           const dropped = Array.from(e.dataTransfer?.files || []);
           if (dropped.length > 0) {
-            setDroppedFilesForInput({ files: dropped, timestamp: Date.now() });
+            setDroppedFilesForInput({ chatId: activeConv.id, files: dropped, timestamp: Date.now() });
           }
         }}
         className={`
@@ -3309,7 +3347,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                               {/* Text content (e.g. form comments or lead message) */}
                               {showPlainText && (
                                 <>
-                                  {msg.mentionAll && !/@(?:all|everyone|الكل|الجميع)(?=$|[\s.,!?:;،؛)\]"'»])/i.test(msg.text || "") && (
+                                  {msg.mentionAll && !/(?:^|[\s(\[{"'«*_~])@(?:all|everyone|الكل|الجميع)(?=$|[\s.,!?:;،؛؟)\]}"'»*_~])/i.test(msg.text || "") && (
                                     <div className="mb-1">
                                       <span
                                         className="inline-block text-[10.5px] font-semibold px-1.5 py-0.5 rounded border"
@@ -3711,6 +3749,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
               onCancelReply={() => setReplyingTo(null)}
               onJumpToMessage={scrollToMessage}
               externalDroppedFiles={droppedFilesForInput}
+              onExternalDroppedFilesConsumed={handleClearDroppedFiles}
               inboxMode={inboxMode}
               agentScope="both"
               claudeEnabled={Boolean(activeConv.claudeEnabled)}

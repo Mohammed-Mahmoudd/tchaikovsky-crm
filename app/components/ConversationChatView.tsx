@@ -229,9 +229,23 @@ export const ConversationChatView = React.memo(function ConversationChatView({
   const [lightboxImage, setLightboxImage] = useState<{ url: string; fileName?: string } | null>(null);
   const [isDraggingOverChat, setIsDraggingOverChat] = useState(false);
   const [droppedFilesForInput, setDroppedFilesForInput] = useState<{
+    chatId: string;
     files: File[];
     timestamp: number;
   } | null>(null);
+  const handleClearDroppedFiles = useCallback(() => {
+    setDroppedFilesForInput(null);
+  }, []);
+  const activeChatIdRef = useRef<string | null>(conversationId || null);
+  useEffect(() => {
+    const currentId = conversationId || null;
+    activeChatIdRef.current = currentId;
+    return () => {
+      if (activeChatIdRef.current === currentId) {
+        activeChatIdRef.current = null;
+      }
+    };
+  }, [conversationId]);
   const dragDepthRef = useRef(0);
   const [isLoadingMessages, setIsLoadingMessages] = useState<boolean>(false);
   const isNavigatingToFullChatRef = useRef<boolean>(false);
@@ -332,6 +346,9 @@ export const ConversationChatView = React.memo(function ConversationChatView({
     setReplyingTo(null);
     setActiveReactionMenu(null);
     setFullEmojiMenu(null);
+    setDroppedFilesForInput(null);
+    setIsDraggingOverChat(false);
+    dragDepthRef.current = 0;
     prevMsgCountRef.current = 0;
   }, [conversationId]);
 
@@ -586,17 +603,21 @@ export const ConversationChatView = React.memo(function ConversationChatView({
           finalizeOptimisticMessages(chatId, tempIds);
           const data = await res.json().catch(() => null);
           const parsed = formatMetaErrorMessage(data || { error: `Request failed (HTTP ${res.status})` });
-          setSendError(parsed);
+          if (activeChatIdRef.current === chatId) {
+            setSendError(parsed);
+          }
           return false;
         }
       } catch (err) {
         console.error("Failed to send reply:", err);
         finalizeOptimisticMessages(chatId, tempIds);
-        setSendError({
-          title: "Network error",
-          message: "Could not reach the server to send your reply.",
-          actionHint: "Please check your internet connection and try again.",
-        });
+        if (activeChatIdRef.current === chatId) {
+          setSendError({
+            title: "Network error",
+            message: "Could not reach the server to send your reply.",
+            actionHint: "Please check your internet connection and try again.",
+          });
+        }
         return false;
       }
     },
@@ -673,15 +694,20 @@ export const ConversationChatView = React.memo(function ConversationChatView({
       mentionPayload?: { mentions?: MessageMention[]; mentionAll?: boolean }
     ): Promise<boolean> => {
       if (!activeConv || !canSendMessages) return false;
-      setEditingMessage(null);
+      const originChatId = activeConv.id;
       setSendError(null);
-      const res = await editMessage(activeConv.id, messageId, newText, mentionPayload);
+      const res = await editMessage(originChatId, messageId, newText, mentionPayload);
       if (!res.ok) {
-        setSendError({
-          title: "Could not edit message",
-          message: res.error || "WhatsApp only allows editing messages within 15 minutes of sending.",
-        });
+        if (activeChatIdRef.current === originChatId) {
+          setSendError({
+            title: "Could not edit message",
+            message: res.error || "WhatsApp only allows editing messages within 15 minutes of sending.",
+          });
+        }
         return false;
+      }
+      if (activeChatIdRef.current === originChatId) {
+        setEditingMessage((prev) => (prev?.id === messageId ? null : prev));
       }
       return true;
     },
@@ -690,6 +716,7 @@ export const ConversationChatView = React.memo(function ConversationChatView({
 
   const handleConfirmUnsendMessage = useCallback(async () => {
     if (!activeConv || !unsendingMessage || !canSendMessages || isUnsending) return;
+    const originChatId = activeConv.id;
     const targetId = unsendingMessage.id;
     setIsUnsending(true);
     setSendError(null);
@@ -698,8 +725,8 @@ export const ConversationChatView = React.memo(function ConversationChatView({
     setUnsendingMessage(null);
 
     try {
-      const res = await unsendMessage(activeConv.id, targetId);
-      if (!res.ok) {
+      const res = await unsendMessage(originChatId, targetId);
+      if (!res.ok && activeChatIdRef.current === originChatId) {
         setSendError({
           title: "Could not delete message",
           message: res.error || "WhatsApp only allows deleting messages within 48 hours of sending.",
@@ -738,7 +765,9 @@ export const ConversationChatView = React.memo(function ConversationChatView({
       setEditingMessage(null);
       const isIncoming = Boolean(msg.isIncoming);
       const quoteAuthor = isIncoming
-        ? activeConv.leadName || activeConv.profileName || activeConv.name || "Customer"
+        ? activeConv.isGroup
+          ? msg.senderName || "Group Member"
+          : activeConv.leadName || activeConv.profileName || activeConv.name || "Customer"
         : "You";
 
       setReplyingTo({
@@ -790,7 +819,7 @@ export const ConversationChatView = React.memo(function ConversationChatView({
   return (
     <div
       onDragEnter={(e) => {
-        if (!activeConv || isReadOnly || !canSendMessages) return;
+        if (!activeConv || isReadOnly || !canSendMessages || editingMessage) return;
         if (e.dataTransfer?.types?.includes("Files")) {
           e.preventDefault();
           dragDepthRef.current += 1;
@@ -798,14 +827,14 @@ export const ConversationChatView = React.memo(function ConversationChatView({
         }
       }}
       onDragOver={(e) => {
-        if (!activeConv || isReadOnly || !canSendMessages) return;
+        if (!activeConv || isReadOnly || !canSendMessages || editingMessage) return;
         if (e.dataTransfer?.types?.includes("Files")) {
           e.preventDefault();
           e.dataTransfer.dropEffect = "copy";
         }
       }}
       onDragLeave={(e) => {
-        if (!activeConv || isReadOnly || !canSendMessages) return;
+        if (!activeConv || isReadOnly || !canSendMessages || editingMessage) return;
         if (e.dataTransfer?.types?.includes("Files")) {
           e.preventDefault();
           dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
@@ -815,13 +844,13 @@ export const ConversationChatView = React.memo(function ConversationChatView({
         }
       }}
       onDrop={(e) => {
-        if (!activeConv || isReadOnly || !canSendMessages) return;
+        if (!activeConv || isReadOnly || !canSendMessages || editingMessage) return;
         e.preventDefault();
         dragDepthRef.current = 0;
         setIsDraggingOverChat(false);
         const dropped = Array.from(e.dataTransfer?.files || []);
         if (dropped.length > 0) {
-          setDroppedFilesForInput({ files: dropped, timestamp: Date.now() });
+          setDroppedFilesForInput({ chatId: activeConv.id, files: dropped, timestamp: Date.now() });
         }
       }}
       className={`relative flex-1 flex flex-col min-w-0 h-full overflow-hidden ${className}`}
@@ -1125,6 +1154,14 @@ export const ConversationChatView = React.memo(function ConversationChatView({
               } ${groupedReactions.length > 0 ? "mb-2" : ""}`}
               title={canReplyToThisMessage ? "Double-click row to reply" : undefined}
             >
+              {activeConv.isGroup && msg.isIncoming && (
+                <span
+                  className="text-[11px] font-semibold mb-1 px-1.5"
+                  style={{ color: "#0066FF" }}
+                >
+                  {msg.senderName || "Group Member"}
+                </span>
+              )}
               {!msg.isIncoming && msg.senderName && (
                 <span
                   className="text-[11px] font-medium mb-1 px-1.5"
@@ -1229,10 +1266,13 @@ export const ConversationChatView = React.memo(function ConversationChatView({
                         msg.replyTo.senderName !== "You" &&
                         msg.replyTo.senderName !== "Staff";
 
+                    const incomingFallbackAuthor = activeConv.isGroup
+                      ? "Group Member"
+                      : activeConv.leadName || activeConv.profileName || activeConv.name || "Customer";
                     const authorName = isQuotingIncoming
                       ? referencedMsg
-                        ? referencedMsg.senderName || activeConv.leadName || activeConv.profileName || activeConv.name || "Customer"
-                        : msg.replyTo.senderName || activeConv.leadName || activeConv.profileName || activeConv.name || "Customer"
+                        ? referencedMsg.senderName || incomingFallbackAuthor
+                        : msg.replyTo.senderName || incomingFallbackAuthor
                       : "You";
                     const quoteText =
                       msg.replyTo.text && msg.replyTo.text !== "Attachment"
@@ -1496,7 +1536,7 @@ export const ConversationChatView = React.memo(function ConversationChatView({
                       {/* Plain Text Message */}
                       {showPlainText && (
                         <>
-                          {msg.mentionAll && !/@(?:all|everyone|الكل|الجميع)(?=$|[\s.,!?:;،؛)\]"'»])/i.test(msg.text || "") && (
+                          {msg.mentionAll && !/(?:^|[\s(\[{"'«*_~])@(?:all|everyone|الكل|الجميع)(?=$|[\s.,!?:;،؛؟)\]}"'»*_~])/i.test(msg.text || "") && (
                             <div className="mb-1">
                               <span
                                 className="inline-block text-[10.5px] font-semibold px-1.5 py-0.5 rounded border"
@@ -1548,11 +1588,27 @@ export const ConversationChatView = React.memo(function ConversationChatView({
                     {!msg.isIncoming && msg.senderName && !isDeletedMsg && (
                       <span className="font-semibold">{msg.senderName} ·</span>
                     )}
-                    {isDeletedMsg && (
-                      <span className="italic font-medium opacity-90">
-                        Deleted by {msg.deletedBy || (!msg.isIncoming ? user?.name || "Staff" : activeConv.name || "Customer")} ·
-                      </span>
-                    )}
+                    {isDeletedMsg && (() => {
+                      const realDeletedBy =
+                        msg.deletedBy && msg.deletedBy !== "Staff" ? msg.deletedBy : null;
+                      const realSenderName =
+                        msg.senderName && msg.senderName !== "Staff" ? msg.senderName : null;
+                      const deletedByName =
+                        realDeletedBy ||
+                        (!msg.isIncoming
+                          ? realSenderName || user?.name || "Staff"
+                          : activeConv.isGroup
+                          ? realSenderName || "Group Member"
+                          : activeConv.leadName ||
+                            activeConv.profileName ||
+                            activeConv.name ||
+                            "Customer");
+                      return (
+                        <span className="italic font-medium opacity-90">
+                          Deleted by {deletedByName} ·
+                        </span>
+                      );
+                    })()}
                     {!isDeletedMsg && msg.isEdited && <span className="italic opacity-90">Edited ·</span>}
                     <span title={timeTooltip || undefined}>{msg.time}</span>
                     {!msg.isIncoming && !isDeletedMsg && (
@@ -1825,6 +1881,7 @@ export const ConversationChatView = React.memo(function ConversationChatView({
         onCancelReply={() => setReplyingTo(null)}
         onJumpToMessage={scrollToMessage}
         externalDroppedFiles={droppedFilesForInput}
+        onExternalDroppedFilesConsumed={handleClearDroppedFiles}
         inboxMode={resolveConvInboxMode(activeConv)}
         agentScope={agentScope}
         claudeEnabled={Boolean(activeConv.claudeEnabled)}

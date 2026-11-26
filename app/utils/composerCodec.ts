@@ -73,7 +73,8 @@ export interface MultiParagraphBoundaryEndpoints {
 
 const WHATSAPP_BOUNDARY_CHAR_RE = /[\s\p{P}\p{S}]/u;
 
-const ALL_TOKEN_RE = /@(?:all|everyone|الكل|الجميع)(?=$|[\s.,!?:;،؛)\]}"'»])/gi;
+const ALL_TOKEN_RE =
+  /(?:^|[\s(\[{"'«*_~])@(?:all|everyone|الكل|الجميع)(?=$|[\s.,!?:;،؛؟)\]}"'»*_~])/gi;
 const INLINE_RE =
   /(^|[\s\p{P}\p{S}])(?:`([^`\n]+)`|([*_~])(?!\s)((?:(?!\3).)*?[^\s])\3)(?=$|[\s\p{P}\p{S}])/u;
 const MENTION_TOKEN_RE = /\uE000M(\d+)\uE001/g;
@@ -294,6 +295,12 @@ function expandMaskedPlainSegments(
   return out;
 }
 
+function restoreMaskedPlainText(value: string, activeSpans: MentionSpan[]): string {
+  if (!value || !activeSpans.length || !value.includes("\uE000M")) return value;
+  MENTION_TOKEN_RE.lastIndex = 0;
+  return value.replace(MENTION_TOKEN_RE, (full, idx) => activeSpans[Number(idx)]?.text ?? full);
+}
+
 function parseInlineSegments(
   input: string,
   format: ComposerFormatFlags,
@@ -318,7 +325,10 @@ function parseInlineSegments(
 
     if (m[2] !== undefined) {
       const codeFormat: ComposerFormatFlags = { ...format, code: true };
-      out.push(...expandMaskedPlainSegments(m[2], activeSpans, codeFormat));
+      const restoredCode = restoreMaskedPlainText(m[2], activeSpans);
+      if (restoredCode) {
+        out.push({ kind: "text", text: restoredCode, format: codeFormat });
+      }
     } else {
       const marker = m[3] as InlineMarker;
       const nextFormat: ComposerFormatFlags = {
@@ -391,7 +401,10 @@ export function parseWhatsAppToParagraphs(
       };
       for (let li = 0; li < codeLines.length; li++) {
         if (li > 0) pushNewParagraph();
-        appendSegments(expandMaskedPlainSegments(codeLines[li], activeSpans, codeFormat));
+        const restoredLine = restoreMaskedPlainText(codeLines[li], activeSpans);
+        if (restoredLine) {
+          appendSegments([{ kind: "text", text: restoredLine, format: codeFormat }]);
+        }
       }
     } else {
       const lines = part.split("\n");

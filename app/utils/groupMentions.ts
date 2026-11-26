@@ -109,8 +109,15 @@ export interface MentionSpan {
   mention?: MessageMention;
 }
 
-const ALL_TOKEN_RE = /@(?:all|everyone|الكل|الجميع)(?=$|[\s.,!?:;،؛)\]}"'»])/gi;
+const ALL_TOKEN_RE = /@(?:all|everyone|الكل|الجميع)(?=$|[\s.,!?:;،؛؟)\]}"'»*_~])/gi;
+const ALL_TOKEN_BOUNDARY_RE =
+  /(?:^|[\s(\[{"'«*_~])@(?:all|everyone|الكل|الجميع)(?=$|[\s.,!?:;،؛؟)\]}"'»*_~])/i;
 const ALL_KEYWORDS = ['all', 'everyone', 'الكل', 'الجميع', 'group', 'every'];
+
+export function hasAllMentionToken(text?: string | null): boolean {
+  if (!text || !text.includes('@')) return false;
+  return ALL_TOKEN_BOUNDARY_RE.test(text);
+}
 
 function extractJidUser(jidOrId?: string | null): string {
   const s = String(jidOrId || '').trim();
@@ -127,12 +134,12 @@ function normalizeDigits(val?: string | null): string {
 
 function isBoundaryBefore(text: string, idx: number): boolean {
   if (idx <= 0) return true;
-  return /[\s(\[{"'«]/.test(text[idx - 1]);
+  return /[\s(\[{"'«*_~]/.test(text[idx - 1]);
 }
 
 function isBoundaryAfter(text: string, idx: number): boolean {
   if (idx >= text.length) return true;
-  return /[\s.,!?:;،؛)\]}"'»]/.test(text[idx]);
+  return /[\s.,!?:;،؛؟)\]}"'»*_~]/.test(text[idx]);
 }
 
 function isGroupAllMention(m: MessageMention): boolean {
@@ -439,10 +446,9 @@ export function reconcileComposerMentions(
     }
   }
 
-  ALL_TOKEN_RE.lastIndex = 0;
-  const hasAllToken = ALL_TOKEN_RE.test(text);
-  // Keep mentionAll if an @all/@everyone token exists; turn it off only if user removed it from text
-  const mentionAll = hasAllToken ? true : prevMentionAll && lowerText.includes('@all');
+  const hasAllToken = hasAllMentionToken(text);
+  // Keep mentionAll if an @all/@everyone token exists with proper word boundary (not info@all.com)
+  const mentionAll = hasAllToken ? true : prevMentionAll && hasAllMentionToken(lowerText);
 
   return { mentions: kept, mentionAll };
 }
@@ -578,9 +584,16 @@ export function extractMentionSpans(
     const upgradedName = matchedParticipant ? getParticipantLabel(matchedParticipant) : m.displayName;
     const effectiveDisplay =
       !preserveTextLength && upgradedName && !/^\d{7,}$/.test(upgradedName) ? `@${upgradedName}` : undefined;
+    const isRawNumericToken = (tok?: string | null) =>
+      Boolean(tok && /^@\+?\d{7,}$/.test(tok.trim()));
 
-    if (m.token) pushRule(m.token, kind, undefined, m);
-    if (m.displayName) pushRule(`@${m.displayName}`, kind, undefined, m);
+    if (m.token) {
+      pushRule(m.token, kind, isRawNumericToken(m.token) ? effectiveDisplay : undefined, m);
+    }
+    if (m.displayName) {
+      const dispTok = `@${m.displayName}`;
+      pushRule(dispTok, kind, isRawNumericToken(dispTok) ? effectiveDisplay : undefined, m);
+    }
     if (userId) pushRule(`@${userId}`, kind, effectiveDisplay, m);
     if (phoneDigits) pushRule(`@${phoneDigits}`, kind, effectiveDisplay, m);
   }
@@ -640,7 +653,7 @@ export function extractMentionSpans(
 
   // 3. Fallback resolution of raw `@<digits>` from cached group participants (for legacy messages)
   if (participantByDigits.size > 0) {
-    const rawDigitMentionRe = /@(\d{7,16})(?=$|[\s.,!?:;،؛)\]}"'»])/g;
+    const rawDigitMentionRe = /@(\d{7,16})(?=$|[\s.,!?:;،؛؟)\]}"'»*_~])/g;
     let m: RegExpExecArray | null;
     while ((m = rawDigitMentionRe.exec(text)) !== null) {
       const start = m.index;

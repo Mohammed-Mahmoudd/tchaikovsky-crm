@@ -71,6 +71,7 @@ import { $createMentionNode, $isMentionNode, MentionNode } from "./MentionNode";
 export interface ComposerSnapshot {
   text: string;
   paragraphTextBeforeCaret: string;
+  mentionTextBeforeCaret: string;
   textBeforeCaret: string;
   paragraphCount: number;
   mentions: MessageMention[];
@@ -255,6 +256,55 @@ function getTextBeforePointInParagraph(
   return out;
 }
 
+/**
+ * Like `getTextBeforePointInParagraph`, except already-inserted `MentionNode` chips act as
+ * non-trigger boundaries so placing the caret immediately after a mention chip (e.g. when
+ * editing a message ending in `@Ahmed`, typing punctuation `@Ahmed,`, or inserting before an
+ * existing space) never re-opens the `@mention` autocomplete popover.
+ */
+function getMentionTextBeforePointInParagraph(
+  paragraph: ParagraphNode,
+  pointKey: string,
+  pointOffset: number,
+  pointType: "text" | "element"
+): string {
+  const children = paragraph.getChildren();
+  const MENTION_BOUNDARY_SENTINEL = "\u200B";
+  if (pointType === "element" && pointKey === paragraph.getKey()) {
+    let out = "";
+    const limit = Math.min(pointOffset, children.length);
+    for (let i = 0; i < limit; i++) {
+      const child = children[i];
+      if ($isMentionNode(child)) {
+        out = MENTION_BOUNDARY_SENTINEL;
+      } else {
+        out += child.getTextContent();
+      }
+    }
+    return out;
+  }
+
+  let out = "";
+  for (let i = 0; i < children.length; i++) {
+    const child = children[i];
+    if (child.getKey() === pointKey) {
+      if ($isMentionNode(child)) {
+        return MENTION_BOUNDARY_SENTINEL;
+      }
+      if (pointType === "text") {
+        out += child.getTextContent().slice(0, pointOffset);
+      }
+      break;
+    }
+    if ($isMentionNode(child)) {
+      out = MENTION_BOUNDARY_SENTINEL;
+    } else {
+      out += child.getTextContent();
+    }
+  }
+  return out;
+}
+
 function readEditorSnapshot(supportsFormatting: boolean): ComposerSnapshot {
   const paragraphs = extractParagraphsFromRoot();
   const payload = serializeParagraphsToWhatsApp(paragraphs, supportsFormatting);
@@ -263,6 +313,7 @@ function readEditorSnapshot(supportsFormatting: boolean): ComposerSnapshot {
     (paragraphs.length === 1 && paragraphs[0].segments.every((s) => !s.text));
 
   let paragraphTextBeforeCaret = "";
+  let mentionTextBeforeCaret = "";
   let textBeforeCaret = "";
   let activeFormats: ComposerFormatFlags = EMPTY_COMPOSER_FORMAT;
 
@@ -279,6 +330,12 @@ function readEditorSnapshot(supportsFormatting: boolean): ComposerSnapshot {
     const topElement = caretPoint.getNode().getTopLevelElement();
     if ($isParagraphNode(topElement)) {
       paragraphTextBeforeCaret = getTextBeforePointInParagraph(
+        topElement,
+        caretPoint.key,
+        caretPoint.offset,
+        caretPoint.type
+      );
+      mentionTextBeforeCaret = getMentionTextBeforePointInParagraph(
         topElement,
         caretPoint.key,
         caretPoint.offset,
@@ -302,6 +359,7 @@ function readEditorSnapshot(supportsFormatting: boolean): ComposerSnapshot {
   return {
     text: payload.text,
     paragraphTextBeforeCaret,
+    mentionTextBeforeCaret,
     textBeforeCaret,
     paragraphCount: Math.max(1, paragraphs.length),
     mentions: payload.mentions,
@@ -547,6 +605,7 @@ function snapshotsEqual(a: ComposerSnapshot | null, b: ComposerSnapshot): boolea
   if (
     a.text !== b.text ||
     a.paragraphTextBeforeCaret !== b.paragraphTextBeforeCaret ||
+    a.mentionTextBeforeCaret !== b.mentionTextBeforeCaret ||
     a.textBeforeCaret !== b.textBeforeCaret ||
     a.paragraphCount !== b.paragraphCount ||
     a.mentionAll !== b.mentionAll ||

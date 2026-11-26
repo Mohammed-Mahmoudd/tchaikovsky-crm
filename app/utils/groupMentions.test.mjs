@@ -155,4 +155,47 @@ describe('groupMentions', () => {
     assert.equal(match?.id, 'op_201001112233');
     assert.equal(findExistingDmForParticipant(inboxConvs, mixed[0], 'operation'), null);
   });
+
+  it('never triggers mentionAll on email addresses, supports formatted mentions and Arabic ؟, and upgrades raw @<LID> tokens', () => {
+    // Email addresses must NOT trigger mentionAll
+    assert.equal(
+      reconcileComposerMentions('Please email info@all.com or team@everyone.org', [], false).mentionAll,
+      false
+    );
+    assert.equal(
+      extractMentionSpans('Send to info@all.com', { mentionAll: true }).length,
+      0
+    );
+
+    // Formatted mentions (*@Ahmed*, _@all_) and Arabic question mark (@الكل؟) must parse cleanly
+    const formattedSpans = extractMentionSpans('Please check *@Ahmed* and _@all_ and @الكل؟', {
+      mentions: [{ jid: '111@lid', userId: '111', displayName: 'Ahmed', token: '@Ahmed' }],
+      mentionAll: true,
+    });
+    assert.deepEqual(
+      formattedSpans.map((s) => s.text),
+      ['@Ahmed', '@all', '@الكل']
+    );
+
+    // Stored raw numeric/@LID mentions must upgrade to participant display names
+    const upgraded = extractMentionSpans('Hello @184729103847123 see you soon', {
+      mentions: [
+        {
+          jid: '184729103847123@lid',
+          userId: '184729103847123',
+          displayName: '184729103847123',
+          token: '@184729103847123',
+        },
+      ],
+      participants: [
+        {
+          jid: '184729103847123@lid',
+          userId: '184729103847123',
+          displayName: 'Ahmed Hassan',
+        },
+      ],
+    });
+    assert.equal(upgraded.length, 1);
+    assert.equal(upgraded[0].displayText, '@Ahmed Hassan');
+  });
 });

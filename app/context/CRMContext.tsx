@@ -547,6 +547,8 @@ function slimConversationsForStorage(convs: Conversation[], limit?: number): Con
     if (c._id) item._id = c._id;
     if (c.inbox) item.inbox = c.inbox;
     if (c.whatsappAccount) item.whatsappAccount = c.whatsappAccount;
+    if (c.isGroup) item.isGroup = true;
+    if (c.groupMeta) item.groupMeta = c.groupMeta;
     if (c.profileName) item.profileName = c.profileName;
     if (c.leadName) item.leadName = c.leadName;
     if (c.metaChannel) item.metaChannel = c.metaChannel;
@@ -611,6 +613,7 @@ function hydrateCachedConversationNames(c: Conversation): Conversation {
   });
   return {
     ...c,
+    isGroup: isGroupConversation(c),
     name: resolved.name,
     leadName: resolved.leadName ?? c.leadName,
     profileName: resolved.profileName ?? c.profileName,
@@ -783,6 +786,10 @@ function resolvePendingPatchState(
 
 export function CRMProvider({ children }: { children: React.ReactNode }) {
   const { isReadOnly, canManageTeam, token, user, authFetch, closeSession, verifySession } = useAuth();
+  const userRef = useRef(user);
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
   const isMetaReviewer = Boolean(
     user?.email && user.email.toLowerCase().trim() === "test@meta.com"
   );
@@ -1358,10 +1365,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         c.savedForAgent && c.savedForAgentBy ? String(c.savedForAgentBy) : undefined,
       unreadCount: (() => {
         const rawUnread = Number(c.unreadCount) || 0;
+        const lastMsgTs = Number(c.lastMessageAt) || 0;
+        const lastReadTs = resolvedInbox === "operation" ? Number(c.lastReadAt) || 0 : 0;
+        if (lastReadTs > 0 && (!lastMsgTs || lastMsgTs <= lastReadTs)) {
+          return 0;
+        }
         if (rawUnread > 0) return rawUnread;
         const hasText = Boolean(c.lastMessageText && String(c.lastMessageText).trim());
         const isIncomingLast = c.lastMessageDirection === "incoming";
-        const lastMsgTs = Number(c.lastMessageAt) || 0;
         const lastOutTs = Number(c.lastOutgoingAt) || 0;
         if (hasText && isIncomingLast && (!lastOutTs || lastMsgTs > lastOutTs)) {
           return 1;
@@ -1597,6 +1608,13 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 cachedMessages = [];
               }
             }
+            const resolvedUnread =
+              cachedMessages.length > 0
+                ? computeUnreadFromMessages(cachedMessages, effectiveReadAt)
+                : effectiveReadAt && (!meta.lastMessageAt || meta.lastMessageAt <= effectiveReadAt)
+                ? 0
+                : meta.unreadCount;
+
             const pending = pendingPatchesRef.current.get(meta.id);
             const { keepOptimistic, shouldEvict } = resolvePendingPatchState(pending, meta.updatedAt, now);
             if (shouldEvict) {
@@ -1610,6 +1628,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 lastReadAt: effectiveReadAt,
                 groupParticipants: preservedParticipants,
                 groupMeta: preservedGroupMeta,
+                unreadCount:
+                  pending.updates.unreadCount !== undefined
+                    ? Number(pending.updates.unreadCount) || 0
+                    : resolvedUnread,
                 lastMessageAt: Math.max(meta.lastMessageAt || 0, pending.updates.lastMessageAt || 0),
                 messages: cachedMessages,
               } as Conversation;
@@ -1617,12 +1639,6 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             }
 
             // Always preserve valid cached messages — slim poll NEVER wipes them
-            const resolvedUnread =
-              cachedMessages.length > 0
-                ? computeUnreadFromMessages(cachedMessages, effectiveReadAt)
-                : effectiveReadAt && (!meta.lastMessageAt || meta.lastMessageAt <= effectiveReadAt)
-                ? 0
-                : meta.unreadCount;
             return {
               ...meta,
               profilePic: preservedProfilePic,
@@ -1696,14 +1712,15 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         // Keep conversations ordered newest-first after applying optimistic lastMessageAt updates
         parsed.sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
 
-        const scopedParsed = user?.role
+        const currentUser = userRef.current;
+        const scopedParsed = currentUser?.role
           ? parsed.filter(
               (c) =>
-                canAccessConversationInboxData(user.role, resolveConvInboxMode(c)) &&
-                (normalizeRole(user.role) !== "enrollment_director" ||
-                  canUserViewConversationInStore(c, user))
+                canAccessConversationInboxData(currentUser.role, resolveConvInboxMode(c)) &&
+                (normalizeRole(currentUser.role) !== "enrollment_director" ||
+                  canUserViewConversationInStore(c, currentUser))
             )
-          : parsed;
+          : [...parsed];
 
         setConversations((prev) => {
           if (prev.length === 0) {
@@ -1724,9 +1741,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             const oldC = prev[i];
             if (parsedIds.has(oldC.id) || deletedIdsRef.current.has(oldC.id)) continue;
             if (
-              user?.role &&
-              normalizeRole(user.role) === "enrollment_director" &&
-              !canUserViewConversationInStore(oldC, user)
+              currentUser?.role &&
+              (!canAccessConversationInboxData(currentUser.role, resolveConvInboxMode(oldC)) ||
+                (normalizeRole(currentUser.role) === "enrollment_director" &&
+                  !canUserViewConversationInStore(oldC, currentUser)))
             ) {
               continue;
             }
@@ -1743,10 +1761,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             }
           }
 
-          parsed.sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
+          scopedParsed.sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
 
-          let anyChanged = prev.length !== parsed.length;
-          const merged = parsed.map((nextConv, idx) => {
+          let anyChanged = prev.length !== scopedParsed.length;
+          const merged = scopedParsed.map((nextConv, idx) => {
             const oldConv = prevById.get(nextConv.id);
             if (!oldConv) {
               anyChanged = true;
@@ -1820,10 +1838,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               oldConv.cashIn === nextConv.cashIn &&
               oldConv.notes === nextConv.notes &&
               oldConv.profilePic === nextConv.profilePic &&
+              Boolean(oldConv.isGroup) === Boolean(nextConv.isGroup) &&
               oldConv.groupParticipants === nextConv.groupParticipants &&
               oldConv.groupMeta?.avatarUrl === nextConv.groupMeta?.avatarUrl &&
               oldConv.groupMeta?.participantsSyncedAt === nextConv.groupMeta?.participantsSyncedAt &&
               oldConv.groupMeta?.size === nextConv.groupMeta?.size &&
+              (oldConv.groupMeta?.desc || "") === (nextConv.groupMeta?.desc || "") &&
+              Boolean(oldConv.groupMeta?.announce) === Boolean(nextConv.groupMeta?.announce) &&
+              Boolean(oldConv.groupMeta?.restrict) === Boolean(nextConv.groupMeta?.restrict) &&
               oldConv.groupMeta?.fetchedAt === nextConv.groupMeta?.fetchedAt &&
               oldConv.messages === nextConv.messages;
 
@@ -2119,11 +2141,15 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               lastReadAt: isOpActive
                 ? Math.max(effectiveActiveReadAt || 0, c.lastReadAt || 0) || undefined
                 : c.lastReadAt,
+              isGroup: normActive.isGroup ?? c.isGroup,
               profilePic: normActive.profilePic ?? profilePicCacheRef.current.get(chatId) ?? c.profilePic,
               groupParticipants: Array.isArray(json.data.groupParticipants)
                 ? json.data.groupParticipants
                 : c.groupParticipants,
-              groupMeta: json.data.groupMeta || c.groupMeta,
+              groupMeta:
+                json.data.groupMeta && !json.data.groupMeta.avatarUrl && c.groupMeta?.avatarUrl
+                  ? { ...json.data.groupMeta, avatarUrl: c.groupMeta.avatarUrl }
+                  : json.data.groupMeta || c.groupMeta,
             };
             if (
               mergedConv.pipeline !== c.pipeline ||
@@ -3102,11 +3128,26 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                       : opCutoff && (!norm.lastMessageAt || norm.lastMessageAt <= opCutoff)
                       ? 0
                       : norm.unreadCount;
+                  const cachedGroup = groupParticipantsCacheRef.current.get(conversationId);
+                  const preservedParticipants =
+                    norm.groupParticipants ?? cachedGroup?.participants ?? c.groupParticipants;
+                  const preservedGroupMeta =
+                    norm.groupMeta &&
+                    !norm.groupMeta.avatarUrl &&
+                    (cachedGroup?.groupMeta?.avatarUrl || c.groupMeta?.avatarUrl)
+                      ? {
+                          ...norm.groupMeta,
+                          avatarUrl: cachedGroup?.groupMeta?.avatarUrl || c.groupMeta?.avatarUrl,
+                        }
+                      : norm.groupMeta ?? cachedGroup?.groupMeta ?? c.groupMeta;
                   return {
                     ...c,
                     ...norm,
                     ...(hasPending ? pending?.updates : {}),
+                    isGroup: norm.isGroup ?? c.isGroup,
                     profilePic: preservedPic,
+                    groupParticipants: preservedParticipants,
+                    groupMeta: preservedGroupMeta,
                     lastReadAt: isOpUpdate ? opCutoff : c.lastReadAt,
                     lastMessageAt: Math.max(
                       c.lastMessageAt || 0,
@@ -4477,19 +4518,54 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           if (json.data) {
             const confirmed = normalizeConversationMeta(json.data);
             setConversations((prev) => {
-              const next = prev.map((c) =>
-                c.id === id
-                  ? ({
-                      ...confirmed,
-                      lastMessageAt: Math.max(confirmed.lastMessageAt || 0, c.lastMessageAt || 0),
-                      pipeline:
-                        c.pipeline !== "New" && confirmed.pipeline === "New"
-                          ? c.pipeline
-                          : confirmed.pipeline,
-                      messages: c.messages,
-                    } as Conversation) // keep loaded messages & newer message timestamps
-                  : c
-              );
+              const next = prev.map((c) => {
+                if (c.id !== id) return c;
+                const cachedGroup = groupParticipantsCacheRef.current.get(id);
+                const preservedParticipants =
+                  confirmed.groupParticipants ?? cachedGroup?.participants ?? c.groupParticipants;
+                const preservedGroupMeta =
+                  confirmed.groupMeta &&
+                  !confirmed.groupMeta.avatarUrl &&
+                  (cachedGroup?.groupMeta?.avatarUrl || c.groupMeta?.avatarUrl)
+                    ? {
+                        ...confirmed.groupMeta,
+                        avatarUrl: cachedGroup?.groupMeta?.avatarUrl || c.groupMeta?.avatarUrl,
+                      }
+                    : confirmed.groupMeta ?? cachedGroup?.groupMeta ?? c.groupMeta;
+                const preservedPic =
+                  confirmed.profilePic ?? profilePicCacheRef.current.get(id) ?? c.profilePic;
+                const isOpConv = resolveConvInboxMode({ ...c, ...confirmed }) === "operation";
+                const effectiveReadAt = isOpConv
+                  ? Math.max(
+                      confirmed.lastReadAt || 0,
+                      c.lastReadAt || 0,
+                      lastReadAtRef.current.get(id) || 0
+                    ) || undefined
+                  : c.lastReadAt;
+                const mergedLastMsgAt = Math.max(confirmed.lastMessageAt || 0, c.lastMessageAt || 0);
+                const cachedMsgs = messagesCacheRef.current.get(id) || c.messages || [];
+                const resolvedUnread =
+                  cachedMsgs.length > 0
+                    ? computeUnreadFromMessages(cachedMsgs, isOpConv ? effectiveReadAt : undefined)
+                    : isOpConv && effectiveReadAt && (!mergedLastMsgAt || mergedLastMsgAt <= effectiveReadAt)
+                    ? 0
+                    : confirmed.unreadCount;
+                return {
+                  ...confirmed,
+                  isGroup: confirmed.isGroup ?? c.isGroup,
+                  profilePic: preservedPic,
+                  groupParticipants: preservedParticipants,
+                  groupMeta: preservedGroupMeta,
+                  lastReadAt: effectiveReadAt,
+                  unreadCount: resolvedUnread,
+                  lastMessageAt: mergedLastMsgAt,
+                  pipeline:
+                    c.pipeline !== "New" && confirmed.pipeline === "New"
+                      ? c.pipeline
+                      : confirmed.pipeline,
+                  messages: c.messages,
+                } as Conversation;
+              });
               persistConversationsCache(next, true);
               return next;
             });

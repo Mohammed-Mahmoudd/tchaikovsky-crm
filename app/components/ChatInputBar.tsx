@@ -454,7 +454,8 @@ interface ChatInputBarProps {
   replyingTo?: ActiveReplyContext | null;
   onCancelReply?: () => void;
   onJumpToMessage?: (id: string) => void;
-  externalDroppedFiles?: { files: File[]; timestamp: number } | null;
+  externalDroppedFiles?: { files: File[]; timestamp: number; chatId?: string } | null;
+  onExternalDroppedFilesConsumed?: () => void;
   inboxMode?: "admissions" | "operation";
   agentScope?: LeadAgentScope;
   claudeEnabled?: boolean;
@@ -492,6 +493,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   onCancelReply,
   onJumpToMessage,
   externalDroppedFiles,
+  onExternalDroppedFilesConsumed,
   inboxMode = "admissions",
   agentScope = "both",
   claudeEnabled = false,
@@ -507,6 +509,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   const [snapshot, setSnapshot] = useState<ComposerSnapshot>({
     text: "",
     paragraphTextBeforeCaret: "",
+    mentionTextBeforeCaret: "",
     textBeforeCaret: "",
     paragraphCount: 1,
     mentions: [],
@@ -525,6 +528,19 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   const [activeMentionIndex, setActiveMentionIndex] = useState(0);
 
   const editorRef = useRef<ComposerEditorHandle>(null);
+  const activeChatIdRef = useRef<string>(chatId);
+  const editingMessageIdRef = useRef<string | null>(editingMessage?.id ?? null);
+  useEffect(() => {
+    activeChatIdRef.current = chatId;
+    return () => {
+      if (activeChatIdRef.current === chatId) {
+        activeChatIdRef.current = "";
+      }
+    };
+  }, [chatId]);
+  useEffect(() => {
+    editingMessageIdRef.current = editingMessage?.id ?? null;
+  }, [editingMessage?.id]);
   const groupParticipantsRef = useRef<GroupParticipant[]>(groupParticipants);
   useEffect(() => {
     groupParticipantsRef.current = groupParticipants;
@@ -550,6 +566,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
 
   const text = snapshot.text;
   const paragraphTextBeforeCaret = snapshot.paragraphTextBeforeCaret;
+  const mentionTextBeforeCaret = snapshot.mentionTextBeforeCaret;
   const textBeforeCaret = snapshot.textBeforeCaret;
   const selectedMentions: ComposerMentionItem[] = useMemo(
     () =>
@@ -684,6 +701,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     (files: FileList | File[], forceDocument = false) => {
       const list = Array.from(files || []);
       if (list.length === 0) return;
+      const originChatId = chatId;
 
       const newItems: QueuedAttachment[] = list.map((file) => {
         const id = `att_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -692,6 +710,9 @@ export const ChatInputBar = React.memo(function ChatInputBar({
 
         const uploadPromise = preUploadFile(file, forceDocument, previewUrl, token, authFetch).then(
           (payload) => {
+            if (activeChatIdRef.current !== originChatId) {
+              return payload;
+            }
             setQueuedAttachments((prev) =>
               prev.map((item) =>
                 item.id === id
@@ -732,7 +753,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         editorRef.current?.focus();
       });
     },
-    [token, authFetch]
+    [chatId, token, authFetch]
   );
 
   // Handle files dropped onto the conversation area in parent page
@@ -744,9 +765,21 @@ export const ChatInputBar = React.memo(function ChatInputBar({
       externalDroppedFiles.timestamp !== lastDropTimestampRef.current
     ) {
       lastDropTimestampRef.current = externalDroppedFiles.timestamp;
-      enqueueFiles(externalDroppedFiles.files, false);
+      const matchesChat = !externalDroppedFiles.chatId || externalDroppedFiles.chatId === chatId;
+      if (matchesChat && !editingMessage && !isReadOnly && canSendMessages) {
+        enqueueFiles(externalDroppedFiles.files, false);
+      }
+      onExternalDroppedFilesConsumed?.();
     }
-  }, [externalDroppedFiles, enqueueFiles]);
+  }, [
+    externalDroppedFiles,
+    chatId,
+    editingMessage,
+    isReadOnly,
+    canSendMessages,
+    enqueueFiles,
+    onExternalDroppedFilesConsumed,
+  ]);
 
   const handleRemoveAttachment = useCallback((id: string) => {
     setQueuedAttachments((prev) => prev.filter((item) => item.id !== id));
@@ -815,6 +848,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     const hasAttachments = queuedAttachments.length > 0;
     if ((!trimmed && !hasAttachments) || isSending || isReadOnly || !canSendMessages) return;
 
+    const originChatId = chatId;
     const mentionPayload = mentionsEnabled
       ? {
           mentions: payload.mentions,
@@ -824,24 +858,47 @@ export const ChatInputBar = React.memo(function ChatInputBar({
 
     // If editing an existing WhatsApp message
     if (editingMessage && onSaveEdit) {
+      const serializeMentionKey = (list?: MessageMention[]) =>
+        (list || [])
+          .map((m) =>
+            String(m?.jid || m?.userId || m?.token || m?.displayName || "")
+              .trim()
+              .toLowerCase()
+          )
+          .filter(Boolean)
+          .sort()
+          .join("|");
       if (
         trimmed === editingMessage.text.trim() &&
-        Boolean(mentionPayload?.mentionAll) === Boolean(editingMessage.mentionAll)
+        Boolean(mentionPayload?.mentionAll) === Boolean(editingMessage.mentionAll) &&
+        serializeMentionKey(mentionPayload?.mentions) ===
+          serializeMentionKey(editingMessage.mentions)
       ) {
         handleCancelEditMode();
         return;
       }
+      const originEditId = editingMessage.id;
       setIsSending(true);
       setShowEmojiPicker(false);
       editorRef.current?.clear();
-      const ok = await onSaveEdit(editingMessage.id, trimmed, mentionPayload);
+      let ok = false;
+      try {
+        ok = await onSaveEdit(originEditId, trimmed, mentionPayload);
+      } catch {
+        ok = false;
+      }
+      if (activeChatIdRef.current !== originChatId) {
+        return;
+      }
       setIsSending(false);
       if (!ok) {
-        editorRef.current?.setContent(trimmed, {
-          mentions: payload.mentions,
-          mentionAll: payload.mentionAll,
-          participants: groupParticipantsRef.current,
-        });
+        if (editingMessageIdRef.current === originEditId) {
+          editorRef.current?.setContent(trimmed, {
+            mentions: payload.mentions,
+            mentionAll: payload.mentionAll,
+            participants: groupParticipantsRef.current,
+          });
+        }
       } else {
         editorRef.current?.focus();
       }
@@ -849,6 +906,15 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     }
 
     const attachmentsSnapshot = [...queuedAttachments];
+    const replyPayload = replyingTo
+      ? {
+          id: replyingTo.id,
+          text: replyingTo.text || (replyingTo.attachments?.length ? "Attachment" : "Message"),
+          senderName: replyingTo.senderName,
+          isIncoming: replyingTo.isIncoming,
+        }
+      : undefined;
+
     setIsSending(true);
     setShowEmojiPicker(false);
     setShowAttachMenu(false);
@@ -858,6 +924,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     setHasWrappedMultiline(false);
     setIsMentionDismissed(false);
     setQueuedAttachments([]);
+    onCancelReply?.();
 
     try {
       let readyPayloads: OutgoingAttachmentPayload[] | undefined = undefined;
@@ -871,18 +938,11 @@ export const ChatInputBar = React.memo(function ChatInputBar({
 
       // Instagram / Messenger render plain text only — strip WhatsApp markup so no raw * _ ~ leak through
       const outgoing = supportsFormatting ? trimmed : stripWhatsAppMarkup(trimmed);
-      const replyPayload = replyingTo
-        ? {
-            id: replyingTo.id,
-            text: replyingTo.text || (replyingTo.attachments?.length ? "Attachment" : "Message"),
-            senderName: replyingTo.senderName,
-            isIncoming: replyingTo.isIncoming,
-          }
-        : undefined;
-
-      onCancelReply?.();
 
       const success = await onSendMessage(outgoing, readyPayloads, replyPayload, mentionPayload);
+      if (activeChatIdRef.current !== originChatId) {
+        return;
+      }
       setIsSending(false);
 
       if (!success) {
@@ -897,6 +957,9 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         editorRef.current?.focus();
       }
     } catch {
+      if (activeChatIdRef.current !== originChatId) {
+        return;
+      }
       setIsSending(false);
       editorRef.current?.setContent(trimmed, {
         mentions: payload.mentions,
@@ -906,6 +969,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
       setQueuedAttachments(attachmentsSnapshot);
     }
   }, [
+    chatId,
     snapshot.text,
     snapshot.mentions,
     snapshot.mentionAll,
@@ -1057,12 +1121,12 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     () =>
       mentionsEnabled
         ? detectMentionTrigger(
-            paragraphTextBeforeCaret,
-            paragraphTextBeforeCaret.length,
+            mentionTextBeforeCaret,
+            mentionTextBeforeCaret.length,
             selectedMentions
           )
         : null,
-    [mentionsEnabled, paragraphTextBeforeCaret, selectedMentions]
+    [mentionsEnabled, mentionTextBeforeCaret, selectedMentions]
   );
 
   const lastMentionQueryRef = useRef<string | null>(null);

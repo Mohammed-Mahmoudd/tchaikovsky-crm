@@ -325,5 +325,35 @@ describe("composerCodec", () => {
       { startParaOffset: 6, endParaOffset: 16 }
     );
   });
+
+  it("does not trigger mentionAll for email addresses and preserves inline code with @all on edit", () => {
+    const emailPayload = serializeParagraphsToWhatsApp(
+      [
+        {
+          segments: [
+            {
+              kind: "text",
+              text: "Contact info@all.com or team@everyone.org",
+              format: { ...EMPTY_COMPOSER_FORMAT },
+            },
+          ],
+        },
+      ],
+      true
+    );
+    assert.equal(emailPayload.mentionAll, false);
+
+    // Inline code containing @all must stay plain code text when parsed for edit mode
+    const rawCodeText = "Run `say @all now` please";
+    const parsedCode = parseWhatsAppToParagraphs(rawCodeText, {
+      formatting: true,
+      mentionSpans: [{ start: 9, end: 13, text: "@all", kind: "all" }],
+    });
+    const segments = parsedCode[0].segments;
+    const codeSeg = segments.find((s) => s.kind === "text" && s.format.code);
+    assert.ok(codeSeg && codeSeg.kind === "text");
+    assert.equal(codeSeg.text, "say @all now");
+    assert.equal(segments.some((s) => s.kind === "mention"), false);
+  });
 });
 
