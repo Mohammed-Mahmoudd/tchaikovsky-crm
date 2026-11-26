@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   Smile,
   Pencil,
@@ -21,14 +21,19 @@ import { FastRepliesPopover } from "./FastRepliesPopover";
 import { FastReplyModal } from "./FastReplyModal";
 import { GroupMentionPopover } from "./GroupMentionPopover";
 import { ComposerAgentControl, type ComposerAgentNotice } from "./ComposerAgentControl";
+import {
+  ComposerEditor,
+  type ComposerEditorHandle,
+  type ComposerPopoverKey,
+  type ComposerSnapshot,
+} from "./composer/ComposerEditor";
 import { useAuth, normalizeRole } from "./AuthProvider";
 import type { LeadAgentScope } from "../utils/followupAgent";
 import type { ComposerAgentId } from "../utils/composerAgent";
+import { EMPTY_COMPOSER_FORMAT, detectSlashTrigger } from "../utils/composerCodec";
 import {
-  applyMentionSelection,
   detectMentionTrigger,
   filterMentionCandidates,
-  reconcileComposerMentions,
   type ComposerMentionItem,
   type GroupMetaInfo,
   type GroupParticipant,
@@ -50,15 +55,13 @@ import { getEmojiSuggestions, recordSuggestionPick } from "../utils/emojiSuggest
 import {
   CHANNEL_CAPABILITIES,
   MessageChannel,
-  EditResult,
-  toggleInlineMarker,
-  toggleLinePrefix,
-  continueListOnNewline,
   stripWhatsAppMarkup,
-  renderEditorHighlight,
 } from "../utils/messageFormatting";
-
-const MAX_TEXTAREA_HEIGHT = 140; // ~6 lines, then scroll
+import {
+  detectImageFormatFromBytes,
+  planImageUploadTransform,
+  replaceFileExtension,
+} from "../utils/imageUpload";
 
 export interface OutgoingAttachmentPayload {
   type: "image" | "video" | "audio" | "file";
@@ -70,6 +73,9 @@ export interface OutgoingAttachmentPayload {
   mimeType: string;
   fileSize: number;
   forceDocument?: boolean;
+  width?: number;
+  height?: number;
+  jpegThumbnail?: string;
   previewUrl?: string;
 }
 
@@ -118,78 +124,216 @@ function fileToBase64(blob: Blob): Promise<string> {
   });
 }
 
-/**
- * Fast client-side image compression using offscreen HTML5 canvas.
- * Shrinks multi-megabyte phone photos to crisp <=1920px JPEGs in ~30ms for near-instant upload.
- */
-async function compressImageIfNeeded(file: File, forceDocument: boolean): Promise<{ blob: Blob; mimeType: string; fileName: string }> {
-  const mime = (file.type || "").toLowerCase();
-  if (
-    forceDocument ||
-    !mime.startsWith("image/") ||
-    mime === "image/gif" ||
-    mime === "image/svg+xml" ||
-    file.size <= 350 * 1024
-  ) {
-    return { blob: file, mimeType: file.type || "application/octet-stream", fileName: file.name };
-  }
+interface PreparedImageUpload {
+  blob: Blob;
+  mimeType: string;
+  fileName: string;
+  forceDocument: boolean;
+  width?: number;
+  height?: number;
+  jpegThumbnail?: string;
+}
 
+function generateCanvasThumbnailBase64(
+  img: HTMLImageElement,
+  srcWidth: number,
+  srcHeight: number
+): string | undefined {
+  try {
+    const thumbMax = 48;
+    const scale = Math.min(1, thumbMax / Math.max(srcWidth, srcHeight, 1));
+    const tw = Math.max(1, Math.round(srcWidth * scale));
+    const th = Math.max(1, Math.round(srcHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = tw;
+    canvas.height = th;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return undefined;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, tw, th);
+    ctx.drawImage(img, 0, 0, tw, th);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.55);
+    const base64 = dataUrl.replace(/^data:image\/jpeg;base64,/i, "");
+    if (!base64 || base64.length >= 16000) return undefined;
+    return base64;
+  } catch {
+    return undefined;
+  }
+}
+
+function loadImageElement(file: Blob): Promise<HTMLImageElement | null> {
   return new Promise((resolve) => {
     const img = new window.Image();
     const objUrl = URL.createObjectURL(file);
     img.onload = () => {
       URL.revokeObjectURL(objUrl);
-      const MAX_DIM = 1920;
-      let { width, height } = img;
-      if (width <= MAX_DIM && height <= MAX_DIM && file.size <= 600 * 1024) {
-        resolve({ blob: file, mimeType: file.type, fileName: file.name });
-        return;
-      }
-      if (width > MAX_DIM || height > MAX_DIM) {
-        if (width >= height) {
-          height = Math.round((height * MAX_DIM) / width);
-          width = MAX_DIM;
-        } else {
-          width = Math.round((width * MAX_DIM) / height);
-          height = MAX_DIM;
-        }
-      }
-      try {
-        const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) {
-          resolve({ blob: file, mimeType: file.type, fileName: file.name });
-          return;
-        }
-        ctx.drawImage(img, 0, 0, width, height);
-        const targetMime = mime === "image/png" && file.size < 1.2 * 1024 * 1024 ? "image/png" : "image/jpeg";
-        canvas.toBlob(
-          (compressedBlob) => {
-            if (compressedBlob && compressedBlob.size < file.size) {
-              const cleanName =
-                targetMime === "image/jpeg"
-                  ? file.name.replace(/\.[^.]+$/, "") + ".jpg"
-                  : file.name;
-              resolve({ blob: compressedBlob, mimeType: targetMime, fileName: cleanName });
-            } else {
-              resolve({ blob: file, mimeType: file.type, fileName: file.name });
-            }
-          },
-          targetMime,
-          0.85
-        );
-      } catch {
-        resolve({ blob: file, mimeType: file.type, fileName: file.name });
-      }
+      resolve(img);
     };
     img.onerror = () => {
       URL.revokeObjectURL(objUrl);
-      resolve({ blob: file, mimeType: file.type || "image/jpeg", fileName: file.name });
+      resolve(null);
     };
     img.src = objUrl;
   });
+}
+
+function encodeCanvasAsJpeg(
+  img: HTMLImageElement,
+  width: number,
+  height: number,
+  quality: number
+): Promise<Blob | null> {
+  return new Promise((resolve) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      resolve(null);
+      return;
+    }
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, width, height);
+    ctx.drawImage(img, 0, 0, width, height);
+    canvas.toBlob((blob) => resolve(blob), "image/jpeg", quality);
+  });
+}
+
+/**
+ * Normalizes outgoing images before upload:
+ * - Inspects file magic bytes (catches WebP/AVIF/GIF/HEIC/BMP even if misnamed .jpg)
+ * - Transcodes non-JPEG/PNG images to JPEG regardless of file size for WhatsApp compatibility
+ * - Generates natural dimensions and a lightweight JPEG thumbnail
+ * - Falls back to document delivery when an image format (e.g. HEIC/SVG) cannot be transcoded
+ */
+async function prepareImageForUpload(
+  file: File,
+  forceDocument: boolean
+): Promise<PreparedImageUpload> {
+  const declaredMime = (file.type || "").toLowerCase();
+  const headerBuf = await file.slice(0, 64).arrayBuffer().catch(() => null);
+  const detectedFormat = headerBuf
+    ? detectImageFormatFromBytes(new Uint8Array(headerBuf))
+    : "unknown";
+  const resolvedMime =
+    detectedFormat !== "unknown"
+      ? detectedFormat
+      : declaredMime || "application/octet-stream";
+
+  if (forceDocument || !resolvedMime.startsWith("image/")) {
+    return {
+      blob: file,
+      mimeType: resolvedMime,
+      fileName: file.name,
+      forceDocument,
+    };
+  }
+
+  const initialPlan = planImageUploadTransform({
+    mimeType: declaredMime,
+    fileSize: file.size,
+    detectedFormat,
+    forceDocument,
+  });
+
+  if (initialPlan === "document_fallback") {
+    return {
+      blob: file,
+      mimeType: resolvedMime,
+      fileName: file.name,
+      forceDocument: true,
+    };
+  }
+
+  const img = await loadImageElement(file);
+  if (!img || !img.naturalWidth || !img.naturalHeight) {
+    // If browser cannot decode (e.g. HEIC/corrupt bytes), send as document so WhatsApp still delivers it
+    return {
+      blob: file,
+      mimeType: resolvedMime,
+      fileName: file.name,
+      forceDocument: initialPlan === "transcode_required" ? true : forceDocument,
+    };
+  }
+
+  const natW = img.naturalWidth;
+  const natH = img.naturalHeight;
+  const finalPlan = planImageUploadTransform({
+    mimeType: declaredMime,
+    fileSize: file.size,
+    detectedFormat,
+    forceDocument,
+    width: natW,
+    height: natH,
+  });
+
+  const jpegThumbnail = generateCanvasThumbnailBase64(img, natW, natH);
+
+  if (finalPlan === "skip") {
+    return {
+      blob: file,
+      mimeType: resolvedMime,
+      fileName: file.name,
+      forceDocument: false,
+      width: natW,
+      height: natH,
+      jpegThumbnail,
+    };
+  }
+
+  const maxDim = 1920;
+  let targetW = natW;
+  let targetH = natH;
+  if (targetW > maxDim || targetH > maxDim) {
+    const ratio = Math.min(maxDim / targetW, maxDim / targetH);
+    targetW = Math.max(1, Math.round(targetW * ratio));
+    targetH = Math.max(1, Math.round(targetH * ratio));
+  }
+
+  const jpegBlob = await encodeCanvasAsJpeg(img, targetW, targetH, 0.85);
+
+  if (finalPlan === "transcode_required") {
+    if (jpegBlob) {
+      return {
+        blob: jpegBlob,
+        mimeType: "image/jpeg",
+        fileName: replaceFileExtension(file.name, "jpg"),
+        forceDocument: false,
+        width: targetW,
+        height: targetH,
+        jpegThumbnail,
+      };
+    }
+    return {
+      blob: file,
+      mimeType: resolvedMime,
+      fileName: file.name,
+      forceDocument: true,
+    };
+  }
+
+  // Large native JPEG/PNG: keep compressed JPEG only if it actually reduces size
+  if (jpegBlob && jpegBlob.size < file.size) {
+    return {
+      blob: jpegBlob,
+      mimeType: "image/jpeg",
+      fileName: replaceFileExtension(file.name, "jpg"),
+      forceDocument: false,
+      width: targetW,
+      height: targetH,
+      jpegThumbnail,
+    };
+  }
+
+  return {
+    blob: file,
+    mimeType: resolvedMime,
+    fileName: file.name,
+    forceDocument: false,
+    width: natW,
+    height: natH,
+    jpegThumbnail,
+  };
 }
 
 /**
@@ -203,8 +347,11 @@ async function preUploadFile(
   token?: string | null,
   fetchFn: FetchLike = fetch
 ): Promise<OutgoingAttachmentPayload> {
-  const type = getFileType(file, forceDocument);
-  const { blob, mimeType, fileName } = await compressImageIfNeeded(file, forceDocument);
+  const prepared = await prepareImageForUpload(file, forceDocument);
+  const { blob, mimeType, fileName, forceDocument: effectiveForceDoc, width, height, jpegThumbnail } = prepared;
+  const effectiveType: "image" | "video" | "audio" | "file" = effectiveForceDoc
+    ? "file"
+    : getFileType(file, false);
 
   // 1. Try zero-overhead raw binary upload
   try {
@@ -212,7 +359,7 @@ async function preUploadFile(
       "Content-Type": "application/octet-stream",
       "X-File-Name": encodeURIComponent(fileName),
       "X-Mime-Type": mimeType || "application/octet-stream",
-      "X-Force-Document": forceDocument ? "1" : "0",
+      "X-Force-Document": effectiveForceDoc ? "1" : "0",
     };
     if (token) headers["Authorization"] = `Bearer ${token}`;
 
@@ -225,14 +372,17 @@ async function preUploadFile(
       const json = await res.json().catch(() => null);
       if (json?.success && json?.data?.storedFileName) {
         return {
-          type: json.data.type || type,
+          type: json.data.type || effectiveType,
           url: json.data.url,
           publicUrl: json.data.publicUrl,
           storedFileName: json.data.storedFileName,
           fileName: json.data.fileName || fileName,
           mimeType: json.data.mimeType || mimeType,
           fileSize: json.data.fileSize || blob.size,
-          forceDocument,
+          forceDocument: effectiveForceDoc,
+          width,
+          height,
+          jpegThumbnail,
           previewUrl,
         };
       }
@@ -242,12 +392,15 @@ async function preUploadFile(
   // 2. Fallback: encode as base64 in memory so /reply can save and send it directly
   const dataBase64 = await fileToBase64(blob);
   return {
-    type,
+    type: effectiveType,
     dataBase64,
     fileName,
     mimeType: mimeType || "application/octet-stream",
     fileSize: blob.size,
-    forceDocument,
+    forceDocument: effectiveForceDoc,
+    width,
+    height,
+    jpegThumbnail,
     previewUrl,
   };
 }
@@ -257,7 +410,7 @@ export type ActiveReplyContext = {
   text: string;
   senderName?: string;
   isIncoming?: boolean;
-  attachments?: any[];
+  attachments?: unknown[];
 };
 
 interface ChatInputBarProps {
@@ -351,35 +504,67 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   const { user, authFetch } = useAuth();
   const isChairman = normalizeRole(user?.role) === "chairman";
   // Local state completely isolated from parent page — typing does NOT re-render chat or sidebar
-  const [text, setText] = useState("");
+  const [snapshot, setSnapshot] = useState<ComposerSnapshot>({
+    text: "",
+    paragraphTextBeforeCaret: "",
+    textBeforeCaret: "",
+    paragraphCount: 1,
+    mentions: [],
+    mentionAll: false,
+    activeFormats: EMPTY_COMPOSER_FORMAT,
+    isEmpty: true,
+  });
+  const [hasWrappedMultiline, setHasWrappedMultiline] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [showAgentTray, setShowAgentTray] = useState(false);
   const [agentNotice, setAgentNotice] = useState<ComposerAgentNotice | null>(null);
   const [queuedAttachments, setQueuedAttachments] = useState<QueuedAttachment[]>([]);
-  const [selectedMentions, setSelectedMentions] = useState<ComposerMentionItem[]>([]);
-  const [mentionAll, setMentionAll] = useState(false);
   const [isMentionDismissed, setIsMentionDismissed] = useState(false);
   const [activeMentionIndex, setActiveMentionIndex] = useState(0);
 
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const mirrorRef = useRef<HTMLDivElement>(null);
-  // Caret position drives context-aware emoji suggestions & @mention autocomplete
-  const [caret, setCaret] = useState(0);
+  const editorRef = useRef<ComposerEditorHandle>(null);
+  const groupParticipantsRef = useRef<GroupParticipant[]>(groupParticipants);
+  useEffect(() => {
+    groupParticipantsRef.current = groupParticipants;
+  }, [groupParticipants]);
+
   // Word count at which the agent dismissed suggestions (Esc) — reappear on the next word
   const [dismissedAtWords, setDismissedAtWords] = useState<number | null>(null);
   const supportsFormatting = CHANNEL_CAPABILITIES[channel]?.formatting ?? false;
   const mentionsEnabled = Boolean(isGroup && channel === "WA");
-  const editorHighlight = useMemo(() => {
-    if (!supportsFormatting || !text) return null;
-    if (!mentionsEnabled) return renderEditorHighlight(text, true);
-    return renderEditorHighlight(text, true, {
-      mentions: selectedMentions,
-      mentionAll,
-      participants: groupParticipants,
-    });
-  }, [supportsFormatting, text, mentionsEnabled, selectedMentions, mentionAll, groupParticipants]);
+
+  const handleSnapshotChange = useCallback((next: ComposerSnapshot) => {
+    setSnapshot(next);
+    if (!next.text || (next.paragraphCount <= 1 && next.text.length < 24)) {
+      setHasWrappedMultiline(false);
+    }
+  }, []);
+
+  const handleWrapMultiline = useCallback(() => {
+    setHasWrappedMultiline(true);
+  }, []);
+
+  const isMultiline = snapshot.paragraphCount > 1 || hasWrappedMultiline;
+
+  const text = snapshot.text;
+  const paragraphTextBeforeCaret = snapshot.paragraphTextBeforeCaret;
+  const textBeforeCaret = snapshot.textBeforeCaret;
+  const selectedMentions: ComposerMentionItem[] = useMemo(
+    () =>
+      snapshot.mentions.map((m) => ({
+        jid: m.jid || (m.userId ? `${m.userId}@s.whatsapp.net` : m.displayName),
+        userId: m.userId,
+        phone: m.phone,
+        displayName: m.displayName,
+        token: m.token || `@${m.displayName}`,
+        isSelf: m.isSelf,
+        isGroupMention: m.isGroupMention,
+      })),
+    [snapshot.mentions]
+  );
+
   const photoInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const attachMenuRef = useRef<HTMLDivElement>(null);
@@ -425,13 +610,10 @@ export const ChatInputBar = React.memo(function ChatInputBar({
 
   // Reset input, attachments, and focus when switching conversations
   useEffect(() => {
-    setText("");
-    setCaret(0);
+    editorRef.current?.clear();
     setDismissedAtWords(null);
     setIsFastRepliesDismissed(false);
     setActiveReplyIndex(0);
-    setSelectedMentions([]);
-    setMentionAll(false);
     setIsMentionDismissed(false);
     setActiveMentionIndex(0);
     setIsSending(false);
@@ -442,7 +624,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
     onAgentGeneratingChange?.(null);
     setQueuedAttachments([]);
     if (typeof window !== "undefined" && window.innerWidth >= 768) {
-      inputRef.current?.focus();
+      editorRef.current?.focus();
     }
   }, [chatId, onAgentGeneratingChange]);
 
@@ -461,12 +643,9 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   // Populate input when entering WhatsApp Edit Message mode
   useEffect(() => {
     if (editingMessage) {
-      setText(editingMessage.text);
-      const len = editingMessage.text.length;
-      setCaret(len);
       setDismissedAtWords(null);
       setShowAttachMenu(false);
-      const initialMentions: ComposerMentionItem[] = (editingMessage.mentions || [])
+      const initialMentions: MessageMention[] = (editingMessage.mentions || [])
         .filter((m) => Boolean(m?.jid || m?.userId || m?.displayName))
         .map((m) => ({
           jid: m.jid || (m.userId ? `${m.userId}@s.whatsapp.net` : m.displayName),
@@ -477,16 +656,17 @@ export const ChatInputBar = React.memo(function ChatInputBar({
           isSelf: m.isSelf,
           isGroupMention: m.isGroupMention,
         }));
-      setSelectedMentions(initialMentions);
-      setMentionAll(Boolean(editingMessage.mentionAll));
       setIsMentionDismissed(false);
       setActiveMentionIndex(0);
-      setTimeout(() => {
-        if (inputRef.current) {
-          inputRef.current.focus();
-          inputRef.current.setSelectionRange(len, len);
-        }
-      }, 10);
+      editorRef.current?.setContent(editingMessage.text, {
+        mentions: initialMentions,
+        mentionAll: Boolean(editingMessage.mentionAll),
+        participants: groupParticipantsRef.current,
+        clearHistory: true,
+      });
+      requestAnimationFrame(() => {
+        editorRef.current?.focus();
+      });
     }
   }, [editingMessage]);
 
@@ -494,11 +674,9 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   useEffect(() => {
     if (replyingTo) {
       setShowAttachMenu(false);
-      setTimeout(() => {
-        if (inputRef.current) {
-          inputRef.current.focus();
-        }
-      }, 10);
+      requestAnimationFrame(() => {
+        editorRef.current?.focus();
+      });
     }
   }, [replyingTo]);
 
@@ -517,7 +695,16 @@ export const ChatInputBar = React.memo(function ChatInputBar({
             setQueuedAttachments((prev) =>
               prev.map((item) =>
                 item.id === id
-                  ? { ...item, status: "ready", uploadedPayload: payload }
+                  ? {
+                      ...item,
+                      type: payload.type,
+                      fileName: payload.fileName,
+                      mimeType: payload.mimeType,
+                      fileSize: payload.fileSize,
+                      forceDocument: Boolean(payload.forceDocument),
+                      status: "ready",
+                      uploadedPayload: payload,
+                    }
                   : item
               )
             );
@@ -542,7 +729,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
       setQueuedAttachments((prev) => [...prev, ...newItems]);
       setShowAttachMenu(false);
       requestAnimationFrame(() => {
-        inputRef.current?.focus();
+        editorRef.current?.focus();
       });
     },
     [token, authFetch]
@@ -564,84 +751,23 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   const handleRemoveAttachment = useCallback((id: string) => {
     setQueuedAttachments((prev) => prev.filter((item) => item.id !== id));
     requestAnimationFrame(() => {
-      inputRef.current?.focus();
+      editorRef.current?.focus();
     });
   }, []);
 
-  const handlePaste = useCallback(
-    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-      if (editingMessage || isReadOnly || !canSendMessages) return;
-      const items = e.clipboardData?.items;
-      if (!items) return;
-
-      const filesToAttach: File[] = [];
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        if (item.kind === "file") {
-          const f = item.getAsFile();
-          if (f) {
-            // Give pasted screenshots a clean timestamped name
-            if (!f.name || f.name === "image.png") {
-              const ext = (f.type.split("/")[1] || "png").split(";")[0];
-              const namedFile = new File([f], `Screenshot_${Date.now()}.${ext}`, { type: f.type });
-              filesToAttach.push(namedFile);
-            } else {
-              filesToAttach.push(f);
-            }
-          }
-        }
-      }
-
-      if (filesToAttach.length > 0) {
-        e.preventDefault();
-        enqueueFiles(filesToAttach, false);
-      }
+  const handlePasteFiles = useCallback(
+    (files: File[]) => {
+      if (editingMessage || isReadOnly || !canSendMessages || files.length === 0) return;
+      enqueueFiles(files, false);
     },
     [editingMessage, isReadOnly, canSendMessages, enqueueFiles]
   );
 
-  const handleInsertEmoji = useCallback(
-    (emoji: string) => {
-      const input = inputRef.current;
-      if (!input) {
-        setText((prev) => prev + emoji);
-        return;
-      }
-      const start = input.selectionStart ?? text.length;
-      const end = input.selectionEnd ?? text.length;
-      const nextText = text.slice(0, start) + emoji + text.slice(end);
-      setText(nextText);
-      const nextCursor = start + emoji.length;
-      requestAnimationFrame(() => {
-        input.focus();
-        input.setSelectionRange(nextCursor, nextCursor);
-      });
-    },
-    [text]
-  );
-
-  /** Apply a text edit and restore the caret / selection on the next frame. */
-  const applyEdit = useCallback(
-    (result: EditResult) => {
-      setText(result.text);
-      setCaret(result.selEnd);
-      if (mentionsEnabled) {
-        const rec = reconcileComposerMentions(result.text, selectedMentions, mentionAll);
-        setSelectedMentions(rec.mentions);
-        setMentionAll(rec.mentionAll);
-      }
-      requestAnimationFrame(() => {
-        const el = inputRef.current;
-        if (!el) return;
-        el.focus();
-        el.setSelectionRange(result.selStart, result.selEnd);
-      });
-    },
-    [mentionsEnabled, selectedMentions, mentionAll]
-  );
+  const handleInsertEmoji = useCallback((emoji: string) => {
+    editorRef.current?.insertText(emoji);
+  }, []);
 
   // ── Smart emoji suggestions (pure, memoized, sub-millisecond) ──
-  const textBeforeCaret = text.slice(0, Math.min(caret, text.length));
   const wordCountBeforeCaret = useMemo(
     () => (textBeforeCaret.trim() ? textBeforeCaret.trim().split(/\s+/).length : 0),
     [textBeforeCaret]
@@ -656,116 +782,43 @@ export const ChatInputBar = React.memo(function ChatInputBar({
 
   const handlePickSuggestion = useCallback(
     (emoji: string) => {
-      const el = inputRef.current;
-      const start = el?.selectionStart ?? caret;
-      const end = el?.selectionEnd ?? caret;
-      const before = text.slice(0, start);
-      const after = text.slice(end);
-      const needsLeadingSpace = before.length > 0 && !/\s$/.test(before);
-      const needsTrailingSpace = !/^\s/.test(after);
-      const insert = (needsLeadingSpace ? " " : "") + emoji + (needsTrailingSpace ? " " : "");
-      const pos = start + insert.length;
+      const needsLeadingSpace = textBeforeCaret.length > 0 && !/\s$/.test(textBeforeCaret);
       recordSuggestionPick(suggestion.keywords, emoji);
       recordRecentEmoji(emoji);
-      applyEdit({ text: before + insert + after, selStart: pos, selEnd: pos });
+      editorRef.current?.insertText(`${needsLeadingSpace ? " " : ""}${emoji} `);
     },
-    [text, caret, suggestion.keywords, applyEdit]
+    [textBeforeCaret, suggestion.keywords]
   );
 
-  const handleFormat = useCallback(
-    (action: FormatAction) => {
-      const el = inputRef.current;
-      const start = el?.selectionStart ?? text.length;
-      const end = el?.selectionEnd ?? text.length;
-      applyEdit(
-        action.kind === "inline"
-          ? toggleInlineMarker(text, start, end, action.marker)
-          : toggleLinePrefix(text, start, end, action.prefix)
-      );
-    },
-    [text, applyEdit]
-  );
-
-  const syncCaret = useCallback(() => {
-    const el = inputRef.current;
-    if (el) setCaret(el.selectionEnd ?? 0);
+  const handleFormat = useCallback((action: FormatAction) => {
+    editorRef.current?.applyFormat(action);
   }, []);
-
-  const syncScroll = useCallback(() => {
-    const el = inputRef.current;
-    const mirror = mirrorRef.current;
-    if (el && mirror) {
-      mirror.scrollTop = el.scrollTop;
-      mirror.scrollLeft = el.scrollLeft;
-    }
-  }, []);
-
-  // Auto-grow textarea height with content (up to MAX_TEXTAREA_HEIGHT, then scroll),
-  // while keeping empty inputs single-line regardless of drawer width transitions or long placeholders.
-  const syncComposerHeight = useCallback(() => {
-    const el = inputRef.current;
-    if (!el) return;
-    if (!text) {
-      el.style.height = "";
-      el.style.overflowY = "hidden";
-      if (mirrorRef.current) {
-        mirrorRef.current.style.height = "";
-      }
-      return;
-    }
-    el.style.height = "auto";
-    const next = Math.min(el.scrollHeight, MAX_TEXTAREA_HEIGHT);
-    el.style.height = `${next}px`;
-    el.style.overflowY = el.scrollHeight > MAX_TEXTAREA_HEIGHT ? "auto" : "hidden";
-    if (mirrorRef.current) {
-      mirrorRef.current.style.height = `${next}px`;
-      mirrorRef.current.scrollTop = el.scrollTop;
-    }
-  }, [text]);
-
-  useLayoutEffect(() => {
-    syncComposerHeight();
-  }, [syncComposerHeight]);
-
-  // Re-sync multi-line height when the drawer/panel width changes (e.g. Pipeline width transition or Details toggle)
-  useEffect(() => {
-    const el = inputRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    let lastWidth = el.clientWidth;
-    const ro = new ResizeObserver((entries) => {
-      const nextWidth = entries[0]?.contentRect?.width ?? el.clientWidth;
-      if (Math.abs(nextWidth - lastWidth) < 1) return;
-      lastWidth = nextWidth;
-      syncComposerHeight();
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [syncComposerHeight]);
 
   const handleCancelEditMode = useCallback(() => {
-    setText("");
-    setSelectedMentions([]);
-    setMentionAll(false);
+    editorRef.current?.clear();
+    setHasWrappedMultiline(false);
     setIsMentionDismissed(false);
     setShowEmojiPicker(false);
     onCancelEdit?.();
     requestAnimationFrame(() => {
-      inputRef.current?.focus();
+      editorRef.current?.focus();
     });
   }, [onCancelEdit]);
 
   const handleSendOrSave = useCallback(async () => {
-    const trimmed = text.trim();
+    const payload = editorRef.current?.getPayload() ?? {
+      text: snapshot.text,
+      mentions: snapshot.mentions,
+      mentionAll: snapshot.mentionAll,
+    };
+    const trimmed = payload.text.trim();
     const hasAttachments = queuedAttachments.length > 0;
     if ((!trimmed && !hasAttachments) || isSending || isReadOnly || !canSendMessages) return;
 
-    const reconciledMentions = mentionsEnabled
-      ? reconcileComposerMentions(trimmed, selectedMentions, mentionAll)
-      : { mentions: [], mentionAll: false };
     const mentionPayload = mentionsEnabled
       ? {
-          mentions: reconciledMentions.mentions,
-          mentionAll: reconciledMentions.mentionAll,
+          mentions: payload.mentions,
+          mentionAll: payload.mentionAll,
         }
       : undefined;
 
@@ -778,36 +831,31 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         handleCancelEditMode();
         return;
       }
-      const prevMentionsSnap = [...selectedMentions];
-      const prevMentionAllSnap = mentionAll;
       setIsSending(true);
       setShowEmojiPicker(false);
-      setText("");
-      setSelectedMentions([]);
-      setMentionAll(false);
+      editorRef.current?.clear();
       const ok = await onSaveEdit(editingMessage.id, trimmed, mentionPayload);
       setIsSending(false);
       if (!ok) {
-        setText(trimmed);
-        setSelectedMentions(prevMentionsSnap);
-        setMentionAll(prevMentionAllSnap);
+        editorRef.current?.setContent(trimmed, {
+          mentions: payload.mentions,
+          mentionAll: payload.mentionAll,
+          participants: groupParticipantsRef.current,
+        });
       } else {
-        inputRef.current?.focus();
+        editorRef.current?.focus();
       }
       return;
     }
 
     const attachmentsSnapshot = [...queuedAttachments];
-    const mentionsSnapshot = [...selectedMentions];
-    const mentionAllSnapshot = mentionAll;
     setIsSending(true);
     setShowEmojiPicker(false);
     setShowAttachMenu(false);
     setShowAgentTray(false);
     // Optimistically clear immediately so the user can keep typing without waiting
-    setText("");
-    setSelectedMentions([]);
-    setMentionAll(false);
+    editorRef.current?.clear();
+    setHasWrappedMultiline(false);
     setIsMentionDismissed(false);
     setQueuedAttachments([]);
 
@@ -839,29 +887,33 @@ export const ChatInputBar = React.memo(function ChatInputBar({
 
       if (!success) {
         // Restore input text, mentions, and attachments on network/server error so nothing is lost
-        setText(trimmed);
-        setSelectedMentions(mentionsSnapshot);
-        setMentionAll(mentionAllSnapshot);
+        editorRef.current?.setContent(trimmed, {
+          mentions: payload.mentions,
+          mentionAll: payload.mentionAll,
+          participants: groupParticipantsRef.current,
+        });
         setQueuedAttachments(attachmentsSnapshot);
       } else {
-        inputRef.current?.focus();
+        editorRef.current?.focus();
       }
     } catch {
       setIsSending(false);
-      setText(trimmed);
-      setSelectedMentions(mentionsSnapshot);
-      setMentionAll(mentionAllSnapshot);
+      editorRef.current?.setContent(trimmed, {
+        mentions: payload.mentions,
+        mentionAll: payload.mentionAll,
+        participants: groupParticipantsRef.current,
+      });
       setQueuedAttachments(attachmentsSnapshot);
     }
   }, [
-    text,
+    snapshot.text,
+    snapshot.mentions,
+    snapshot.mentionAll,
     queuedAttachments,
     isSending,
     isReadOnly,
     canSendMessages,
     mentionsEnabled,
-    selectedMentions,
-    mentionAll,
     editingMessage,
     onSaveEdit,
     handleCancelEditMode,
@@ -900,17 +952,10 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   );
 
   // ── Fast Replies trigger detection and matching ─────────────────────────
-  const slashMatch = useMemo(() => {
-    // Only match '/' preceded by start of string or whitespace
-    const match = textBeforeCaret.match(/(?:^|\s)\/([^\s]*)$/);
-    if (!match) return null;
-    const fullMatch = match[0];
-    const query = match[1];
-    const slashOffsetInMatch = fullMatch.indexOf("/");
-    const matchStart = caret - fullMatch.length;
-    const slashIndex = matchStart + slashOffsetInMatch;
-    return { query, slashIndex };
-  }, [textBeforeCaret, caret]);
+  const slashMatch = useMemo(
+    () => detectSlashTrigger(paragraphTextBeforeCaret),
+    [paragraphTextBeforeCaret]
+  );
 
   const lastQueryRef = useRef<string | null>(null);
   useEffect(() => {
@@ -938,20 +983,13 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   const handleInsertFastReply = useCallback(
     (reply: QuickReply) => {
       if (!slashMatch) return;
-      const beforeSlash = text.slice(0, slashMatch.slashIndex);
-      const afterCaret = text.slice(caret);
-      const insertText = reply.text;
-      const nextText = beforeSlash + insertText + afterCaret;
-      const nextCaret = beforeSlash.length + insertText.length;
-
-      applyEdit({
-        text: nextText,
-        selStart: nextCaret,
-        selEnd: nextCaret,
+      const charCount = slashMatch.endIndex - slashMatch.startIndex;
+      editorRef.current?.replaceBeforeCaret(charCount, reply.text, {
+        parseFormatting: supportsFormatting,
       });
       setIsFastRepliesDismissed(true);
     },
-    [slashMatch, text, caret, applyEdit]
+    [slashMatch, supportsFormatting]
   );
 
   const handleSaveQuickReply = useCallback(
@@ -991,8 +1029,9 @@ export const ChatInputBar = React.memo(function ChatInputBar({
           });
           return { success: true };
         }
-      } catch (err: any) {
-        return { success: false, error: err.message || "Failed to save quick reply" };
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Failed to save quick reply";
+        return { success: false, error: message };
       }
     },
     [token, authFetch, quickReplies.length]
@@ -1015,8 +1054,15 @@ export const ChatInputBar = React.memo(function ChatInputBar({
 
   // ── @Mention autocomplete detection (WhatsApp group chats in Operation Inbox) ──
   const mentionTrigger = useMemo(
-    () => (mentionsEnabled ? detectMentionTrigger(text, caret, selectedMentions) : null),
-    [mentionsEnabled, text, caret, selectedMentions]
+    () =>
+      mentionsEnabled
+        ? detectMentionTrigger(
+            paragraphTextBeforeCaret,
+            paragraphTextBeforeCaret.length,
+            selectedMentions
+          )
+        : null,
+    [mentionsEnabled, paragraphTextBeforeCaret, selectedMentions]
   );
 
   const lastMentionQueryRef = useRef<string | null>(null);
@@ -1068,163 +1114,140 @@ export const ChatInputBar = React.memo(function ChatInputBar({
   const handleSelectMentionCandidate = useCallback(
     (candidate: MentionCandidate) => {
       if (!mentionTrigger) return;
-      const applied = applyMentionSelection(
-        text,
-        mentionTrigger,
-        candidate,
-        selectedMentions,
-        mentionAll
-      );
-      setSelectedMentions(applied.mentions);
-      setMentionAll(applied.mentionAll);
+      const charCount = mentionTrigger.endIndex - mentionTrigger.startIndex;
+      const mentionItem: ComposerMentionItem =
+        candidate.kind === "all"
+          ? {
+              jid: "all",
+              displayName: "All",
+              token: "@all",
+              isGroupMention: true,
+            }
+          : (() => {
+              const cleanLabel = candidate.displayName.replace(/\s+/g, " ").trim();
+              return {
+                jid: candidate.jid,
+                userId: candidate.userId,
+                phone: candidate.phone,
+                displayName: cleanLabel,
+                token: `@${cleanLabel}`,
+                isSelf: Boolean(candidate.isSelf),
+                isGroupMention: false,
+              };
+            })();
       setIsMentionDismissed(false);
-      setText(applied.nextText);
-      setCaret(applied.nextCaret);
-      requestAnimationFrame(() => {
-        const el = inputRef.current;
-        if (!el) return;
-        el.focus();
-        el.setSelectionRange(applied.nextCaret, applied.nextCaret);
-      });
+      editorRef.current?.insertMention(charCount, mentionItem);
     },
-    [mentionTrigger, text, selectedMentions, mentionAll]
+    [mentionTrigger]
   );
 
   const showSuggestions =
     suggestion.emojis.length > 0 && !isSuggestionDismissed && !showFastReplies && !showGroupMentions;
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Never hijack keys while an IME (e.g. Arabic / CJK keyboard) is composing
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-
-    // Group @mention keyboard navigation
-    if (showGroupMentions) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        if (mentionCandidates.length > 0) {
-          setActiveMentionIndex((prev) => (prev + 1) % mentionCandidates.length);
-        }
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        if (mentionCandidates.length > 0) {
-          setActiveMentionIndex((prev) => (prev - 1 + mentionCandidates.length) % mentionCandidates.length);
-        }
-        return;
-      }
-      if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
-        if (mentionCandidates.length > 0) {
-          e.preventDefault();
-          const chosen = mentionCandidates[activeMentionIndex] || mentionCandidates[0];
-          if (chosen) {
-            handleSelectMentionCandidate(chosen);
+  const handlePopoverKey = useCallback(
+    (key: ComposerPopoverKey): boolean => {
+      if (showGroupMentions) {
+        if (key === "ArrowDown") {
+          if (mentionCandidates.length > 0) {
+            setActiveMentionIndex((prev) => (prev + 1) % mentionCandidates.length);
           }
-          return;
+          return true;
         }
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setIsMentionDismissed(true);
-        return;
-      }
-    }
-
-    // Fast replies keyboard navigation (WhatsApp-style)
-    if (showFastReplies) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        if (filteredReplies.length > 0) {
-          setActiveReplyIndex((prev) => (prev + 1) % filteredReplies.length);
-        }
-        return;
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        if (filteredReplies.length > 0) {
-          setActiveReplyIndex((prev) => (prev - 1 + filteredReplies.length) % filteredReplies.length);
-        }
-        return;
-      }
-      if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
-        if (filteredReplies.length > 0) {
-          e.preventDefault();
-          const chosen = filteredReplies[activeReplyIndex] || filteredReplies[0];
-          if (chosen) {
-            handleInsertFastReply(chosen);
+        if (key === "ArrowUp") {
+          if (mentionCandidates.length > 0) {
+            setActiveMentionIndex(
+              (prev) => (prev - 1 + mentionCandidates.length) % mentionCandidates.length
+            );
           }
-          return;
+          return true;
         }
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setIsFastRepliesDismissed(true);
-        return;
-      }
-    }
-
-    // Tab → insert the top emoji suggestion
-    if (e.key === "Tab" && !e.shiftKey && showSuggestions) {
-      e.preventDefault();
-      handlePickSuggestion(suggestion.emojis[0]);
-      return;
-    }
-
-    if (e.key === "Escape") {
-      if (showSuggestions) {
-        e.preventDefault();
-        setDismissedAtWords(wordCountBeforeCaret);
-        return;
-      }
-      if (editingMessage) {
-        e.preventDefault();
-        handleCancelEditMode();
-        return;
-      }
-      if (replyingTo) {
-        e.preventDefault();
-        onCancelReply?.();
-        return;
-      }
-      if (showAttachMenu) {
-        e.preventDefault();
-        setShowAttachMenu(false);
-        return;
-      }
-    }
-
-    // WhatsApp formatting shortcuts
-    if (supportsFormatting && (e.ctrlKey || e.metaKey) && !e.altKey) {
-      const key = e.key.toLowerCase();
-      let action: FormatAction | null = null;
-      if (key === "b" && !e.shiftKey) action = { kind: "inline", marker: "*" };
-      else if (key === "i" && !e.shiftKey) action = { kind: "inline", marker: "_" };
-      else if (key === "x" && e.shiftKey) action = { kind: "inline", marker: "~" };
-      else if (key === "e" && !e.shiftKey) action = { kind: "inline", marker: "```" };
-      if (action) {
-        e.preventDefault();
-        handleFormat(action);
-        return;
-      }
-    }
-
-    if (e.key === "Enter") {
-      if (e.shiftKey) {
-        // Shift+Enter → new line; continue bullet / numbered / quote lists automatically
-        const el = e.currentTarget;
-        if (supportsFormatting && el.selectionStart === el.selectionEnd) {
-          const result = continueListOnNewline(text, el.selectionStart);
-          if (result) {
-            e.preventDefault();
-            applyEdit(result);
+        if (key === "Enter" || key === "Tab") {
+          if (mentionCandidates.length > 0) {
+            const chosen = mentionCandidates[activeMentionIndex] || mentionCandidates[0];
+            if (chosen) handleSelectMentionCandidate(chosen);
+            return true;
           }
         }
-        return;
+        if (key === "Escape") {
+          setIsMentionDismissed(true);
+          return true;
+        }
       }
-      e.preventDefault();
-      handleSendOrSave();
-    }
-  };
+
+      if (showFastReplies) {
+        if (key === "ArrowDown") {
+          if (filteredReplies.length > 0) {
+            setActiveReplyIndex((prev) => (prev + 1) % filteredReplies.length);
+          }
+          return true;
+        }
+        if (key === "ArrowUp") {
+          if (filteredReplies.length > 0) {
+            setActiveReplyIndex(
+              (prev) => (prev - 1 + filteredReplies.length) % filteredReplies.length
+            );
+          }
+          return true;
+        }
+        if (key === "Enter" || key === "Tab") {
+          if (filteredReplies.length > 0) {
+            const chosen = filteredReplies[activeReplyIndex] || filteredReplies[0];
+            if (chosen) handleInsertFastReply(chosen);
+            return true;
+          }
+        }
+        if (key === "Escape") {
+          setIsFastRepliesDismissed(true);
+          return true;
+        }
+      }
+
+      if (key === "Tab" && showSuggestions) {
+        handlePickSuggestion(suggestion.emojis[0]);
+        return true;
+      }
+
+      if (key === "Escape") {
+        if (showSuggestions) {
+          setDismissedAtWords(wordCountBeforeCaret);
+          return true;
+        }
+        if (editingMessage) {
+          handleCancelEditMode();
+          return true;
+        }
+        if (replyingTo) {
+          onCancelReply?.();
+          return true;
+        }
+        if (showAttachMenu) {
+          setShowAttachMenu(false);
+          return true;
+        }
+      }
+
+      return false;
+    },
+    [
+      showGroupMentions,
+      mentionCandidates,
+      activeMentionIndex,
+      handleSelectMentionCandidate,
+      showFastReplies,
+      filteredReplies,
+      activeReplyIndex,
+      handleInsertFastReply,
+      showSuggestions,
+      handlePickSuggestion,
+      suggestion.emojis,
+      wordCountBeforeCaret,
+      editingMessage,
+      handleCancelEditMode,
+      replyingTo,
+      onCancelReply,
+      showAttachMenu,
+    ]
+  );
 
   const placeholderText = editingMessage
     ? "Edit message..."
@@ -1235,6 +1258,127 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         : isAssignedToOther && userName
           ? `Reply as ${userName} (Assigned to ${assignedAgent || "Staff"})...`
           : "Type a message or paste a photo...";
+
+  const actionControls = (
+    <>
+      {showAgentControl && (
+        <ComposerAgentControl
+          chatId={chatId}
+          agentScope={agentScope}
+          claudeEnabled={claudeEnabled}
+          claudePaused={claudePaused}
+          pipeline={pipeline}
+          disabled={isDisabled}
+          compact={isMultiline}
+          isExpanded={showAgentTray}
+          onToggleExpanded={(next) => {
+            setShowAttachMenu(false);
+            setShowEmojiPicker(false);
+            setShowAgentTray((prev) => (typeof next === "boolean" ? next : !prev));
+          }}
+          onInsertDraft={handleInsertAgentDraft}
+          onStatusNotice={setAgentNotice}
+          onGeneratingChange={(agent) => onAgentGeneratingChange?.(agent)}
+          rewriteRequest={agentRewriteRequest}
+        />
+      )}
+
+      {/* Attach Files / Photos Menu Button */}
+      {!editingMessage && (
+        <div ref={attachMenuRef} className="relative shrink-0">
+          {showAttachMenu && !isDisabled && (
+            <div
+              className="absolute bottom-full left-0 mb-2 w-44 rounded-xl border shadow-xl p-1 z-50 animate-in fade-in zoom-in-95 duration-100"
+              style={{
+                background: "var(--bg-card)",
+                borderColor: "var(--border-main)",
+                boxShadow: "0 10px 28px rgba(0,0,0,0.22)",
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAttachMenu(false);
+                  photoInputRef.current?.click();
+                }}
+                className="w-full group flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left text-[12px] font-medium transition-colors hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
+                style={{ color: "var(--text-primary)" }}
+              >
+                <ImageIcon className="w-4 h-4 shrink-0 text-[var(--text-secondary)] group-hover:text-[#0066FF] transition-colors" />
+                <span>Photos & Videos</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAttachMenu(false);
+                  fileInputRef.current?.click();
+                }}
+                className="w-full group flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left text-[12px] font-medium transition-colors hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer mt-0.5"
+                style={{ color: "var(--text-primary)" }}
+              >
+                <FileText className="w-4 h-4 shrink-0 text-[var(--text-secondary)] group-hover:text-[#0066FF] transition-colors" />
+                <span>Document / File</span>
+              </button>
+            </div>
+          )}
+
+          <button
+            type="button"
+            disabled={isDisabled}
+            onClick={() => {
+              setShowEmojiPicker(false);
+              setShowAgentTray(false);
+              setShowAttachMenu((prev) => !prev);
+            }}
+            title="Attach photo or file"
+            aria-label="Attach photo or file"
+            className={`flex items-center justify-center rounded-lg shrink-0 transition-all duration-150 cursor-pointer disabled:opacity-40 border ${
+              isMultiline ? "w-8 h-8" : "w-[36px] min-h-[36px] mb-[3px] sm:mb-[1px]"
+            } ${
+              showAttachMenu || hasQueuedAttachments
+                ? "text-[#0066FF] bg-[var(--bg-selected)] border-[#0066FF]"
+                : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] border-transparent hover:border-[var(--border-input)] hover:bg-black/5 dark:hover:bg-white/5"
+            }`}
+            style={{
+              background:
+                showAttachMenu || hasQueuedAttachments ? "var(--bg-selected)" : undefined,
+              color:
+                showAttachMenu || hasQueuedAttachments ? "#0066FF" : undefined,
+            }}
+          >
+            <Paperclip className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Emoji Toggle Button */}
+      <button
+        type="button"
+        disabled={isDisabled}
+        onClick={() => {
+          setShowAttachMenu(false);
+          setShowAgentTray(false);
+          setShowEmojiPicker((prev) => !prev);
+        }}
+        title="Emoji"
+        aria-label="Emoji"
+        className={`flex items-center justify-center rounded-lg shrink-0 transition-all duration-150 cursor-pointer disabled:opacity-40 border ${
+          isMultiline ? "w-8 h-8" : "w-[36px] min-h-[36px] mb-[3px] sm:mb-[1px]"
+        } ${
+          showEmojiPicker
+            ? "text-[#0066FF] bg-[var(--bg-selected)] border-[#0066FF]"
+            : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] border-transparent hover:border-[var(--border-input)] hover:bg-black/5 dark:hover:bg-white/5"
+        }`}
+        style={{
+          background: showEmojiPicker ? "var(--bg-selected)" : undefined,
+          color: showEmojiPicker ? "#0066FF" : undefined,
+        }}
+      >
+        <Smile className={isMultiline ? "w-[18px] h-[18px]" : "w-5 h-5"} />
+      </button>
+    </>
+  );
 
   return (
     <div
@@ -1369,27 +1513,28 @@ export const ChatInputBar = React.memo(function ChatInputBar({
       {/* Queued Attachments Preview Strip */}
       {!editingMessage && hasQueuedAttachments && (
         <div
-          className="mb-2.5 p-2.5 rounded-xl border animate-in fade-in slide-in-from-bottom-1 duration-150"
+          className="mb-2 px-2 py-1.5 rounded-[10px] border animate-in fade-in slide-in-from-bottom-1 duration-150"
           style={{
             background: "var(--bg-pill)",
             borderColor: "var(--border-input)",
           }}
         >
-          <div className="flex items-center justify-between mb-2 px-0.5">
-            <span className="text-[11px] font-semibold" style={{ color: "var(--text-secondary)" }}>
-              {queuedAttachments.length}{" "}
-              {queuedAttachments.length === 1 ? "attachment ready" : "attachments ready"}
-            </span>
-            <button
-              type="button"
-              onClick={() => setQueuedAttachments([])}
-              className="text-[11px] font-semibold text-red-500 hover:underline cursor-pointer"
-            >
-              Clear all
-            </button>
-          </div>
+          {queuedAttachments.length > 1 && (
+            <div className="flex items-center justify-between mb-1 px-0.5">
+              <span className="text-[10.5px] font-semibold" style={{ color: "var(--text-secondary)" }}>
+                {queuedAttachments.length} attachments ready
+              </span>
+              <button
+                type="button"
+                onClick={() => setQueuedAttachments([])}
+                className="text-[10.5px] font-semibold text-red-500 hover:underline cursor-pointer"
+              >
+                Clear all
+              </button>
+            </div>
+          )}
 
-          <div className="flex items-center gap-2.5 overflow-x-auto pb-1">
+          <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
             {queuedAttachments.map((item) => {
               const ext =
                 item.fileName.includes(".")
@@ -1406,7 +1551,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
                   }}
                 >
                   {item.type === "image" ? (
-                    <div className="w-16 h-16 relative bg-black/5">
+                    <div className="w-10 h-10 relative bg-black/5">
                       <img
                         src={item.previewUrl}
                         alt={item.fileName}
@@ -1414,26 +1559,41 @@ export const ChatInputBar = React.memo(function ChatInputBar({
                       />
                       {item.status === "uploading" && (
                         <div className="absolute inset-0 bg-black/35 flex items-center justify-center">
-                          <Loader2 className="w-4 h-4 text-white animate-spin" />
+                          <Loader2 className="w-3.5 h-3.5 text-white animate-spin" />
                         </div>
                       )}
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveAttachment(item.id)}
+                        title="Remove attachment"
+                        aria-label={`Remove ${item.fileName}`}
+                        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/75 hover:bg-red-600 text-white flex items-center justify-center transition-colors cursor-pointer"
+                      >
+                        <X className="w-2.5 h-2.5" />
+                      </button>
                     </div>
                   ) : item.type === "video" ? (
-                    <div className="w-16 h-16 relative bg-black flex flex-col items-center justify-center text-white p-1">
-                      <Film className="w-5 h-5 opacity-90" />
-                      <span className="text-[9px] mt-1 truncate max-w-full px-1 opacity-80">
-                        {formatFileSize(item.fileSize)}
-                      </span>
+                    <div className="w-10 h-10 relative bg-black flex flex-col items-center justify-center text-white">
+                      <Film className="w-4 h-4 opacity-90" />
                       {item.status === "uploading" && (
                         <div className="absolute inset-0 bg-black/45 flex items-center justify-center">
-                          <Loader2 className="w-4 h-4 text-white animate-spin" />
+                          <Loader2 className="w-3.5 h-3.5 text-white animate-spin" />
                         </div>
                       )}
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveAttachment(item.id)}
+                        title="Remove attachment"
+                        aria-label={`Remove ${item.fileName}`}
+                        className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/75 hover:bg-red-600 text-white flex items-center justify-center transition-colors cursor-pointer"
+                      >
+                        <X className="w-2.5 h-2.5" />
+                      </button>
                     </div>
                   ) : (
-                    <div className="flex items-center gap-2.5 px-3 py-2 min-w-[165px] max-w-[220px] h-16">
+                    <div className="flex items-center gap-2 pl-1.5 pr-1 py-1 min-w-[140px] max-w-[220px] sm:max-w-[245px] h-10">
                       <div
-                        className="w-9 h-9 rounded-lg flex flex-col items-center justify-center shrink-0 border"
+                        className="w-7 h-7 rounded-md flex flex-col items-center justify-center shrink-0 border"
                         style={{
                           background: "var(--file-icon-bg)",
                           borderColor: "var(--file-icon-border)",
@@ -1441,26 +1601,26 @@ export const ChatInputBar = React.memo(function ChatInputBar({
                         }}
                       >
                         {item.type === "audio" ? (
-                          <Music className="w-4 h-4" />
+                          <Music className="w-3.5 h-3.5" />
                         ) : (
                           <>
-                            <FileText className="w-3.5 h-3.5" />
-                            <span className="text-[8px] font-extrabold leading-none mt-0.5">
+                            <FileText className="w-3 h-3" />
+                            <span className="text-[7px] font-extrabold leading-none mt-0.5">
                               {ext}
                             </span>
                           </>
                         )}
                       </div>
-                      <div className="min-w-0 flex-1 pr-3">
+                      <div className="min-w-0 flex-1">
                         <p
-                          className="text-[11px] font-semibold truncate"
+                          className="text-[11px] font-semibold leading-tight truncate"
                           style={{ color: "var(--text-primary)" }}
                           title={item.fileName}
                         >
                           {item.fileName}
                         </p>
                         <p
-                          className="text-[10px] flex items-center gap-1 mt-0.5"
+                          className="text-[10px] leading-tight flex items-center gap-1 mt-0.5"
                           style={{ color: "var(--text-secondary)" }}
                         >
                           <span>{formatFileSize(item.fileSize)}</span>
@@ -1469,35 +1629,35 @@ export const ChatInputBar = React.memo(function ChatInputBar({
                           )}
                         </p>
                       </div>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveAttachment(item.id)}
+                        title="Remove attachment"
+                        aria-label={`Remove ${item.fileName}`}
+                        className="w-6 h-6 rounded-md flex items-center justify-center shrink-0 transition-colors hover:bg-red-500/10 hover:text-red-500 cursor-pointer"
+                        style={{ color: "var(--text-muted)" }}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   )}
-
-                  {/* Remove single attachment button */}
-                  <button
-                    type="button"
-                    onClick={() => handleRemoveAttachment(item.id)}
-                    title="Remove attachment"
-                    className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/70 hover:bg-red-600 text-white flex items-center justify-center transition-colors cursor-pointer shadow-xs"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
                 </div>
               );
             })}
 
-            {/* Quick "+ Add more" tile */}
+            {/* Compact "+ Add" tile */}
             <button
               type="button"
               onClick={() => photoInputRef.current?.click()}
               title="Add more photos or files"
-              className="w-16 h-16 rounded-lg border border-dashed flex flex-col items-center justify-center gap-1 shrink-0 transition-colors hover:border-[#0066FF] hover:text-[#0066FF] cursor-pointer"
+              aria-label="Add more photos or files"
+              className="w-10 h-10 rounded-lg border border-dashed flex items-center justify-center shrink-0 transition-colors hover:border-[#0066FF] hover:text-[#0066FF] cursor-pointer"
               style={{
                 borderColor: "var(--border-input)",
                 color: "var(--text-secondary)",
               }}
             >
               <Plus className="w-4 h-4" />
-              <span className="text-[9px] font-semibold">Add</span>
             </button>
           </div>
         </div>
@@ -1581,13 +1741,26 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         />
       )}
 
-      {/* Smart emoji suggestions + WhatsApp formatting toolbar (appears while typing) */}
-      {!isWindowClosed && !isDisabled && !showEmojiPicker && !showFastReplies && !showGroupMentions && (
+      {/* Smart emoji suggestions + WhatsApp formatting bar (+ docked controls when multiline) */}
+      {!isWindowClosed && !isReadOnly && canSendMessages && !showFastReplies && !showGroupMentions && (isMultiline || !showEmojiPicker) && (
         <ComposerAssistBar
-          suggestions={showSuggestions ? suggestion.emojis : []}
+          suggestions={showSuggestions && !showEmojiPicker ? suggestion.emojis : []}
           onPickSuggestion={handlePickSuggestion}
-          showToolbar={supportsFormatting && text.length > 0}
+          showToolbar={supportsFormatting && (isMultiline || text.length > 0)}
           onFormat={handleFormat}
+          activeFormats={snapshot.activeFormats}
+          leftSlot={isMultiline ? actionControls : undefined}
+          popoverSlot={
+            isMultiline && showEmojiPicker && !isDisabled ? (
+              <EmojiPicker
+                onSelect={handleInsertEmoji}
+                onClose={() => setShowEmojiPicker(false)}
+                position="top"
+                align="left"
+              />
+            ) : undefined
+          }
+          disabled={isDisabled}
         />
       )}
 
@@ -1639,9 +1812,15 @@ export const ChatInputBar = React.memo(function ChatInputBar({
           The 24-hour reply window is closed. It reopens the next time this customer messages — outside it WhatsApp only allows approved template messages.
         </div>
       ) : (
-        <div className="flex gap-2 items-end relative">
-          {/* WhatsApp Emoji Picker Popover */}
-          {showEmojiPicker && !isDisabled && (
+        <div
+          className={`relative grid items-end gap-2 ${
+            isMultiline
+              ? "grid-cols-[minmax(0,1fr)_auto]"
+              : "grid-cols-[auto_minmax(0,1fr)_auto]"
+          }`}
+        >
+          {/* Single-line WhatsApp Emoji Picker Popover (multiline mounts it inside ComposerAssistBar) */}
+          {!isMultiline && showEmojiPicker && !isDisabled && (
             <EmojiPicker
               onSelect={handleInsertEmoji}
               onClose={() => setShowEmojiPicker(false)}
@@ -1650,195 +1829,70 @@ export const ChatInputBar = React.memo(function ChatInputBar({
             />
           )}
 
-          {/* Far-Left AI Agent Control */}
-          {showAgentControl && (
-            <ComposerAgentControl
-              chatId={chatId}
-              agentScope={agentScope}
-              claudeEnabled={claudeEnabled}
-              claudePaused={claudePaused}
-              pipeline={pipeline}
-              disabled={isDisabled}
-              isExpanded={showAgentTray}
-              onToggleExpanded={(next) => {
-                setShowAttachMenu(false);
-                setShowEmojiPicker(false);
-                setShowAgentTray((prev) => (typeof next === "boolean" ? next : !prev));
-              }}
-              onInsertDraft={handleInsertAgentDraft}
-              onStatusNotice={setAgentNotice}
-              onGeneratingChange={(agent) => onAgentGeneratingChange?.(agent)}
-              rewriteRequest={agentRewriteRequest}
-            />
-          )}
-
-          {/* Attach Files / Photos Menu Button */}
-          {!editingMessage && (
-            <div ref={attachMenuRef} className="relative shrink-0">
-              {showAttachMenu && !isDisabled && (
-                <div
-                  className="absolute bottom-full left-0 mb-2 w-44 rounded-xl border shadow-xl p-1 z-50 animate-in fade-in zoom-in-95 duration-100"
-                  style={{
-                    background: "var(--bg-card)",
-                    borderColor: "var(--border-main)",
-                    boxShadow: "0 10px 28px rgba(0,0,0,0.22)",
-                  }}
-                >
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowAttachMenu(false);
-                      photoInputRef.current?.click();
-                    }}
-                    className="w-full group flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left text-[12px] font-medium transition-colors hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
-                    style={{ color: "var(--text-primary)" }}
-                  >
-                    <ImageIcon className="w-4 h-4 shrink-0 text-[var(--text-secondary)] group-hover:text-[#0066FF] transition-colors" />
-                    <span>Photos & Videos</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowAttachMenu(false);
-                      fileInputRef.current?.click();
-                    }}
-                    className="w-full group flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left text-[12px] font-medium transition-colors hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer mt-0.5"
-                    style={{ color: "var(--text-primary)" }}
-                  >
-                    <FileText className="w-4 h-4 shrink-0 text-[var(--text-secondary)] group-hover:text-[#0066FF] transition-colors" />
-                    <span>Document / File</span>
-                  </button>
-                </div>
-              )}
-
-              <button
-                type="button"
-                disabled={isDisabled}
-                onClick={() => {
-                  setShowEmojiPicker(false);
-                  setShowAgentTray(false);
-                  setShowAttachMenu((prev) => !prev);
-                }}
-                title="Attach photo or file"
-                className={`flex items-center justify-center w-[36px] min-h-[36px] mb-[3px] sm:mb-[1px] rounded-lg shrink-0 transition-all duration-150 cursor-pointer disabled:opacity-40 border ${
-                  showAttachMenu || hasQueuedAttachments
-                    ? "text-[#0066FF] bg-[var(--bg-selected)] border-[#0066FF]"
-                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] border-transparent hover:border-[var(--border-input)] hover:bg-black/5 dark:hover:bg-white/5"
-                }`}
-                style={{
-                  background:
-                    showAttachMenu || hasQueuedAttachments ? "var(--bg-selected)" : undefined,
-                  color:
-                    showAttachMenu || hasQueuedAttachments ? "#0066FF" : undefined,
-                }}
-              >
-                <Paperclip className="w-4 h-4" />
-              </button>
-            </div>
-          )}
-
-          {/* Emoji Toggle Button */}
-          <button
-            type="button"
-            disabled={isDisabled}
-            onClick={() => {
-              setShowAttachMenu(false);
-              setShowAgentTray(false);
-              setShowEmojiPicker((prev) => !prev);
-            }}
-            title="Emoji"
-            className={`flex items-center justify-center w-[36px] min-h-[36px] mb-[3px] sm:mb-[1px] rounded-lg shrink-0 transition-all duration-150 cursor-pointer disabled:opacity-40 border ${
-              showEmojiPicker
-                ? "text-[#0066FF] bg-[var(--bg-selected)] border-[#0066FF]"
-                : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] border-transparent hover:border-[var(--border-input)] hover:bg-black/5 dark:hover:bg-white/5"
-            }`}
-            style={{
-              background: showEmojiPicker ? "var(--bg-selected)" : undefined,
-              color: showEmojiPicker ? "#0066FF" : undefined,
-            }}
-          >
-            <Smile className="w-5 h-5" />
-          </button>
-
+          {/* Slot 1 (fixed sibling index): Standalone input box so single-line ↔ multiline never remounts Lexical */}
           <div
-            className={`relative flex-1 min-w-0 rounded-[8px] transition-colors ${
+            className={`${
+              isMultiline ? "col-start-1" : "col-start-2"
+            } row-start-1 relative min-w-0 rounded-[8px] transition-colors border border-[var(--border-main)] ${
               isDisabled ? "opacity-60" : ""
             }`}
             style={{
-              border: "1px solid var(--border-main)",
               background: "var(--bg-input)",
               color: "var(--text-primary)",
               WebkitFontSmoothing: "antialiased",
             }}
           >
-            {editorHighlight !== null && (
-              <div
-                ref={mirrorRef}
-                aria-hidden="true"
-                dir="auto"
-                className="wa-ed-mirror absolute inset-0 px-3.5 py-[9px] sm:py-[8px] leading-[22px] sm:leading-[20px] text-[16px] sm:text-[13px]"
-                style={{ color: "var(--text-primary)" }}
-              >
-                {editorHighlight}
-              </div>
-            )}
-            <textarea
-              ref={inputRef}
-              rows={1}
-              dir="auto"
-              value={text}
-              onChange={(e) => {
-                const nextVal = e.target.value;
-                setText(nextVal);
-                setCaret(e.target.selectionEnd ?? nextVal.length);
-                if (mentionsEnabled) {
-                  const rec = reconcileComposerMentions(nextVal, selectedMentions, mentionAll);
-                  setSelectedMentions(rec.mentions);
-                  setMentionAll(rec.mentionAll);
-                }
-              }}
-              onSelect={syncCaret}
-              onScroll={syncScroll}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              autoComplete="off"
-              autoCorrect="on"
-              spellCheck={true}
+            <ComposerEditor
+              ref={editorRef}
               placeholder={placeholderText}
               disabled={isDisabled}
-              className={`relative z-10 w-full block resize-none rounded-[8px] px-3.5 py-[9px] sm:py-[8px] leading-[22px] sm:leading-[20px] min-h-[42px] sm:min-h-[38px] text-[16px] sm:text-[13px] outline-none placeholder:text-[var(--text-muted)] ${
-                !text ? "h-[42px] sm:h-[38px] overflow-hidden " : ""
-              }${
-                editorHighlight !== null ? "wa-ed-input" : "bg-transparent"
-              }`}
-              style={{
-                color: editorHighlight !== null ? "transparent" : "var(--text-primary)",
-              }}
+              supportsFormatting={supportsFormatting}
+              isMultiline={isMultiline}
+              onWrapMultiline={handleWrapMultiline}
+              onSnapshotChange={handleSnapshotChange}
+              onSend={handleSendOrSave}
+              onPasteFiles={handlePasteFiles}
+              onPopoverKey={handlePopoverKey}
             />
           </div>
 
-          {editingMessage ? (
-            <button
-              type="button"
-              onClick={handleSendOrSave}
-              disabled={isDisabled || !text.trim()}
-              title="Save edited message (Enter)"
-              className="bg-[#25D366] hover:bg-[#1ebe5d] disabled:opacity-50 text-white font-semibold text-[13px] px-3.5 min-h-[42px] sm:min-h-[38px] rounded-[8px] shrink-0 transition-colors cursor-pointer disabled:cursor-not-allowed flex items-center gap-1.5"
-            >
-              <Check className="w-4 h-4 stroke-[2.5]" />
-              <span className="hidden sm:inline">{isSending ? "Saving..." : "Save"}</span>
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={handleSendOrSave}
-              disabled={isDisabled || (!text.trim() && !hasQueuedAttachments)}
-              className="bg-[#0066FF] hover:bg-[#0055D6] disabled:bg-[#78B4F9] text-white font-semibold text-[13px] px-4 min-h-[42px] sm:min-h-[38px] rounded-[8px] shrink-0 transition-colors cursor-pointer disabled:cursor-not-allowed"
-            >
-              {isSending ? "Sending..." : "Send"}
-            </button>
+          {/* Slot 2: Standalone left icons outside input box on single-line (docked to top bar on multiline) */}
+          {!isMultiline && (
+            <div className="col-start-1 row-start-1 flex items-end gap-2">
+              {actionControls}
+            </div>
           )}
+
+          {/* Slot 3: Standalone Send / Save button */}
+          <div
+            className={
+              isMultiline
+                ? "col-start-2 row-start-1 flex items-center self-end"
+                : "col-start-3 row-start-1 flex items-center self-end"
+            }
+          >
+            {editingMessage ? (
+              <button
+                type="button"
+                onClick={handleSendOrSave}
+                disabled={isDisabled || !text.trim()}
+                title="Save edited message (Enter)"
+                className="bg-[#25D366] hover:bg-[#1ebe5d] disabled:opacity-50 text-white font-semibold text-[13px] px-3.5 min-h-[42px] sm:min-h-[38px] rounded-[8px] shrink-0 transition-colors cursor-pointer disabled:cursor-not-allowed flex items-center gap-1.5"
+              >
+                <Check className="w-4 h-4 stroke-[2.5]" />
+                <span className="hidden sm:inline">{isSending ? "Saving..." : "Save"}</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={handleSendOrSave}
+                disabled={isDisabled || (!text.trim() && !hasQueuedAttachments)}
+                className="bg-[#0066FF] hover:bg-[#0055D6] disabled:bg-[#78B4F9] text-white font-semibold text-[13px] px-4 min-h-[42px] sm:min-h-[38px] rounded-[8px] shrink-0 transition-colors cursor-pointer disabled:cursor-not-allowed"
+              >
+                {isSending ? "Sending..." : "Send"}
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -1850,7 +1904,7 @@ export const ChatInputBar = React.memo(function ChatInputBar({
         onClose={() => {
           setShowCreateModal(false);
           setEditingReply(null);
-          requestAnimationFrame(() => inputRef.current?.focus());
+          requestAnimationFrame(() => editorRef.current?.focus());
         }}
         onSave={handleSaveQuickReply}
       />

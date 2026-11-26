@@ -35,6 +35,7 @@ export interface ComposerAgentControlProps {
   onStatusNotice: (notice: ComposerAgentNotice | null) => void;
   onGeneratingChange: (agent: ComposerAgentId | null) => void;
   rewriteRequest?: { id: number; agent: ComposerAgentId } | null;
+  compact?: boolean;
 }
 
 const DEFAULT_SUMMARY: ComposerAgentSettingsSummary = {
@@ -46,6 +47,36 @@ const DEFAULT_SUMMARY: ComposerAgentSettingsSummary = {
   followUpActivated: false,
   loadedAt: 0,
 };
+
+const FOLLOWUP_LEAD_CACHE_TTL_MS = 15_000;
+const followUpLeadCache = new Map<string, { data: SingleLeadFollowUpState; fetchedAt: number }>();
+const lastHandledRewriteIdByChat = new Map<string, number>();
+
+interface InFlightAgentState {
+  generating: ComposerAgentId | null;
+  toggling: ComposerAgentId | null;
+}
+
+const inFlightAgentStateByChat = new Map<string, InFlightAgentState>();
+const inFlightListeners = new Set<() => void>();
+
+function getInFlightState(chatId: string): InFlightAgentState {
+  return inFlightAgentStateByChat.get(chatId) ?? { generating: null, toggling: null };
+}
+
+function patchInFlightState(chatId: string, patch: Partial<InFlightAgentState>): void {
+  const prev = getInFlightState(chatId);
+  const next: InFlightAgentState = {
+    generating: patch.generating !== undefined ? patch.generating : prev.generating,
+    toggling: patch.toggling !== undefined ? patch.toggling : prev.toggling,
+  };
+  if (next.generating === null && next.toggling === null) {
+    inFlightAgentStateByChat.delete(chatId);
+  } else {
+    inFlightAgentStateByChat.set(chatId, next);
+  }
+  inFlightListeners.forEach((listener) => listener());
+}
 
 /**
  * Far-left expandable composer AI agent launcher supporting Admission Adham and Follow-up Adham.
@@ -64,19 +95,46 @@ export function ComposerAgentControl({
   onStatusNotice,
   onGeneratingChange,
   rewriteRequest = null,
+  compact = false,
 }: ComposerAgentControlProps) {
   const { authFetch } = useAuth();
   const { updateConversationClaude } = useCRM();
 
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const lastRewriteIdRef = useRef<number>(0);
 
   const [summary, setSummary] = useState<ComposerAgentSettingsSummary>(
     () => readComposerAgentSettingsCache() ?? DEFAULT_SUMMARY
   );
-  const [followUpLead, setFollowUpLead] = useState<SingleLeadFollowUpState | null>(null);
-  const [generatingAgent, setGeneratingAgent] = useState<ComposerAgentId | null>(null);
-  const [togglingAgent, setTogglingAgent] = useState<ComposerAgentId | null>(null);
+  const [followUpLead, setFollowUpLead] = useState<SingleLeadFollowUpState | null>(
+    () => followUpLeadCache.get(chatId)?.data ?? null
+  );
+  const [generatingAgent, setGeneratingAgent] = useState<ComposerAgentId | null>(
+    () => getInFlightState(chatId).generating
+  );
+  const [togglingAgent, setTogglingAgentState] = useState<ComposerAgentId | null>(
+    () => getInFlightState(chatId).toggling
+  );
+
+  const setToggling = useCallback(
+    (agent: ComposerAgentId | null) => {
+      patchInFlightState(chatId, { toggling: agent });
+      setTogglingAgentState(agent);
+    },
+    [chatId]
+  );
+
+  useEffect(() => {
+    const sync = () => {
+      const state = getInFlightState(chatId);
+      setGeneratingAgent(state.generating);
+      setTogglingAgentState(state.toggling);
+    };
+    inFlightListeners.add(sync);
+    queueMicrotask(sync);
+    return () => {
+      inFlightListeners.delete(sync);
+    };
+  }, [chatId]);
 
   const showFollowUp = agentScope !== "admissions";
   const showAdmissions = agentScope !== "followup";
@@ -123,21 +181,33 @@ export function ComposerAgentControl({
     [authFetch]
   );
 
-  const loadLeadFollowUpState = useCallback(async () => {
-    if (!showFollowUp || !chatId) return;
-    try {
-      const res = await authFetch(
-        `/crm-api/followup-agent/leads/${encodeURIComponent(chatId)}`,
-        { cache: "no-store" }
-      );
-      const json = await res.json().catch(() => null);
-      if (res.ok && json?.success && json.data) {
-        setFollowUpLead(json.data as SingleLeadFollowUpState);
+  const loadLeadFollowUpState = useCallback(
+    async ({ force = false }: { force?: boolean } = {}) => {
+      if (!showFollowUp || !chatId) return;
+      if (!force) {
+        const cached = followUpLeadCache.get(chatId);
+        if (cached && Date.now() - cached.fetchedAt < FOLLOWUP_LEAD_CACHE_TTL_MS) {
+          setFollowUpLead(cached.data);
+          return;
+        }
       }
-    } catch {
-      // Preserve last known state on transient failure
-    }
-  }, [authFetch, chatId, showFollowUp]);
+      try {
+        const res = await authFetch(
+          `/crm-api/followup-agent/leads/${encodeURIComponent(chatId)}`,
+          { cache: "no-store" }
+        );
+        const json = await res.json().catch(() => null);
+        if (res.ok && json?.success && json.data) {
+          const data = json.data as SingleLeadFollowUpState;
+          followUpLeadCache.set(chatId, { data, fetchedAt: Date.now() });
+          setFollowUpLead(data);
+        }
+      } catch {
+        // Preserve last known state on transient failure
+      }
+    },
+    [authFetch, chatId, showFollowUp]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -162,7 +232,7 @@ export function ComposerAgentControl({
       void loadSettingsSummary({ force: true });
     };
     const handleFollowUpChanged = () => {
-      void loadLeadFollowUpState();
+      void loadLeadFollowUpState({ force: true });
     };
     window.addEventListener("crm:claude-settings-updated", handleSettingsChanged);
     window.addEventListener("crm:followup-settings-updated", handleSettingsChanged);
@@ -197,10 +267,11 @@ export function ComposerAgentControl({
 
   const setGenerating = useCallback(
     (agent: ComposerAgentId | null) => {
+      patchInFlightState(chatId, { generating: agent });
       setGeneratingAgent(agent);
       onGeneratingChange(agent);
     },
-    [onGeneratingChange]
+    [chatId, onGeneratingChange]
   );
 
   const runAdmissionsDraft = useCallback(async () => {
@@ -265,7 +336,7 @@ export function ComposerAgentControl({
         return;
       }
       const cleanDraft = stripSplitMarkerForComposer(json.data?.draftText || "");
-      await loadLeadFollowUpState();
+      await loadLeadFollowUpState({ force: true });
       if (json.data?.silentNoReply || !cleanDraft) {
         onStatusNotice({
           tone: "warning",
@@ -293,7 +364,7 @@ export function ComposerAgentControl({
     }
 
     const currentlyActive = Boolean(claudeEnabled && !claudePaused);
-    setTogglingAgent("admissions");
+    setToggling("admissions");
     onStatusNotice(null);
     try {
       if (currentlyActive) {
@@ -330,7 +401,7 @@ export function ComposerAgentControl({
         }
       }
     } finally {
-      setTogglingAgent(null);
+      setToggling(null);
     }
   }, [
     chatId,
@@ -341,6 +412,7 @@ export function ComposerAgentControl({
     loadSettingsSummary,
     onStatusNotice,
     runAdmissionsDraft,
+    setToggling,
     summary,
     togglingAgent,
     updateConversationClaude,
@@ -356,7 +428,7 @@ export function ComposerAgentControl({
     }
 
     const currentlyActive = isFollowUpEnrollmentActive(followUpLead?.enrollment?.status);
-    setTogglingAgent("followup");
+    setToggling("followup");
     onStatusNotice(null);
     try {
       if (currentlyActive) {
@@ -376,7 +448,7 @@ export function ComposerAgentControl({
           });
           return;
         }
-        await loadLeadFollowUpState();
+        await loadLeadFollowUpState({ force: true });
         onStatusNotice({ tone: "info", message: "Follow-up Adham turned off for this chat." });
       } else {
         const res = await authFetch(
@@ -395,7 +467,7 @@ export function ComposerAgentControl({
           });
           return;
         }
-        await loadLeadFollowUpState();
+        await loadLeadFollowUpState({ force: true });
         if (json.data?.autoSendSkippedReason === "global_disabled") {
           onStatusNotice({
             tone: "warning",
@@ -414,7 +486,7 @@ export function ComposerAgentControl({
         message: "Network error while updating Follow-up Adham.",
       });
     } finally {
-      setTogglingAgent(null);
+      setToggling(null);
     }
   }, [
     authFetch,
@@ -426,6 +498,7 @@ export function ComposerAgentControl({
     loadSettingsSummary,
     onStatusNotice,
     runFollowUpDraft,
+    setToggling,
     summary,
     togglingAgent,
   ]);
@@ -433,8 +506,8 @@ export function ComposerAgentControl({
   // Support "Rewrite" action from the Draft banner inside ChatInputBar
   useEffect(() => {
     if (!rewriteRequest || rewriteRequest.id <= 0) return;
-    if (rewriteRequest.id === lastRewriteIdRef.current) return;
-    lastRewriteIdRef.current = rewriteRequest.id;
+    if ((lastHandledRewriteIdByChat.get(chatId) ?? 0) === rewriteRequest.id) return;
+    lastHandledRewriteIdByChat.set(chatId, rewriteRequest.id);
     queueMicrotask(() => {
       if (rewriteRequest.agent === "admissions") {
         void runAdmissionsDraft();
@@ -442,7 +515,7 @@ export function ComposerAgentControl({
         void runFollowUpDraft();
       }
     });
-  }, [rewriteRequest, runAdmissionsDraft, runFollowUpDraft]);
+  }, [chatId, rewriteRequest, runAdmissionsDraft, runFollowUpDraft]);
 
   const visual = useMemo(
     () =>
@@ -502,7 +575,9 @@ export function ComposerAgentControl({
           aria-expanded={false}
           aria-label="Open AI Agents"
           title="AI Agents (Follow-up & Admission)"
-          className="relative flex items-center justify-center w-[36px] min-h-[36px] mb-[3px] sm:mb-[1px] rounded-lg shrink-0 transition-all duration-150 cursor-pointer disabled:opacity-40 border"
+          className={`relative flex items-center justify-center rounded-lg shrink-0 transition-all duration-150 cursor-pointer disabled:opacity-40 border ${
+            compact ? "w-8 h-8" : "w-[36px] min-h-[36px] mb-[3px] sm:mb-[1px]"
+          }`}
           style={
             visibleActive || visibleGenerating
               ? {
@@ -539,7 +614,9 @@ export function ComposerAgentControl({
       ref={containerRef}
       role="group"
       aria-label="AI Agents"
-      className="relative flex items-center gap-0.5 p-0.5 mb-[3px] sm:mb-[1px] rounded-xl border shrink-0 transition-all duration-150"
+      className={`relative flex items-center gap-0.5 p-0.5 rounded-xl border shrink-0 transition-all duration-150 ${
+        compact ? "" : "mb-[3px] sm:mb-[1px]"
+      }`}
       style={{
         background: "var(--bg-pill)",
         borderColor: "var(--border-input)",
@@ -553,14 +630,16 @@ export function ComposerAgentControl({
         aria-expanded={true}
         aria-label="Collapse AI Agents"
         title="Collapse AI Agents"
-        className="flex items-center justify-center w-8 h-8 rounded-lg cursor-pointer transition-colors hover:bg-[var(--bg-hover)]"
+        className={`flex items-center justify-center rounded-lg cursor-pointer transition-colors hover:bg-[var(--bg-hover)] ${
+          compact ? "w-7 h-7" : "w-8 h-8"
+        }`}
         style={{ color: "var(--text-secondary)" }}
       >
         <Bot className="w-4 h-4" />
       </button>
 
       <span
-        className="w-px h-5 shrink-0 mx-0.5"
+        className={`w-px shrink-0 mx-0.5 ${compact ? "h-4" : "h-5"}`}
         style={{ background: "var(--border-main)" }}
         aria-hidden="true"
       />
@@ -574,7 +653,9 @@ export function ComposerAgentControl({
             onClick={() => void handleFollowUpClick()}
             aria-pressed={visual.followUpActive}
             aria-label={`${followUpTooltipTitle}: ${followUpTooltipHint}`}
-            className="relative flex items-center justify-center w-8 h-8 rounded-lg border cursor-pointer transition-all duration-150 disabled:opacity-50"
+            className={`relative flex items-center justify-center rounded-lg border cursor-pointer transition-all duration-150 disabled:opacity-50 ${
+              compact ? "w-7 h-7" : "w-8 h-8"
+            }`}
             style={
               visual.followUpGenerating || togglingAgent === "followup"
                 ? {
@@ -637,7 +718,9 @@ export function ComposerAgentControl({
             onClick={() => void handleAdmissionClick()}
             aria-pressed={visual.admissionActive}
             aria-label={`${admissionTooltipTitle}: ${admissionTooltipHint}`}
-            className="relative flex items-center justify-center w-8 h-8 rounded-lg border cursor-pointer transition-all duration-150 disabled:opacity-50"
+            className={`relative flex items-center justify-center rounded-lg border cursor-pointer transition-all duration-150 disabled:opacity-50 ${
+              compact ? "w-7 h-7" : "w-8 h-8"
+            }`}
             style={
               visual.admissionGenerating || togglingAgent === "admissions"
                 ? {
