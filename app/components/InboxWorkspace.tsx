@@ -318,6 +318,7 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     bulkUpdateSavedForAgent,
     fetchConversationsForBatchExport,
     markConversationAsRead,
+    markConversationAsUnread,
     createManualLead,
     refresh,
     searchQuery,
@@ -1513,6 +1514,56 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     [isReadOnly, user?.name, setActiveChatId, patchConversation]
   );
 
+  const handleMarkAsUnread = useCallback(
+    async (convId: string) => {
+      if (!isOperationInbox || isReadOnly || !convId) return;
+      const { conversations: currConvs, activeChatId: currActiveId } = bucketCtxRef.current;
+      const target = currConvs.find((c) => c.id === convId);
+      if (!target || isConversationDone(target) || isConversationArchived(target)) return;
+
+      const wasActive = currActiveId === convId;
+      if (wasActive) {
+        setActiveChatId(null);
+        setShowDetailsPanel(false);
+        setMobileView("list");
+      }
+
+      const displayLabel = target.leadName || target.name || "Conversation";
+      const res = await markConversationAsUnread(convId);
+      if (!res.ok) {
+        if (wasActive) {
+          setActiveChatId(convId);
+        }
+        setInboxToast({
+          type: "error",
+          message: res.error || "Could not mark conversation as unseen.",
+        });
+        return;
+      }
+
+      setInboxToast({
+        type: "success",
+        message: `${displayLabel} marked as unseen`,
+        onUndo: () => {
+          setInboxToast(null);
+          if (wasActive) {
+            handleSelectConv(convId);
+          } else {
+            void markConversationAsRead(convId);
+          }
+        },
+      });
+    },
+    [
+      isOperationInbox,
+      isReadOnly,
+      markConversationAsUnread,
+      markConversationAsRead,
+      handleSelectConv,
+      setActiveChatId,
+    ]
+  );
+
   const handleDownloadConversation = useCallback(
     async (targetConv: CRMConversation) => {
       if (!canDownloadChat || !targetConv || downloadingConvId === targetConv.id) return;
@@ -2448,6 +2499,9 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                   labels={labels}
                   onSelect={handleSelectConv}
                   onApplyBucketChange={applyInboxBucketChange}
+                  onMarkAsUnread={
+                    isOperationInbox && !isReadOnly ? handleMarkAsUnread : undefined
+                  }
                   onAvatarError={handleAvatarImageError}
                   registerAvatarObserver={registerAvatarObserver}
                 />
@@ -2713,10 +2767,18 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
                     isSaved={Boolean(activeConv.savedForAgent)}
                     savedCount={savedConvCount}
                     canManageBuckets={!isReadOnly}
+                    canMarkUnseen={
+                      isOperationInbox &&
+                      !isReadOnly &&
+                      !isConversationDone(activeConv) &&
+                      !isConversationArchived(activeConv) &&
+                      (Number(activeConv.unreadCount) || 0) === 0
+                    }
                     canDownload={canDownloadChat}
                     isDownloading={downloadingConvId === activeConv.id}
                     isBatchDownloading={isBatchDownloading}
                     onAction={(action) => applyInboxBucketChange(activeConv.id, action)}
+                    onMarkUnseen={() => void handleMarkAsUnread(activeConv.id)}
                     onToggleSaved={
                       canDownloadChat && !isReadOnly
                         ? () => void handleToggleSavedSingle(activeConv)

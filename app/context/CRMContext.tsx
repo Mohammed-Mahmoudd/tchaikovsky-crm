@@ -23,6 +23,7 @@ import {
   isLastMessageFromLead,
   isRealSenderName,
   mergeExistingMessageFromSse,
+  resolveEffectiveUnreadCount,
   resolvePreferredSenderName,
 } from "../utils/conversationMessages";
 import {
@@ -159,6 +160,7 @@ export type Conversation = {
   savedForAgentAt?: string;
   savedForAgentBy?: string;
   unreadCount?: number;
+  markedUnread?: boolean;
   windowLeft?: string;
   pipeline: "New" | "Contacted" | "Qualified" | "Audition Booked" | "Attended" | "Enrolled" | "Joining Later" | "Unqualified" | "Lost" | "direct";
   lostReason?: string;
@@ -366,6 +368,7 @@ type CRMContextType = {
   }>;
   createManualLead: (input: CreateManualLeadInput) => Promise<CreateManualLeadResult>;
   markConversationAsRead: (id: string) => Promise<void>;
+  markConversationAsUnread: (id: string) => Promise<{ ok: boolean; error?: string }>;
   refresh: () => Promise<void>;
   // Fix B: lets Pipeline pause the 3s poll during drag so it never races the PATCH
   setPollPaused: (paused: boolean) => void;
@@ -555,6 +558,7 @@ function slimConversationsForStorage(convs: Conversation[], limit?: number): Con
     if (c.metaSenderId) item.metaSenderId = c.metaSenderId;
     if (c.formPhone) item.formPhone = c.formPhone;
     if (c.unreadCount) item.unreadCount = c.unreadCount;
+    if (c.markedUnread) item.markedUnread = true;
     if (c.isArchived) item.isArchived = true;
     if (c.archivedAt) item.archivedAt = c.archivedAt;
     if (c.archivedBy) item.archivedBy = c.archivedBy;
@@ -1308,9 +1312,51 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
   const avatarErrorRefreshedRef = useRef<Map<string, number>>(new Map());
   const avatarBatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastReadAtRef = useRef<Map<string, number>>(new Map());
+  const pendingUnreadOpRef = useRef<
+    Map<string, { markedUnread: boolean; unreadCount: number; lastReadAt?: number; expiresAt: number }>
+  >(new Map());
+  const readWriteChainRef = useRef<Map<string, Promise<void>>>(new Map());
   const groupParticipantsCacheRef = useRef<
     Map<string, { participants: GroupParticipant[]; groupMeta?: GroupMetaInfo }>
   >(new Map());
+
+  const resolveActiveUnreadGuard = useCallback(
+    (
+      id: string,
+      serverMarkedUnread: boolean,
+      serverLastReadAt: number | undefined,
+      now = Date.now()
+    ) => {
+      const guard = pendingUnreadOpRef.current.get(id);
+      if (!guard) return undefined;
+      if (now > guard.expiresAt) {
+        pendingUnreadOpRef.current.delete(id);
+        return undefined;
+      }
+      if (guard.markedUnread && serverMarkedUnread) {
+        pendingUnreadOpRef.current.delete(id);
+        return undefined;
+      }
+      if (!guard.markedUnread && !serverMarkedUnread && (serverLastReadAt || 0) >= (guard.lastReadAt || 0)) {
+        pendingUnreadOpRef.current.delete(id);
+        return undefined;
+      }
+      return guard;
+    },
+    []
+  );
+
+  const enqueueReadStateSync = useCallback((id: string, task: () => Promise<void>) => {
+    const prev = readWriteChainRef.current.get(id) || Promise.resolve();
+    const next = prev.catch(() => {}).then(task);
+    readWriteChainRef.current.set(id, next);
+    void next.finally(() => {
+      if (readWriteChainRef.current.get(id) === next) {
+        readWriteChainRef.current.delete(id);
+      }
+    });
+    return next;
+  }, []);
 
   // Normalize raw API data to CRM Conversation model (without messages)
   const normalizeConversationMeta = useCallback((c: any): Omit<Conversation, "messages"> => {
@@ -1367,6 +1413,10 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const rawUnread = Number(c.unreadCount) || 0;
         const lastMsgTs = Number(c.lastMessageAt) || 0;
         const lastReadTs = resolvedInbox === "operation" ? Number(c.lastReadAt) || 0 : 0;
+        const isMarkedUnread = resolvedInbox === "operation" && Boolean(c.markedUnread);
+        if (isMarkedUnread) {
+          return Math.max(1, rawUnread);
+        }
         if (lastReadTs > 0 && (!lastMsgTs || lastMsgTs <= lastReadTs)) {
           return 0;
         }
@@ -1379,6 +1429,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         }
         return 0;
       })(),
+      markedUnread: resolvedInbox === "operation" && Boolean(c.markedUnread),
       windowLeft: "Active",
       pipeline:
         c.auditionOutcome === "joining-later" && (!c.pipeline || c.pipeline === "Contacted" || c.pipeline === "Qualified" || c.pipeline === "New")
@@ -1608,12 +1659,22 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 cachedMessages = [];
               }
             }
-            const resolvedUnread =
-              cachedMessages.length > 0
-                ? computeUnreadFromMessages(cachedMessages, effectiveReadAt)
-                : effectiveReadAt && (!meta.lastMessageAt || meta.lastMessageAt <= effectiveReadAt)
-                ? 0
-                : meta.unreadCount;
+            const unreadGuard = isOpConv
+              ? resolveActiveUnreadGuard(meta.id, Boolean(meta.markedUnread), effectiveReadAt, now)
+              : undefined;
+            const effectiveMarkedUnread = unreadGuard
+              ? unreadGuard.markedUnread
+              : isOpConv && Boolean(meta.markedUnread);
+            const effectiveReadAtGuarded = unreadGuard?.lastReadAt
+              ? Math.max(effectiveReadAt || 0, unreadGuard.lastReadAt)
+              : effectiveReadAt;
+            const resolvedUnread = resolveEffectiveUnreadCount({
+              messages: cachedMessages,
+              lastReadAt: effectiveReadAtGuarded,
+              markedUnread: effectiveMarkedUnread,
+              lastMessageAt: meta.lastMessageAt,
+              serverUnreadCount: unreadGuard && cachedMessages.length === 0 ? unreadGuard.unreadCount : meta.unreadCount,
+            });
 
             const pending = pendingPatchesRef.current.get(meta.id);
             const { keepOptimistic, shouldEvict } = resolvePendingPatchState(pending, meta.updatedAt, now);
@@ -1625,7 +1686,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 ...meta,
                 ...pending.updates,
                 profilePic: preservedProfilePic,
-                lastReadAt: effectiveReadAt,
+                lastReadAt: effectiveReadAtGuarded,
+                markedUnread: effectiveMarkedUnread,
                 groupParticipants: preservedParticipants,
                 groupMeta: preservedGroupMeta,
                 unreadCount:
@@ -1642,7 +1704,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             return {
               ...meta,
               profilePic: preservedProfilePic,
-              lastReadAt: effectiveReadAt,
+              lastReadAt: effectiveReadAtGuarded,
+              markedUnread: effectiveMarkedUnread,
               groupParticipants: preservedParticipants,
               groupMeta: preservedGroupMeta,
               unreadCount: resolvedUnread,
@@ -1797,6 +1860,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               oldConv.lastReadAt === nextConv.lastReadAt &&
               oldConv.lastSeenAt === nextConv.lastSeenAt &&
               oldConv.unreadCount === nextConv.unreadCount &&
+              Boolean(oldConv.markedUnread) === Boolean(nextConv.markedUnread) &&
               oldConv.pipeline === nextConv.pipeline &&
               (oldConv.lostReason || "") === (nextConv.lostReason || "") &&
               (oldConv.lostReasonNote || "") === (nextConv.lostReasonNote || "") &&
@@ -1874,7 +1938,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         setLoading(false);
       }
     }
-  }, [normalizeConversationMeta, isMetaReviewer, authFetch]);
+  }, [normalizeConversationMeta, isMetaReviewer, authFetch, resolveActiveUnreadGuard]);
 
   // Coalesce overlapping slim fetches so concurrent triggers (e.g. SSE + Sync button) reuse one active request
   const fetchConversations = useCallback(async () => {
@@ -1947,7 +2011,20 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         const effectiveActiveReadAt = isOpActive
           ? Math.max(normActive.lastReadAt || 0, lastReadAtRef.current.get(chatId) || 0) || undefined
           : undefined;
-        const computedUnread = computeUnreadFromMessages(newMessages, effectiveActiveReadAt);
+        const activeUnreadGuard = isOpActive
+          ? resolveActiveUnreadGuard(chatId, Boolean(normActive.markedUnread), effectiveActiveReadAt)
+          : undefined;
+        const effectiveActiveMarkedUnread = activeUnreadGuard
+          ? activeUnreadGuard.markedUnread
+          : isOpActive && Boolean(normActive.markedUnread);
+        const effectiveActiveReadAtGuarded = activeUnreadGuard?.lastReadAt
+          ? Math.max(effectiveActiveReadAt || 0, activeUnreadGuard.lastReadAt)
+          : effectiveActiveReadAt;
+        const computedUnread = computeUnreadFromMessages(
+          newMessages,
+          effectiveActiveReadAtGuarded,
+          effectiveActiveMarkedUnread
+        );
         const computedDirection = getLastRealMessageDirection(newMessages);
         const lastMsgTs =
           newMessages.length > 0 ? newMessages[newMessages.length - 1]?.timestamp || 0 : 0;
@@ -1986,6 +2063,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 c.source,
               messages: newMessages,
               unreadCount: computedUnread,
+              markedUnread: effectiveActiveMarkedUnread,
               lastMessageAt: Math.max(c.lastMessageAt || 0, normActive.lastMessageAt || 0),
               lastMessageDirection: keepPendingDirection
                 ? pending?.updates.lastMessageDirection
@@ -2139,7 +2217,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               claudeDraftText: normActive.claudeDraftText,
               claudeDraftAt: normActive.claudeDraftAt,
               lastReadAt: isOpActive
-                ? Math.max(effectiveActiveReadAt || 0, c.lastReadAt || 0) || undefined
+                ? Math.max(effectiveActiveReadAtGuarded || 0, c.lastReadAt || 0) || undefined
                 : c.lastReadAt,
               isGroup: normActive.isGroup ?? c.isGroup,
               profilePic: normActive.profilePic ?? profilePicCacheRef.current.get(chatId) ?? c.profilePic,
@@ -2163,6 +2241,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               mergedConv.notes !== c.notes ||
               mergedConv.cashIn !== c.cashIn ||
               mergedConv.lastReadAt !== c.lastReadAt ||
+              mergedConv.unreadCount !== c.unreadCount ||
+              Boolean(mergedConv.markedUnread) !== Boolean(c.markedUnread) ||
               mergedConv.profilePic !== c.profilePic ||
               mergedConv.groupParticipants !== c.groupParticipants ||
               mergedConv.groupMeta?.avatarUrl !== c.groupMeta?.avatarUrl
@@ -2178,8 +2258,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         });
 
         const pendingLocalReadSync =
-          isOpActive &&
-          (lastReadAtRef.current.get(chatId) || 0) > (Number(json.data?.lastReadAt) || 0);
+          Boolean(activeUnreadGuard) ||
+          (isOpActive &&
+            (lastReadAtRef.current.get(chatId) || 0) > (Number(json.data?.lastReadAt) || 0));
         if (!isReadOnly && !pendingLocalReadSync && (json.data?.unreadCount || 0) !== computedUnread) {
           authFetch(`${API}/messages/${chatId}`, {
             method: "PATCH",
@@ -2191,7 +2272,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     } catch (err) {
       console.warn("CRMContext: failed to fetch active chat", err);
     }
-  }, [normalizeMessages, isMetaReviewer, authFetch, isReadOnly]);
+  }, [normalizeMessages, isMetaReviewer, authFetch, isReadOnly, resolveActiveUnreadGuard]);
 
   const fetchGroupParticipants = useCallback(
     async (chatId: string, options?: { forceRefresh?: boolean }) => {
@@ -2642,6 +2723,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         avatarCheckedMissRef.current.clear();
         avatarErrorRefreshedRef.current.clear();
         lastReadAtRef.current.clear();
+        pendingUnreadOpRef.current.clear();
+        readWriteChainRef.current.clear();
         pendingPatchesRef.current.clear();
         recentlyCreatedRef.current.clear();
         deletedIdsRef.current.clear();
@@ -2661,6 +2744,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         avatarCheckedMissRef.current.clear();
         avatarErrorRefreshedRef.current.clear();
         lastReadAtRef.current.clear();
+        pendingUnreadOpRef.current.clear();
+        readWriteChainRef.current.clear();
         pendingPatchesRef.current.clear();
         recentlyCreatedRef.current.clear();
         deletedIdsRef.current.clear();
@@ -2886,17 +2971,43 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                   const isCoveredByOpRead = Boolean(
                     isOpSse && !isOutgoing && opReadCutoff && msgTs > 0 && msgTs <= opReadCutoff
                   );
+                  if (isOpSse && (isOutgoing || !isCoveredByOpRead)) {
+                    pendingUnreadOpRef.current.delete(conversationId);
+                  }
+                  const sseUnreadGuard =
+                    isOpSse && !isOutgoing && isCoveredByOpRead
+                      ? resolveActiveUnreadGuard(
+                          conversationId,
+                          Boolean(normRemote?.markedUnread),
+                          opReadCutoff
+                        )
+                      : undefined;
+                  const nextMarkedUnread = isOutgoing
+                    ? false
+                    : sseUnreadGuard
+                    ? sseUnreadGuard.markedUnread
+                    : isOpSse
+                    ? normRemote
+                      ? Boolean(normRemote.markedUnread)
+                      : isCoveredByOpRead
+                      ? Boolean(existing.markedUnread)
+                      : false
+                    : false;
                   const fallbackUnread = isOutgoing
                     ? 0
                     : isCoveredByOpRead
-                    ? existing.unreadCount || 0
+                    ? nextMarkedUnread
+                      ? Math.max(1, existing.unreadCount || 0)
+                      : existing.unreadCount || 0
                     : remoteConv?.unreadCount !== undefined && remoteConv.unreadCount >= 0
-                    ? remoteConv.unreadCount
-                    : (existing.unreadCount || 0) + 1;
+                    ? nextMarkedUnread
+                      ? Math.max(1, remoteConv.unreadCount)
+                      : remoteConv.unreadCount
+                    : Math.max(nextMarkedUnread ? 1 : 0, (existing.unreadCount || 0) + 1);
                   const targetUnread = updatedMessagesForConv
                     ? isOutgoing
                       ? 0
-                      : computeUnreadFromMessages(updatedMessagesForConv, opReadCutoff)
+                      : computeUnreadFromMessages(updatedMessagesForConv, opReadCutoff, nextMarkedUnread)
                     : fallbackUnread;
 
                   const pendingPatch = pendingPatchesRef.current.get(conversationId);
@@ -3045,6 +3156,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                         )
                       : existing.lastOutgoingAt,
                     unreadCount: targetUnread,
+                    markedUnread: nextMarkedUnread,
                     pipeline: (targetPipeline && existing.pipeline === "New" ? targetPipeline : existing.pipeline) as any,
                     messages: updatedMessagesForConv || existing.messages,
                   };
@@ -3122,12 +3234,23 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                         lastReadAtRef.current.get(conversationId) || 0
                       ) || undefined
                     : undefined;
-                  const computedRemoteUnread =
-                    cachedMsgs.length > 0
-                      ? computeUnreadFromMessages(cachedMsgs, opCutoff)
-                      : opCutoff && (!norm.lastMessageAt || norm.lastMessageAt <= opCutoff)
-                      ? 0
-                      : norm.unreadCount;
+                  const updateGuard = isOpUpdate
+                    ? resolveActiveUnreadGuard(conversationId, Boolean(norm.markedUnread), opCutoff)
+                    : undefined;
+                  const effectiveMarkedUnread = updateGuard
+                    ? updateGuard.markedUnread
+                    : isOpUpdate && Boolean(norm.markedUnread);
+                  const opCutoffGuarded = updateGuard?.lastReadAt
+                    ? Math.max(opCutoff || 0, updateGuard.lastReadAt)
+                    : opCutoff;
+                  const computedRemoteUnread = resolveEffectiveUnreadCount({
+                    messages: cachedMsgs,
+                    lastReadAt: opCutoffGuarded,
+                    markedUnread: effectiveMarkedUnread,
+                    lastMessageAt: norm.lastMessageAt,
+                    serverUnreadCount:
+                      updateGuard && cachedMsgs.length === 0 ? updateGuard.unreadCount : norm.unreadCount,
+                  });
                   const cachedGroup = groupParticipantsCacheRef.current.get(conversationId);
                   const preservedParticipants =
                     norm.groupParticipants ?? cachedGroup?.participants ?? c.groupParticipants;
@@ -3148,13 +3271,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                     profilePic: preservedPic,
                     groupParticipants: preservedParticipants,
                     groupMeta: preservedGroupMeta,
-                    lastReadAt: isOpUpdate ? opCutoff : c.lastReadAt,
+                    lastReadAt: isOpUpdate ? opCutoffGuarded : c.lastReadAt,
                     lastMessageAt: Math.max(
                       c.lastMessageAt || 0,
                       norm.lastMessageAt || 0,
                       hasPending ? pending?.updates.lastMessageAt || 0 : 0
                     ),
                     unreadCount: computedRemoteUnread,
+                    markedUnread: effectiveMarkedUnread,
                     messages: cachedMsgs,
                   };
                 });
@@ -3165,23 +3289,80 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               const { conversationId, lastReadAt: remoteReadAt } = payload.data;
               if (conversationId) {
                 const numericReadAt = Number(remoteReadAt) || Date.now();
+                const currentGuard = pendingUnreadOpRef.current.get(conversationId);
+                if (currentGuard && Date.now() <= currentGuard.expiresAt && currentGuard.markedUnread) {
+                  // A newer local Mark-as-unseen action supersedes this older marked_read event
+                  return;
+                }
+                if (currentGuard && !currentGuard.markedUnread && numericReadAt >= (currentGuard.lastReadAt || 0)) {
+                  pendingUnreadOpRef.current.delete(conversationId);
+                }
                 lastReadAtRef.current.set(
                   conversationId,
                   Math.max(lastReadAtRef.current.get(conversationId) || 0, numericReadAt)
                 );
                 setConversations((prev) => {
+                  let changed = false;
                   const nextList = prev.map((c) => {
                     if (c.id !== conversationId) return c;
                     const cachedMsgs = messagesCacheRef.current.get(conversationId) || c.messages || [];
                     const isOp = resolveConvInboxMode(c) === "operation";
                     const cutoff = isOp ? lastReadAtRef.current.get(conversationId) : undefined;
-                    const computed = cachedMsgs.length > 0 ? computeUnreadFromMessages(cachedMsgs, cutoff) : 0;
+                    const computed = cachedMsgs.length > 0 ? computeUnreadFromMessages(cachedMsgs, cutoff, false) : 0;
+                    const nextReadAt = isOp ? cutoff : c.lastReadAt;
+                    if (
+                      c.unreadCount === computed &&
+                      !c.markedUnread &&
+                      c.lastReadAt === nextReadAt
+                    ) {
+                      return c;
+                    }
+                    changed = true;
                     return {
                       ...c,
                       unreadCount: computed,
-                      lastReadAt: isOp ? cutoff : c.lastReadAt,
+                      markedUnread: false,
+                      lastReadAt: nextReadAt,
                     };
                   });
+                  if (!changed) return prev;
+                  persistConversationsCache(nextList, true);
+                  return nextList;
+                });
+              }
+            } else if (payload.type === "marked_unread" && payload.data) {
+              const { conversationId, unreadCount: remoteUnread } = payload.data;
+              if (conversationId) {
+                const currentGuard = pendingUnreadOpRef.current.get(conversationId);
+                if (currentGuard && Date.now() <= currentGuard.expiresAt && !currentGuard.markedUnread) {
+                  // A newer local Mark-as-read/open action supersedes this older marked_unread event
+                  return;
+                }
+                if (currentGuard && currentGuard.markedUnread) {
+                  pendingUnreadOpRef.current.delete(conversationId);
+                }
+                setConversations((prev) => {
+                  let changed = false;
+                  const nextList = prev.map((c) => {
+                    if (c.id !== conversationId) return c;
+                    if (resolveConvInboxMode(c) !== "operation") return c;
+                    const cachedMsgs = messagesCacheRef.current.get(conversationId) || c.messages || [];
+                    const cutoff = Math.max(c.lastReadAt || 0, lastReadAtRef.current.get(conversationId) || 0) || undefined;
+                    const computed =
+                      cachedMsgs.length > 0
+                        ? computeUnreadFromMessages(cachedMsgs, cutoff, true)
+                        : Math.max(1, Number(remoteUnread) || c.unreadCount || 0);
+                    if (Boolean(c.markedUnread) && c.unreadCount === computed) {
+                      return c;
+                    }
+                    changed = true;
+                    return {
+                      ...c,
+                      unreadCount: computed,
+                      markedUnread: true,
+                    };
+                  });
+                  if (!changed) return prev;
                   persistConversationsCache(nextList, true);
                   return nextList;
                 });
@@ -3638,6 +3819,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
     fetchAgents,
     fetchLabels,
     isMetaReviewer,
+    resolveActiveUnreadGuard,
   ]);
 
   // ── Presence heartbeat: tracks CRM online, active & per-screen time across tabs ──
@@ -4542,22 +4724,34 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                       lastReadAtRef.current.get(id) || 0
                     ) || undefined
                   : c.lastReadAt;
+                const patchGuard = isOpConv
+                  ? resolveActiveUnreadGuard(id, Boolean(confirmed.markedUnread), effectiveReadAt)
+                  : undefined;
+                const effectiveMarkedUnread = patchGuard
+                  ? patchGuard.markedUnread
+                  : isOpConv && Boolean(confirmed.markedUnread);
+                const effectiveReadAtGuarded = patchGuard?.lastReadAt
+                  ? Math.max(effectiveReadAt || 0, patchGuard.lastReadAt)
+                  : effectiveReadAt;
                 const mergedLastMsgAt = Math.max(confirmed.lastMessageAt || 0, c.lastMessageAt || 0);
                 const cachedMsgs = messagesCacheRef.current.get(id) || c.messages || [];
-                const resolvedUnread =
-                  cachedMsgs.length > 0
-                    ? computeUnreadFromMessages(cachedMsgs, isOpConv ? effectiveReadAt : undefined)
-                    : isOpConv && effectiveReadAt && (!mergedLastMsgAt || mergedLastMsgAt <= effectiveReadAt)
-                    ? 0
-                    : confirmed.unreadCount;
+                const resolvedUnread = resolveEffectiveUnreadCount({
+                  messages: cachedMsgs,
+                  lastReadAt: isOpConv ? effectiveReadAtGuarded : undefined,
+                  markedUnread: effectiveMarkedUnread,
+                  lastMessageAt: mergedLastMsgAt,
+                  serverUnreadCount:
+                    patchGuard && cachedMsgs.length === 0 ? patchGuard.unreadCount : confirmed.unreadCount,
+                });
                 return {
                   ...confirmed,
                   isGroup: confirmed.isGroup ?? c.isGroup,
                   profilePic: preservedPic,
                   groupParticipants: preservedParticipants,
                   groupMeta: preservedGroupMeta,
-                  lastReadAt: effectiveReadAt,
+                  lastReadAt: effectiveReadAtGuarded,
                   unreadCount: resolvedUnread,
+                  markedUnread: effectiveMarkedUnread,
                   lastMessageAt: mergedLastMsgAt,
                   pipeline:
                     c.pipeline !== "New" && confirmed.pipeline === "New"
@@ -4626,7 +4820,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         return { ok: false, error: networkError };
       }
     },
-    [isReadOnly, authFetch, normalizeConversationMeta, user?.name, user?.role]
+    [isReadOnly, authFetch, normalizeConversationMeta, resolveActiveUnreadGuard, user?.name, user?.role]
   );
 
   // Admissions preserves unread count until staff replies; Operation clears unread immediately when opening the card.
@@ -4640,37 +4834,147 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       const readAt = Math.max(Date.now(), existing?.lastMessageAt || 0);
       const maxKnownRead = Math.max(existing?.lastReadAt || 0, lastReadAtRef.current.get(id) || 0);
       const alreadyRead =
-        (existing?.unreadCount || 0) <= 0 && maxKnownRead >= (existing?.lastMessageAt || 0);
+        (existing?.unreadCount || 0) <= 0 &&
+        !existing?.markedUnread &&
+        maxKnownRead >= (existing?.lastMessageAt || 0);
       if (alreadyRead) return;
 
       const nextReadAt = Math.max(maxKnownRead, readAt);
       lastReadAtRef.current.set(id, nextReadAt);
+      pendingUnreadOpRef.current.set(id, {
+        markedUnread: false,
+        unreadCount: 0,
+        lastReadAt: nextReadAt,
+        expiresAt: Date.now() + 15000,
+      });
 
       setConversations((prev) => {
         let changed = false;
         const next = prev.map((c) => {
           if (c.id !== id) return c;
-          if ((c.unreadCount || 0) === 0 && (c.lastReadAt || 0) >= nextReadAt) return c;
+          if ((c.unreadCount || 0) === 0 && !c.markedUnread && (c.lastReadAt || 0) >= nextReadAt) return c;
           changed = true;
-          return { ...c, unreadCount: 0, lastReadAt: nextReadAt };
+          return { ...c, unreadCount: 0, markedUnread: false, lastReadAt: nextReadAt };
         });
         if (!changed) return prev;
         persistConversationsCache(next);
         return next;
       });
 
-      try {
-        let res = await authFetch(`${API}/messages/${encodeURIComponent(id)}/read`, {
-          method: "POST",
-        }).catch(() => null);
-        if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
-          await authFetch(`${DIRECT_API}/messages/${encodeURIComponent(id)}/read`, {
+      await enqueueReadStateSync(id, async () => {
+        try {
+          let res = await authFetch(`${API}/messages/${encodeURIComponent(id)}/read`, {
             method: "POST",
-          }).catch(() => {});
-        }
-      } catch {}
+          }).catch(() => null);
+          if (!res || (!res.ok && res.status !== 401 && res.status !== 403)) {
+            res = await authFetch(`${DIRECT_API}/messages/${encodeURIComponent(id)}/read`, {
+              method: "POST",
+            }).catch(() => null);
+          }
+          if (res?.ok) {
+            const currentGuard = pendingUnreadOpRef.current.get(id);
+            if (currentGuard && !currentGuard.markedUnread) {
+              pendingUnreadOpRef.current.set(id, {
+                ...currentGuard,
+                expiresAt: Date.now() + 4000,
+              });
+            }
+          }
+        } catch {}
+      });
     },
-    [isReadOnly, authFetch]
+    [isReadOnly, authFetch, enqueueReadStateSync]
+  );
+
+  // Operation-only: marks a conversation unseen in 0ms UI time while preserving lastReadAt monotonic state.
+  const markConversationAsUnread = useCallback(
+    async (id: string): Promise<{ ok: boolean; error?: string }> => {
+      if (!id || isReadOnly) {
+        return { ok: false, error: "View-only account: modifications are disabled." };
+      }
+      const existing = conversationsRef.current.find((c) => c.id === id);
+      if (resolveConvInboxMode(existing || id) !== "operation") {
+        return { ok: false, error: "Mark as unseen is only supported in Operation Inbox." };
+      }
+      if (existing?.isArchived || existing?.isDone) {
+        return { ok: false, error: "Archived or Done conversations cannot be marked as unseen." };
+      }
+
+      const prevUnread = Number(existing?.unreadCount) || 0;
+      const prevMarked = Boolean(existing?.markedUnread);
+      const nextUnread = Math.max(1, prevUnread);
+
+      pendingUnreadOpRef.current.set(id, {
+        markedUnread: true,
+        unreadCount: nextUnread,
+        expiresAt: Date.now() + 15000,
+      });
+
+      setConversations((prev) => {
+        let changed = false;
+        const next = prev.map((c) => {
+          if (c.id !== id) return c;
+          if (Boolean(c.markedUnread) && (c.unreadCount || 0) >= nextUnread) return c;
+          changed = true;
+          return { ...c, markedUnread: true, unreadCount: Math.max(1, c.unreadCount || 0) };
+        });
+        if (!changed) return prev;
+        persistConversationsCache(next);
+        return next;
+      });
+
+      let outcome: { ok: boolean; error?: string } = { ok: true };
+      await enqueueReadStateSync(id, async () => {
+        try {
+          let res = await authFetch(`${API}/messages/${encodeURIComponent(id)}/unread`, {
+            method: "POST",
+          }).catch(() => null);
+          if (!res || (!res.ok && res.status !== 401 && res.status !== 403 && res.status !== 400 && res.status !== 404 && res.status !== 409)) {
+            res = await authFetch(`${DIRECT_API}/messages/${encodeURIComponent(id)}/unread`, {
+              method: "POST",
+            }).catch(() => null);
+          }
+          const json = res ? await res.json().catch(() => null) : null;
+          if (res?.ok && json?.success) {
+            const currentGuard = pendingUnreadOpRef.current.get(id);
+            if (currentGuard && currentGuard.markedUnread) {
+              pendingUnreadOpRef.current.set(id, {
+                ...currentGuard,
+                unreadCount: Math.max(1, Number(json?.data?.unreadCount) || nextUnread),
+                expiresAt: Date.now() + 4000,
+              });
+            }
+            outcome = { ok: true };
+            return;
+          }
+          outcome = {
+            ok: false,
+            error:
+              (typeof json?.error === "string" && json.error) ||
+              "Could not mark conversation as unseen.",
+          };
+        } catch {
+          outcome = { ok: false, error: "Network error while marking conversation as unseen." };
+        }
+      });
+
+      if (!outcome.ok) {
+        const currentGuard = pendingUnreadOpRef.current.get(id);
+        if (currentGuard && currentGuard.markedUnread) {
+          pendingUnreadOpRef.current.delete(id);
+          setConversations((prev) => {
+            const next = prev.map((c) =>
+              c.id === id ? { ...c, unreadCount: prevUnread, markedUnread: prevMarked } : c
+            );
+            persistConversationsCache(next);
+            return next;
+          });
+        }
+      }
+
+      return outcome;
+    },
+    [isReadOnly, authFetch, enqueueReadStateSync]
   );
 
   const updateConversationClaude = useCallback(
@@ -5719,6 +6023,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
 
     const now = Date.now();
     const lastText = msgs[msgs.length - 1]?.text || "";
+    pendingUnreadOpRef.current.delete(chatId);
 
     const existingPatch = pendingPatchesRef.current.get(chatId);
     pendingPatchesRef.current.set(chatId, {
@@ -5729,6 +6034,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         lastMessageDirection: "outgoing",
         lastMessageText: lastText,
         unreadCount: 0,
+        markedUnread: false,
       },
       expiresAt: now + 30000,
     });
@@ -5743,6 +6049,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
           lastMessageDirection: "outgoing",
           lastMessageText: lastText || recentEntry.conv.lastMessageText,
           unreadCount: 0,
+          markedUnread: false,
           pipeline: recentEntry.conv.pipeline === "New" ? "Contacted" : recentEntry.conv.pipeline,
           messages: nextCached,
         },
@@ -5764,6 +6071,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         lastMessageDirection: "outgoing",
         lastMessageText: lastText || fallbackBase.lastMessageText,
         unreadCount: 0,
+        markedUnread: false,
         pipeline: nextPipeline,
       };
       const curPatch = pendingPatchesRef.current.get(chatId);
@@ -5863,10 +6171,19 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             }
           }
           const confirmedTs = newestConfirmed ? (newestConfirmed.timestamp || Date.now()) : 0;
+          const isOpConv = resolveConvInboxMode(c) === "operation";
+          const nextMarkedUnread = newestConfirmed ? false : isOpConv && Boolean(c.markedUnread);
           return {
             ...c,
             messages: nextMessages,
-            unreadCount: newestConfirmed ? 0 : computeUnreadFromMessages(nextMessages),
+            unreadCount: newestConfirmed
+              ? 0
+              : computeUnreadFromMessages(
+                  nextMessages,
+                  isOpConv ? c.lastReadAt : undefined,
+                  nextMarkedUnread
+                ),
+            markedUnread: nextMarkedUnread,
             lastMessageAt: Math.max(c.lastMessageAt || 0, confirmedTs),
             lastOutgoingAt: newestConfirmed ? confirmedTs : c.lastOutgoingAt,
             lastMessageDirection: newestConfirmed ? "outgoing" : c.lastMessageDirection,
@@ -5951,6 +6268,7 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         updateConversationClaude,
         createManualLead,
         markConversationAsRead,
+        markConversationAsUnread,
         refresh: forceRefresh,
         setPollPaused,
         searchQuery,

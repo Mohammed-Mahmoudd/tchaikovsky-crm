@@ -7,6 +7,7 @@ import {
   Bookmark,
   CheckCircle2,
   Clock,
+  Mail,
   RotateCcw,
 } from "lucide-react";
 import type { Conversation, LeadLabel } from "../context/CRMContext";
@@ -30,6 +31,7 @@ export interface InboxConversationCardProps {
   labels: ReadonlyArray<LeadLabel>;
   onSelect: (convId: string) => void;
   onApplyBucketChange: (convId: string, action: InboxBucketAction) => void;
+  onMarkAsUnread?: (convId: string) => void;
   onAvatarError: (convId: string, failedUrl: string) => void;
   registerAvatarObserver: (
     convId: string,
@@ -58,6 +60,7 @@ export const InboxConversationCard = React.memo(function InboxConversationCard({
   labels,
   onSelect,
   onApplyBucketChange,
+  onMarkAsUnread,
   onAvatarError,
   registerAvatarObserver,
 }: InboxConversationCardProps) {
@@ -135,6 +138,21 @@ export const InboxConversationCard = React.memo(function InboxConversationCard({
         <div className="flex items-center gap-1">
           {!isReadOnly && (
             <div className="hidden md:flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity">
+              {onMarkAsUnread && !convDone && !convArchived && (Number(conv.unreadCount) || 0) === 0 && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onMarkAsUnread(conv.id);
+                  }}
+                  aria-label={`Mark ${conv.name} as unseen`}
+                  title="Mark as unseen"
+                  className="p-1 rounded transition-colors cursor-pointer hover:bg-[var(--bg-hover)]"
+                  style={{ color: "var(--text-secondary)" }}
+                >
+                  <Mail className="w-3.5 h-3.5" />
+                </button>
+              )}
               <button
                 type="button"
                 onClick={(e) => {

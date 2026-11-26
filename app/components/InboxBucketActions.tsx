@@ -10,6 +10,7 @@ import {
   Download,
   FileText,
   Loader2,
+  Mail,
   RotateCcw,
 } from "lucide-react";
 
@@ -22,10 +23,12 @@ interface InboxBucketActionsProps {
   isSaved?: boolean;
   savedCount?: number;
   canManageBuckets?: boolean;
+  canMarkUnseen?: boolean;
   canDownload?: boolean;
   isDownloading?: boolean;
   isBatchDownloading?: boolean;
   onAction: (action: InboxBucketAction) => void;
+  onMarkUnseen?: () => void;
   onToggleSaved?: () => void;
   onDownload: () => void;
   onDownloadSaved?: (format: "txt" | "zip") => void;
@@ -46,10 +49,12 @@ function InboxBucketActionsInner({
   isSaved = false,
   savedCount = 0,
   canManageBuckets = true,
+  canMarkUnseen = false,
   canDownload = true,
   isDownloading = false,
   isBatchDownloading = false,
   onAction,
+  onMarkUnseen,
   onToggleSaved,
   onDownload,
   onDownloadSaved,
@@ -138,6 +143,11 @@ function InboxBucketActionsInner({
     onAction(action);
   };
 
+  const handleMarkUnseenSelect = () => {
+    setOpen(false);
+    onMarkUnseen?.();
+  };
+
   const handleSavedToggleSelect = () => {
     setOpen(false);
     onToggleSaved?.();
@@ -201,6 +211,23 @@ function InboxBucketActionsInner({
         >
           {canManageBuckets && (
             <>
+              {canMarkUnseen && onMarkUnseen && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={handleMarkUnseenSelect}
+                  className={menuItemClass}
+                  style={{ color: "var(--text-primary)" }}
+                  title="Mark conversation as unseen"
+                >
+                  <Mail
+                    className="w-3.5 h-3.5 shrink-0"
+                    style={{ color: "var(--bg-banner)" }}
+                  />
+                  <span className="truncate">Mark as unseen</span>
+                </button>
+              )}
+
               {isDone ? (
                 <button
                   type="button"

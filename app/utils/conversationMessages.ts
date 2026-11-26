@@ -150,6 +150,7 @@ export interface ConversationMessageState {
   lastMessageDirection?: "incoming" | "outgoing";
   unreadCount?: number;
   lastReadAt?: number;
+  markedUnread?: boolean;
 }
 
 interface TemplateAttachmentShape {
@@ -210,28 +211,63 @@ export function isAutomatedTemplateMsg(m: MessageLike): boolean {
  * Counts consecutive incoming messages after the last human staff reply
  * (and strictly after `lastReadAt` when provided for Operation inbox),
  * ignoring automated Meta form-confirmation templates.
+ * When Operation's manual `markedUnread` flag is true, guarantees at least `1`.
  */
 export function computeUnreadFromMessages(
   messages?: ReadonlyArray<MessageLike>,
-  lastReadAt?: number | null
+  lastReadAt?: number | null,
+  markedUnread = false
 ): number {
-  if (!Array.isArray(messages) || messages.length === 0) return 0;
-  const cutoff = Number(lastReadAt) || 0;
   let count = 0;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (!m) continue;
-    if (isAutomatedTemplateMsg(m)) continue;
-    if (!m.isIncoming) {
-      break;
+  if (Array.isArray(messages) && messages.length > 0) {
+    const cutoff = Number(lastReadAt) || 0;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (!m) continue;
+      if (isAutomatedTemplateMsg(m)) continue;
+      if (!m.isIncoming) {
+        break;
+      }
+      const msgTs = Number(m.timestamp) || 0;
+      if (cutoff > 0 && msgTs > 0 && msgTs <= cutoff) {
+        break;
+      }
+      count++;
     }
-    const msgTs = Number(m.timestamp) || 0;
-    if (cutoff > 0 && msgTs > 0 && msgTs <= cutoff) {
-      break;
-    }
-    count++;
   }
-  return count;
+  return markedUnread ? Math.max(1, count) : count;
+}
+
+/**
+ * Resolves effective unread count from loaded messages when available, or from
+ * Operation `markedUnread` / `lastReadAt` / server metadata when messages are not loaded.
+ */
+export function resolveEffectiveUnreadCount({
+  messages,
+  lastReadAt,
+  markedUnread = false,
+  lastMessageAt,
+  serverUnreadCount = 0,
+}: {
+  messages?: ReadonlyArray<MessageLike>;
+  lastReadAt?: number | null;
+  markedUnread?: boolean;
+  lastMessageAt?: number | null;
+  serverUnreadCount?: number | null;
+}): number {
+  if (Array.isArray(messages) && messages.length > 0) {
+    return computeUnreadFromMessages(messages, lastReadAt, Boolean(markedUnread));
+  }
+  const numericServer = Number(serverUnreadCount) || 0;
+  if (markedUnread) {
+    return Math.max(1, numericServer);
+  }
+  const cutoff = Number(lastReadAt) || 0;
+  const msgTs = Number(lastMessageAt) || 0;
+  if (cutoff > 0 && (!msgTs || msgTs <= cutoff)) {
+    return 0;
+  }
+  return numericServer;
 }
 
 /**

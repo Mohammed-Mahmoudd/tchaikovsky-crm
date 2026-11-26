@@ -11,6 +11,7 @@ import {
   isRealSenderName,
   isTemplateFallbackPlaceholder,
   mergeExistingMessageFromSse,
+  resolveEffectiveUnreadCount,
   resolvePreferredSenderName,
   shouldRenderLegacyTemplateFallback,
 } from "./conversationMessages.ts";
@@ -90,6 +91,39 @@ describe("conversationMessages", () => {
         2000
       ),
       1
+    );
+
+    // Operation markedUnread keeps at least 1 unread even when messages are read or last message is outgoing
+    assert.equal(
+      computeUnreadFromMessages(
+        [
+          { text: "Old", isIncoming: true, timestamp: 1000 },
+          { text: "Replied", isIncoming: false, senderName: "Hadeer", timestamp: 2000 },
+        ],
+        2500,
+        true
+      ),
+      1
+    );
+    assert.equal(
+      resolveEffectiveUnreadCount({
+        messages: [],
+        lastReadAt: 5000,
+        markedUnread: true,
+        lastMessageAt: 4000,
+        serverUnreadCount: 0,
+      }),
+      1
+    );
+    assert.equal(
+      resolveEffectiveUnreadCount({
+        messages: [],
+        lastReadAt: 5000,
+        markedUnread: false,
+        lastMessageAt: 4000,
+        serverUnreadCount: 3,
+      }),
+      0
     );
   });
 
