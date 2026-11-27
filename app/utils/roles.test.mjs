@@ -5,6 +5,7 @@ import {
   canAccessInbox,
   canAccessRoute,
   canManageTeamRole,
+  canViewDirectorLeadInfoSidebarRole,
   formatRoleLabel,
   getDefaultRouteForRole,
   getRoleDisplayName,
@@ -203,6 +204,25 @@ describe("CRM roles & permissions", () => {
     });
     assert.equal(errorResult.ok, false);
     assert.equal(errorResult.member.role, "admission_officer");
+  });
+
+  it("enables the Auditions Lead Info sidebar trigger strictly for Enrollment Director", () => {
+    assert.equal(canViewDirectorLeadInfoSidebarRole("enrollment_director"), true);
+    for (const otherRole of [
+      "chairman",
+      "admission_officer",
+      "admission_advanced",
+      "marketing",
+      "finance",
+      "operation",
+      undefined,
+    ]) {
+      assert.equal(
+        canViewDirectorLeadInfoSidebarRole(otherRole),
+        false,
+        `${String(otherRole)} should not see Enrollment Director Lead Info sidebar`
+      );
+    }
   });
 });
 

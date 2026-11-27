@@ -2,7 +2,7 @@
 
 import React, { useState, useMemo, useCallback, useRef, useEffect, useSyncExternalStore, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { useCRM } from '../context/CRMContext';
+import { useCRM, type Conversation } from '../context/CRMContext';
 import {
   useAuth,
   normalizeRole,
@@ -12,11 +12,20 @@ import {
   canOpenAuditionChatRole,
   canFilterAuditionsByAgentRole,
   canEditAuditionBranchRole,
+  canViewDirectorLeadInfoSidebarRole,
 } from '../components/AuthProvider';
-import { MessageSquare, Calendar, ChevronLeft, ChevronRight, X, MapPin, ChevronDown, Search, Lock, Unlock, User, Clock, Check, ArrowLeft, Trash2, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { MessageSquare, Calendar, ChevronLeft, ChevronRight, X, MapPin, ChevronDown, Search, Lock, Unlock, User, Clock, Check, ArrowLeft, Trash2, AlertTriangle, CheckCircle2, Info } from 'lucide-react';
 import { useBranches, LegacyBranchGroup } from '../lib/branches';
 import { BranchSelect } from '../components/BranchSelect';
 import { SlideOverChatDrawer, useSlideOverChatDrawer } from '../components/SlideOverChatDrawer';
+import {
+  DirectorLeadInfoSidebar,
+  useDirectorLeadInfoSidebar,
+} from '../components/DirectorLeadInfoSidebar';
+import {
+  computeDirectorLeadInsights,
+  type DirectorLeadInsights,
+} from '../utils/directorLeadInfo';
 import { matchesAssignedBranch } from '../utils/branchScope';
 import { getTeamReturnBannerInfo, navigateBackToTeamActivities } from '../utils/teamAuditNav';
 import {
@@ -57,6 +66,7 @@ type Slot = {
   auditionDate?: string;
   followUpDate?: string;
   dateKey?: string;
+  hasDirectorLeadInfo?: boolean;
 };
 
 type DaySlots = { [dateKey: string]: Slot[] };
@@ -956,9 +966,10 @@ function AgentFilterPopover({
 const subscribeNoop = () => () => {};
 
 function AuditionsPageInner() {
-  const { admissionsConversations: conversations, patchConversation, assignableAgents } = useCRM();
+  const { admissionsConversations: conversations, patchConversation, assignableAgents, labels: leadLabels } = useCRM();
   const { isReadOnly, user } = useAuth();
   const isEnrollmentDirector = normalizeRole(user?.role) === 'enrollment_director';
+  const canViewDirectorLeadInfo = canViewDirectorLeadInfoSidebarRole(user?.role);
   const hideAuditionCardAgentAndBranch = !shouldShowAuditionCardAgentAndBranch(user?.role);
   const canAssignAuditionAgent = canAssignAuditionAgentRole(user?.role);
   const canOpenAuditionChat = canOpenAuditionChatRole(user?.role);
@@ -976,6 +987,15 @@ function AuditionsPageInner() {
     close: closeChatDrawer,
     handleAnimationEnd: handleDrawerAnimationEnd,
   } = useSlideOverChatDrawer();
+  const {
+    leadId: directorInfoLeadId,
+    isVisible: isDirectorInfoVisible,
+    panelRef: directorInfoPanelRef,
+    open: openDirectorInfo,
+    close: closeDirectorInfo,
+    resetImmediate: resetDirectorInfo,
+    handleTransitionEnd: handleDirectorInfoTransitionEnd,
+  } = useDirectorLeadInfoSidebar();
   const { branchGroups, legacyBranchGroups } = useBranches();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -1097,6 +1117,14 @@ function AuditionsPageInner() {
   const [bookingModal, setBookingModal] = useState<BookingModal>(null);
   const [bookForm, setBookForm] = useState({ branch: '', name: '', type: 'Adult', age: '', instrument: '', agent: 'Unassigned' });
   const [slotPanel, setSlotPanel] = useState<SlotPanelState>(null);
+  const handleOpenDirectorLeadInfo = useCallback(
+    (convId: string) => {
+      if (!convId || !canViewDirectorLeadInfo) return;
+      setSlotPanel(null);
+      openDirectorInfo(convId);
+    },
+    [canViewDirectorLeadInfo, openDirectorInfo]
+  );
   const [removeConfirm, setRemoveConfirm] = useState<RemoveConfirmState>(null);
   const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [panelComment, setPanelComment] = useState('');
@@ -1392,6 +1420,31 @@ function AuditionsPageInner() {
     });
   }, [conversations, reconciledCaches, isEnrollmentDirector, assignedDirectorBranch]);
 
+  const directorLeadById = useMemo(() => {
+    const map = new Map<string, Conversation>();
+    if (!canViewDirectorLeadInfo) return map;
+    for (const conv of liveAuditionConvs) {
+      map.set(conv.id, conv);
+    }
+    return map;
+  }, [canViewDirectorLeadInfo, liveAuditionConvs]);
+
+  const directorLeadInsightsById = useMemo(() => {
+    const map = new Map<string, DirectorLeadInsights>();
+    if (!canViewDirectorLeadInfo) return map;
+    for (const conv of liveAuditionConvs) {
+      map.set(conv.id, computeDirectorLeadInsights(conv));
+    }
+    return map;
+  }, [canViewDirectorLeadInfo, liveAuditionConvs]);
+
+  const activeDirectorConv = directorInfoLeadId
+    ? directorLeadById.get(directorInfoLeadId) ?? null
+    : null;
+  const activeDirectorInsights = directorInfoLeadId
+    ? directorLeadInsightsById.get(directorInfoLeadId) ?? null
+    : null;
+
   // Merge live CRM pipeline cards into calendar schedule with real stored values taking priority
   const slots = useMemo<DaySlots>(() => {
     const result: DaySlots = {};
@@ -1423,6 +1476,7 @@ function AuditionsPageInner() {
         auditionDate: isIsoDateString(c.auditionDate) ? c.auditionDate.trim() : dateKey,
         followUpDate: c.followUpDate || "",
         dateKey,
+        hasDirectorLeadInfo: Boolean(canViewDirectorLeadInfo && directorLeadInsightsById.get(c.id)?.hasUpdates),
       };
 
       if (!result[dateKey]) result[dateKey] = [];
@@ -1446,7 +1500,7 @@ function AuditionsPageInner() {
     });
 
     return result;
-  }, [liveAuditionConvs, customSlots, todayIso, reconciledCaches, closedSlots, closedDays, isEnrollmentDirector, assignedDirectorBranch]);
+  }, [liveAuditionConvs, customSlots, todayIso, reconciledCaches, closedSlots, closedDays, isEnrollmentDirector, assignedDirectorBranch, canViewDirectorLeadInfo, directorLeadInsightsById]);
 
   const weekStart = useMemo(() => getWeekStart(currentDate), [currentDate]);
   const weekDays = useMemo(() => {
@@ -1679,6 +1733,7 @@ function AuditionsPageInner() {
   const openSlotPanel = useCallback((slotId: string | number, dateKey: string) => {
     const slot = (slots[dateKey] || []).find(s => s.id === slotId);
     if (!slot) return;
+    resetDirectorInfo();
     setSlotPanel({ slotId, dateKey });
     setPanelComment(stripNoResponseTag(slot.comment || ''));
     setPanelAgent(slot.agent || 'Unassigned');
@@ -1695,7 +1750,7 @@ function AuditionsPageInner() {
     } else {
       setPanelFollowUpDate('');
     }
-  }, [slots]);
+  }, [slots, resetDirectorInfo]);
 
   const saveSlotPanel = useCallback(() => {
     if (!slotPanel) return;
@@ -2407,6 +2462,8 @@ function AuditionsPageInner() {
                                   onStatusChange={status => setSlotStatus(key, slot.id, status)}
                                   onOpenPanel={() => openSlotPanel(slot.id, key)}
                                   onOpenChat={canOpenAuditionChat && slot.conversationId ? () => handleOpenConversationChat(slot.conversationId!) : undefined}
+                                  onOpenLeadInfo={canViewDirectorLeadInfo && slot.conversationId && slot.hasDirectorLeadInfo ? () => handleOpenDirectorLeadInfo(slot.conversationId!) : undefined}
+                                  isLeadInfoOpen={Boolean(canViewDirectorLeadInfo && isDirectorInfoVisible && directorInfoLeadId && slot.conversationId === directorInfoLeadId)}
                                   chatTitle={chatButtonTitle}
                                   onDelete={
                                     slot.status === 'free' || slot.status === 'closed'
@@ -2541,6 +2598,8 @@ function AuditionsPageInner() {
                             onStatusChange={(status) => setSlotStatus(key, slot.id, status)}
                             onOpenPanel={() => openSlotPanel(slot.id, key)}
                             onOpenChat={canOpenAuditionChat && slot.conversationId ? () => handleOpenConversationChat(slot.conversationId!) : undefined}
+                            onOpenLeadInfo={canViewDirectorLeadInfo && slot.conversationId && slot.hasDirectorLeadInfo ? () => handleOpenDirectorLeadInfo(slot.conversationId!) : undefined}
+                            isLeadInfoOpen={Boolean(canViewDirectorLeadInfo && isDirectorInfoVisible && directorInfoLeadId && slot.conversationId === directorInfoLeadId)}
                             chatTitle={chatButtonTitle}
                             onDelete={slot.status === 'free' || slot.status === 'closed' ? () => deleteCustomSlot(key, slot.id) : undefined}
                             onToggleClosed={() => toggleSlotClosed(slot.id)}
@@ -3090,6 +3149,22 @@ function AuditionsPageInner() {
         />
       )}
 
+      {/* View-only Lead Info sidebar exclusively for Enrollment Directors */}
+      {canViewDirectorLeadInfo && (
+        <DirectorLeadInfoSidebar
+          leadId={directorInfoLeadId}
+          conversation={activeDirectorConv}
+          insights={activeDirectorInsights}
+          leadLabels={leadLabels}
+          auditionTime={activeDirectorConv ? resolveAuditionTimeForCalendar(activeDirectorConv) : undefined}
+          isVisible={isDirectorInfoVisible}
+          panelRef={directorInfoPanelRef}
+          onClose={closeDirectorInfo}
+          onTransitionEnd={handleDirectorInfoTransitionEnd}
+          enableEscapeClose={!removeConfirm && !slotPanel}
+        />
+      )}
+
     </div>
   );
 }
@@ -3157,12 +3232,72 @@ function SlotCardMetadataPills({
   );
 }
 
+function SlotCardLeadInfoButton({
+  onClick,
+  slotName,
+  isOpen = false,
+  variant = 'default',
+  accentColor,
+}: {
+  onClick?: () => void;
+  slotName?: string;
+  isOpen?: boolean;
+  variant?: 'default' | 'inverse' | 'tinted';
+  accentColor?: string;
+}) {
+  if (!onClick) return null;
+
+  const style: React.CSSProperties | undefined =
+    variant === 'inverse'
+      ? isOpen
+        ? { background: 'rgba(255, 255, 255, 0.28)' }
+        : undefined
+      : variant === 'tinted'
+      ? {
+          color: accentColor,
+          background: isOpen ? 'var(--bg-card)' : 'transparent',
+          ...(isOpen && accentColor ? { boxShadow: `0 0 0 1px ${accentColor}` } : {}),
+        }
+      : {
+          color: 'var(--label-blue-text)',
+          background: isOpen ? 'var(--label-blue-bg)' : 'transparent',
+        };
+
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.stopPropagation();
+        }
+      }}
+      className={`relative w-5 h-5 flex items-center justify-center rounded transition-colors shrink-0 cursor-pointer after:content-[''] after:absolute after:-inset-2 sm:after:-inset-1 focus-visible:outline-none focus-visible:ring-2 ${
+        variant === 'inverse'
+          ? 'text-white hover:bg-white/20'
+          : 'hover:bg-black/5 dark:hover:bg-white/10'
+      }`}
+      style={style}
+      aria-label={`View lead details and changes for ${slotName || 'lead'}`}
+      aria-expanded={isOpen}
+      title="Lead notes and changes"
+    >
+      <Info className="w-3.5 h-3.5" />
+    </button>
+  );
+}
+
 function SlotCard({
   slot,
   onBook,
   onStatusChange,
   onOpenPanel,
   onOpenChat,
+  onOpenLeadInfo,
+  isLeadInfoOpen,
   chatTitle,
   onDelete,
   onToggleClosed,
@@ -3175,6 +3310,8 @@ function SlotCard({
   onStatusChange: (s: SlotStatus) => void;
   onOpenPanel: () => void;
   onOpenChat?: () => void;
+  onOpenLeadInfo?: () => void;
+  isLeadInfoOpen?: boolean;
   chatTitle?: string;
   onDelete?: () => void;
   onToggleClosed?: () => void;
@@ -3234,6 +3371,11 @@ function SlotCard({
                 <MessageSquare className="w-3 h-3" />
               </button>
             )}
+            <SlotCardLeadInfoButton
+              onClick={onOpenLeadInfo}
+              slotName={slot.name}
+              isOpen={isLeadInfoOpen}
+            />
             {onDelete && !isReadOnly && (
               <button
                 type="button"
@@ -3330,6 +3472,11 @@ function SlotCard({
                 <MessageSquare className="w-3 h-3" />
               </button>
             )}
+            <SlotCardLeadInfoButton
+              onClick={onOpenLeadInfo}
+              slotName={slot.name}
+              isOpen={isLeadInfoOpen}
+            />
           </div>
         </div>
 
@@ -3400,16 +3547,24 @@ function SlotCard({
             {slot.name && <p className="text-[11px] font-semibold text-white leading-tight truncate">{slot.name}</p>}
             {displayType && <p className="text-[10px] text-white/80 leading-tight">{displayType}</p>}
           </div>
-          {onOpenChat && (
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); onOpenChat(); }}
-              className="w-5 h-5 flex items-center justify-center rounded text-white hover:bg-white/20 transition-colors shrink-0"
-              title={chatTitle || "Open Chat"}
-            >
-              <MessageSquare className="w-3 h-3" />
-            </button>
-          )}
+          <div className="flex items-center gap-1 shrink-0">
+            {onOpenChat && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onOpenChat(); }}
+                className="w-5 h-5 flex items-center justify-center rounded text-white hover:bg-white/20 transition-colors shrink-0"
+                title={chatTitle || "Open Chat"}
+              >
+                <MessageSquare className="w-3 h-3" />
+              </button>
+            )}
+            <SlotCardLeadInfoButton
+              onClick={onOpenLeadInfo}
+              slotName={slot.name}
+              isOpen={isLeadInfoOpen}
+              variant="inverse"
+            />
+          </div>
         </div>
 
         <SlotCardMetadataPills
@@ -3455,17 +3610,26 @@ function SlotCard({
           {slot.name && <p className="text-[11px] font-semibold leading-tight truncate" style={{ color: 'var(--text-primary)' }}>{slot.name}</p>}
           {displayType && <p className="text-[10px] leading-tight" style={{ color: cfg.color }}>{displayType}</p>}
         </div>
-        {onOpenChat && (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); onOpenChat(); }}
-            className="w-5 h-5 flex items-center justify-center rounded transition-colors shrink-0"
-            style={{ color: cfg.color }}
-            title={chatTitle || "Open Chat"}
-          >
-            <MessageSquare className="w-3 h-3" />
-          </button>
-        )}
+        <div className="flex items-center gap-1 shrink-0">
+          {onOpenChat && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onOpenChat(); }}
+              className="w-5 h-5 flex items-center justify-center rounded transition-colors shrink-0"
+              style={{ color: cfg.color }}
+              title={chatTitle || "Open Chat"}
+            >
+              <MessageSquare className="w-3 h-3" />
+            </button>
+          )}
+          <SlotCardLeadInfoButton
+            onClick={onOpenLeadInfo}
+            slotName={slot.name}
+            isOpen={isLeadInfoOpen}
+            variant="tinted"
+            accentColor={cfg.color}
+          />
+        </div>
       </div>
 
       <SlotCardMetadataPills

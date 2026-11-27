@@ -173,6 +173,11 @@ export function canEditAuditionBranchRole(role?: string): boolean {
   return normalizeRole(role) !== "enrollment_director";
 }
 
+/** Returns true if this role gets the view-only Lead Info sidebar trigger on Audition cards. */
+export function canViewDirectorLeadInfoSidebarRole(role?: string): boolean {
+  return normalizeRole(role) === "enrollment_director";
+}
+
 /** Returns true if users with this role should appear in assignment dropdowns for Admissions. */
 export function isAssignableRole(role?: string): boolean {
   return isDirectorOrChairmanRole(role) || isAdmissionRole(role);
