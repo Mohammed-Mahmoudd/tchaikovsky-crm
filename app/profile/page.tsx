@@ -18,6 +18,7 @@ import {
   isConvertedLead,
   isMessageAlreadyInActivityLog,
 } from "../utils/teamMetrics";
+import { resolveConversationCashPayments } from "../utils/leadCash";
 import {
   Camera,
   CheckCircle2,
@@ -489,14 +490,13 @@ export default function ProfilePage() {
         }
       }
 
-      // 5. Enrolled Students & Cash Collected
+      // 5. Enrolled Students
       if (isEnroller && isConvertedLead(c)) {
         const convTime = getConvertedTime(c);
         if (convTime !== null && inTimeRange(convTime)) {
           enrolledCount += 1;
           totalActivities += 1;
           const cashVal = Number(c.cashIn) || 0;
-          totalCash += cashVal;
 
           recentMilestones.push({
             id: `${c.id}_enrolled`,
@@ -505,7 +505,27 @@ export default function ProfilePage() {
             leadId: c.id,
             timestamp: convTime,
             type: "enrollment",
-            detail: cashVal > 0 ? `${cashVal.toLocaleString()} SAR Collected` : "Registered Student",
+            detail: cashVal > 0 ? `${cashVal.toLocaleString()} SAR Total` : "Registered Student",
+          });
+        }
+      }
+
+      // 5b. Cash Recorded (attributed strictly to the agent who added each payment)
+      const cashPayments = resolveConversationCashPayments(c);
+      for (const payment of cashPayments) {
+        if (matchesStaff(payment.actor) && inTimeRange(payment.timestamp)) {
+          totalCash = Math.round((totalCash + payment.amount) * 100) / 100;
+          totalActivities += 1;
+          recentMilestones.push({
+            id: `${c.id}_cash_${payment.id}`,
+            title: "Cash Recorded",
+            leadName: leadTitle,
+            leadId: c.id,
+            timestamp: payment.timestamp,
+            type: "enrollment",
+            detail: payment.note
+              ? `${payment.amount.toLocaleString()} SAR · ${payment.note}`
+              : `${payment.amount.toLocaleString()} SAR Collected`,
           });
         }
       }

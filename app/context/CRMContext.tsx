@@ -57,6 +57,12 @@ import {
   normalizeLeadLabelCatalog,
 } from "../utils/leadLabels";
 import {
+  type CashEntry,
+  computeActiveCashTotal,
+  getCashEntriesSignature,
+  resolveConversationCashPayments,
+} from "../utils/leadCash";
+import {
   type BrowserNotificationPermission,
   type EnablePushResult,
   type TestPushResult,
@@ -200,6 +206,8 @@ export type Conversation = {
     notes?: string;
   };
   cashIn?: number;
+  cashRecordedBy?: string;
+  cashEntries?: CashEntry[];
   branch?: string;
   auditionOutcome?: string;
   followUpTags?: string[];
@@ -337,6 +345,15 @@ type CRMContextType = {
   patchConversation: (
     id: string,
     updates: Partial<Record<string, any>>
+  ) => Promise<{ ok: boolean; error?: string }>;
+  addConversationCash: (
+    id: string,
+    input: { amount: number; note?: string }
+  ) => Promise<{ ok: boolean; error?: string }>;
+  voidConversationCash: (
+    id: string,
+    entryId: string,
+    reason?: string
   ) => Promise<{ ok: boolean; error?: string }>;
   bulkUpdateSavedForAgent: (params: {
     senderIds?: string[];
@@ -591,6 +608,8 @@ function slimConversationsForStorage(convs: Conversation[], limit?: number): Con
     if (c.branch) item.branch = c.branch;
     if (c.formAnswers && Object.keys(c.formAnswers).length > 0) item.formAnswers = c.formAnswers;
     if (c.cashIn) item.cashIn = c.cashIn;
+    if (c.cashRecordedBy) item.cashRecordedBy = c.cashRecordedBy;
+    if (c.cashEntries && c.cashEntries.length > 0) item.cashEntries = c.cashEntries;
     if (c.createdAt) item.createdAt = c.createdAt;
     if (c.updatedAt) item.updatedAt = c.updatedAt;
     if (c.lastMessageAt) item.lastMessageAt = c.lastMessageAt;
@@ -1453,6 +1472,13 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       bookedBy: c.bookedBy || (typeof c.source === "object" && c.source?.bookedBy ? String(c.source.bookedBy) : undefined),
       attendedBy: c.attendedBy || (typeof c.source === "object" && c.source?.attendedBy ? String(c.source.attendedBy) : undefined),
       enrolledBy: c.enrolledBy || (typeof c.source === "object" && c.source?.enrolledBy ? String(c.source.enrolledBy) : undefined),
+      cashRecordedBy:
+        typeof c.cashRecordedBy === "string" && c.cashRecordedBy.trim()
+          ? c.cashRecordedBy.trim()
+          : typeof c.source === "object" && typeof c.source?.cashRecordedBy === "string" && c.source.cashRecordedBy.trim()
+            ? c.source.cashRecordedBy.trim()
+            : undefined,
+      cashEntries: Array.isArray(c.cashEntries) ? c.cashEntries : undefined,
       auditionOutcome: c.auditionOutcome || "",
       followUpTags: Array.isArray(c.followUpTags) ? c.followUpTags : [],
       labels: normalizeConversationLabelIds(c.labels),
@@ -1503,6 +1529,9 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       branch: c.branch || "",
       formAnswers: c.formAnswers || {},
       cashIn: (() => {
+        if (Array.isArray(c.cashEntries) && c.cashEntries.length > 0) {
+          return computeActiveCashTotal({ cashEntries: c.cashEntries });
+        }
         const topCash = Number(c.cashIn) || 0;
         if (topCash > 0) return topCash;
         if (typeof c.source === "object" && c.source?.cashIn !== undefined && c.source?.cashIn !== null) {
@@ -1900,6 +1929,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               areStringArraysEqual(oldConv.labels, nextConv.labels) &&
               (oldConv.activityLog?.length || 0) === (nextConv.activityLog?.length || 0) &&
               oldConv.cashIn === nextConv.cashIn &&
+              (oldConv.cashRecordedBy || "") === (nextConv.cashRecordedBy || "") &&
+              getCashEntriesSignature(oldConv.cashEntries) === getCashEntriesSignature(nextConv.cashEntries) &&
               oldConv.notes === nextConv.notes &&
               oldConv.profilePic === nextConv.profilePic &&
               Boolean(oldConv.isGroup) === Boolean(nextConv.isGroup) &&
@@ -2161,6 +2192,14 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
                 hasActivePending && pending?.updates.cashIn !== undefined
                   ? Number(pending.updates.cashIn) || 0
                   : normActive.cashIn ?? c.cashIn,
+              cashRecordedBy:
+                hasActivePending && pending?.updates.cashRecordedBy !== undefined
+                  ? String(pending.updates.cashRecordedBy || "")
+                  : normActive.cashRecordedBy ?? c.cashRecordedBy,
+              cashEntries:
+                hasActivePending && pending?.updates.cashEntries !== undefined
+                  ? (pending.updates.cashEntries as CashEntry[])
+                  : normActive.cashEntries ?? c.cashEntries,
               activityLog:
                 Array.isArray(normActive.activityLog) &&
                 normActive.activityLog.length >= (c.activityLog?.length || 0)
@@ -2240,6 +2279,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
               mergedConv.branch !== c.branch ||
               mergedConv.notes !== c.notes ||
               mergedConv.cashIn !== c.cashIn ||
+              (mergedConv.cashRecordedBy || "") !== (c.cashRecordedBy || "") ||
+              getCashEntriesSignature(mergedConv.cashEntries) !== getCashEntriesSignature(c.cashEntries) ||
               mergedConv.lastReadAt !== c.lastReadAt ||
               mergedConv.unreadCount !== c.unreadCount ||
               Boolean(mergedConv.markedUnread) !== Boolean(c.markedUnread) ||
@@ -4552,11 +4593,12 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
             baseSource.cashIn = numCash;
             if (numCash > 0 && numCash !== (current?.cashIn || 0)) {
               baseSource.paidAt = nowIso;
-              baseSource.enrolledBy = actorName;
               enrichedUpdates.paidAt = nowIso;
-              enrichedUpdates.enrolledBy = actorName;
               patchPayload.paidAt = nowIso;
-              patchPayload.enrolledBy = actorName;
+              if (actorName && actorName !== "Staff") {
+                baseSource.cashRecordedBy = actorName;
+                enrichedUpdates.cashRecordedBy = actorName;
+              }
             }
           }
           const currentSourceObj =
@@ -4821,6 +4863,288 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
       }
     },
     [isReadOnly, authFetch, normalizeConversationMeta, resolveActiveUnreadGuard, user?.name, user?.role]
+  );
+
+  const mutateConversationCash = useCallback(
+    async (
+      id: string,
+      options: {
+        buildOptimisticEntries: (prevConv: Conversation | undefined, nowTs: number) => CashEntry[];
+        requestUrl: string;
+        method: "POST" | "DELETE";
+        body: Record<string, unknown>;
+        fallbackError: string;
+      }
+    ): Promise<{ ok: boolean; error?: string }> => {
+      if (isReadOnly) {
+        return { ok: false, error: "Read-only account cannot modify payments." };
+      }
+
+      const prevConv = conversationsRef.current.find((c) => c.id === id);
+      const nowTs = Date.now();
+      const nowIso = new Date(nowTs).toISOString();
+      const nextEntries = options.buildOptimisticEntries(prevConv, nowTs);
+      const nextCashIn = computeActiveCashTotal({ cashEntries: nextEntries });
+      const activePayments = resolveConversationCashPayments({ cashEntries: nextEntries });
+      const latestPayment = activePayments[activePayments.length - 1];
+      const nextCashRecordedBy = latestPayment?.actor || "";
+      const nextPaidAt = latestPayment?.timestamp
+        ? new Date(latestPayment.timestamp).toISOString()
+        : nextCashIn > 0
+          ? nowIso
+          : undefined;
+
+      const optimisticCashPatch: Record<string, unknown> = {
+        cashEntries: nextEntries,
+        cashIn: nextCashIn,
+        cashRecordedBy: nextCashRecordedBy,
+        paidAt: nextPaidAt,
+      };
+
+      if (typeof window !== "undefined") {
+        try {
+          localStorage.setItem(`crm_cash_${id}`, String(nextCashIn));
+        } catch {}
+      }
+
+      const patchStartedAt = Date.now();
+      const existingPending = pendingPatchesRef.current.get(id);
+      pendingPatchesRef.current.set(id, {
+        updates: {
+          ...(existingPending ? existingPending.updates : {}),
+          ...optimisticCashPatch,
+        },
+        expiresAt: patchStartedAt + 30000,
+        patchedAt: patchStartedAt,
+      });
+
+      setConversations((prev) => {
+        const next = prev.map((c) =>
+          c.id === id
+            ? ({
+                ...c,
+                cashEntries: nextEntries,
+                cashIn: nextCashIn,
+                cashRecordedBy: nextCashRecordedBy,
+                paidAt: nextPaidAt,
+              } as Conversation)
+            : c
+        );
+        persistConversationsCache(next, true);
+        return next;
+      });
+
+      const rollbackCashOptimistic = (restoredMeta?: Omit<Conversation, "messages">) => {
+        const currentPending = pendingPatchesRef.current.get(id);
+        if (currentPending) {
+          const nextUpdates = { ...currentPending.updates };
+          for (const key of Object.keys(optimisticCashPatch)) {
+            if (nextUpdates[key] === optimisticCashPatch[key]) {
+              delete nextUpdates[key];
+            }
+          }
+          if (Object.keys(nextUpdates).length === 0) {
+            pendingPatchesRef.current.delete(id);
+          } else {
+            pendingPatchesRef.current.set(id, {
+              updates: nextUpdates,
+              expiresAt: currentPending.expiresAt,
+            });
+          }
+        }
+        setConversations((prev) => {
+          const next = prev.map((c) => {
+            if (c.id !== id) return c;
+            if (restoredMeta) {
+              return { ...restoredMeta, messages: c.messages } as Conversation;
+            }
+            if (!prevConv) return c;
+            return {
+              ...c,
+              cashEntries: prevConv.cashEntries,
+              cashIn: prevConv.cashIn,
+              cashRecordedBy: prevConv.cashRecordedBy,
+              paidAt: prevConv.paidAt,
+            } as Conversation;
+          });
+          persistConversationsCache(next, true);
+          return next;
+        });
+        if (typeof window !== "undefined") {
+          try {
+            localStorage.setItem(`crm_cash_${id}`, String(Number(prevConv?.cashIn) || 0));
+          } catch {}
+        }
+      };
+
+      const emitCashError = (message: string) => {
+        if (typeof window === "undefined") return;
+        try {
+          window.dispatchEvent(
+            new CustomEvent("crm:toast", {
+              detail: { type: "error", message },
+            })
+          );
+        } catch {}
+      };
+
+      try {
+        const res = await authFetch(options.requestUrl, {
+          method: options.method,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(options.body),
+        });
+        const json = await res.json().catch(() => null);
+        if (res.ok && json && json.success && json.data) {
+          const confirmed = normalizeConversationMeta(json.data);
+          setConversations((prev) => {
+            const next = prev.map((c) => {
+              if (c.id !== id) return c;
+              return {
+                ...c,
+                ...confirmed,
+                messages: c.messages,
+              } as Conversation;
+            });
+            persistConversationsCache(next, true);
+            return next;
+          });
+          if (typeof window !== "undefined") {
+            try {
+              localStorage.setItem(`crm_cash_${id}`, String(Number(confirmed.cashIn) || 0));
+            } catch {}
+          }
+          const currentPending = pendingPatchesRef.current.get(id);
+          if (currentPending) {
+            const confirmedTs = json.data?.updatedAt
+              ? Date.parse(String(json.data.updatedAt))
+              : Date.now();
+            pendingPatchesRef.current.set(id, {
+              updates: currentPending.updates,
+              expiresAt: Date.now() + 8000,
+              patchedAt: currentPending.patchedAt,
+              confirmedUpdatedAt: Number.isFinite(confirmedTs) ? confirmedTs : Date.now(),
+            });
+          }
+          return { ok: true };
+        }
+
+        let restoredMeta: Omit<Conversation, "messages"> | undefined;
+        if (res.status === 403 || res.status === 409) {
+          try {
+            const rollbackRes = await authFetch(`${API}/messages/${id}`);
+            if (rollbackRes.ok) {
+              const rollbackJson = await rollbackRes.json().catch(() => null);
+              if (rollbackJson && rollbackJson.data) {
+                restoredMeta = normalizeConversationMeta(rollbackJson.data);
+              }
+            }
+          } catch {}
+        }
+
+        rollbackCashOptimistic(restoredMeta);
+        const errMsg =
+          (typeof json?.error === "string" && json.error) ||
+          `${options.fallbackError} (HTTP ${res.status}).`;
+        emitCashError(errMsg);
+        return { ok: false, error: errMsg };
+      } catch (err) {
+        console.warn("Failed to mutate conversation cash:", err);
+        rollbackCashOptimistic();
+        const networkError = "Network error while updating cash. Please try again.";
+        emitCashError(networkError);
+        return { ok: false, error: networkError };
+      }
+    },
+    [isReadOnly, authFetch, normalizeConversationMeta]
+  );
+
+  const addConversationCash = useCallback(
+    async (id: string, input: { amount: number; note?: string }) => {
+      const actorName = (user?.name || "Staff").trim() || "Staff";
+      const actorId = user?.id ? String(user.id) : "";
+      const actorRole = user?.role || "";
+      return mutateConversationCash(id, {
+        buildOptimisticEntries: (prevConv, nowTs) => {
+          const existing = Array.isArray(prevConv?.cashEntries) ? prevConv.cashEntries : [];
+          let baseEntries: CashEntry[] = existing.map((e) => ({ ...e }));
+          if (baseEntries.length === 0 && (Number(prevConv?.cashIn) || 0) > 0) {
+            const legacyPayments = resolveConversationCashPayments(prevConv);
+            baseEntries = legacyPayments.map((lp) => ({
+              id: `cash_legacy_${lp.timestamp || nowTs}`,
+              amount: lp.amount,
+              currency: "SAR",
+              recordedBy: lp.actor,
+              recordedAt: lp.timestamp || nowTs,
+              note: lp.note,
+              isLegacy: true,
+              isVoided: false,
+            }));
+          }
+          const tempEntry: CashEntry = {
+            id: `temp_cash_${nowTs}`,
+            amount: Math.round((Number(input.amount) || 0) * 100) / 100,
+            currency: "SAR",
+            recordedBy: actorName,
+            recordedByUserId: actorId,
+            recordedByRole: actorRole,
+            recordedAt: nowTs,
+            note: typeof input.note === "string" ? input.note.trim() : "",
+            isLegacy: false,
+            isVoided: false,
+          };
+          return [...baseEntries, tempEntry];
+        },
+        requestUrl: `${API}/messages/${encodeURIComponent(id)}/cash`,
+        method: "POST",
+        body: { amount: input.amount, note: input.note || "" },
+        fallbackError: "Could not add cash payment",
+      });
+    },
+    [mutateConversationCash, user?.id, user?.name, user?.role]
+  );
+
+  const voidConversationCash = useCallback(
+    async (id: string, entryId: string, reason?: string) => {
+      const actorName = (user?.name || "Staff").trim() || "Staff";
+      const actorId = user?.id ? String(user.id) : "";
+      return mutateConversationCash(id, {
+        buildOptimisticEntries: (prevConv, nowTs) => {
+          const existing = Array.isArray(prevConv?.cashEntries) ? prevConv.cashEntries : [];
+          let entries: CashEntry[] = existing.map((e) => ({ ...e }));
+          if (entries.length === 0 && (Number(prevConv?.cashIn) || 0) > 0) {
+            const legacyPayments = resolveConversationCashPayments(prevConv);
+            entries = legacyPayments.map((lp) => ({
+              id: `cash_legacy_${lp.timestamp || nowTs}`,
+              amount: lp.amount,
+              currency: "SAR",
+              recordedBy: lp.actor,
+              recordedAt: lp.timestamp || nowTs,
+              note: lp.note,
+              isLegacy: true,
+              isVoided: false,
+            }));
+          }
+          return entries.map((e) =>
+            e.id === entryId || (entryId === "legacy" && e.isLegacy)
+              ? {
+                  ...e,
+                  isVoided: true,
+                  voidedAt: nowTs,
+                  voidedBy: actorName,
+                  voidedByUserId: actorId,
+                  voidReason: (reason || "").trim(),
+                }
+              : e
+          );
+        },
+        requestUrl: `${API}/messages/${encodeURIComponent(id)}/cash/${encodeURIComponent(entryId)}`,
+        method: "DELETE",
+        body: { reason: reason || "" },
+        fallbackError: "Could not remove cash payment",
+      });
+    },
+    [mutateConversationCash, user?.id, user?.name]
   );
 
   // Admissions preserves unread count until staff replies; Operation clears unread immediately when opening the card.
@@ -6263,6 +6587,8 @@ export function CRMProvider({ children }: { children: React.ReactNode }) {
         setActiveChatId,
         openChat,
         patchConversation,
+        addConversationCash,
+        voidConversationCash,
         bulkUpdateSavedForAgent,
         fetchConversationsForBatchExport,
         updateConversationClaude,

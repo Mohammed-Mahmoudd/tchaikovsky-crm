@@ -128,11 +128,13 @@ function getReasonBarColor(reasonKey: string, idx: number): string {
     case "cash_recorded":
     case "progressed_enrolled":
     case "paid_enrolled":
+    case "paid_payment":
     case "enrolled":
       return "bg-emerald-500";
     case "audition_date_other":
     case "enrolled_rollup":
     case "unpaid_enrolled":
+    case "legacy_payment":
     case "new_unread":
     case "unread":
       return "bg-amber-500";
@@ -158,11 +160,13 @@ function getReasonPillClass(reasonKey: string): string {
     case "cash_recorded":
     case "progressed_enrolled":
     case "paid_enrolled":
+    case "paid_payment":
     case "enrolled":
       return "text-emerald-500 bg-emerald-500/10 border-emerald-500/25";
     case "audition_date_other":
     case "enrolled_rollup":
     case "unpaid_enrolled":
+    case "legacy_payment":
     case "new_unread":
     case "unread":
       return "text-amber-500 bg-amber-500/10 border-amber-500/25";
@@ -196,9 +200,8 @@ function isMilestoneAnchoredMetric(metric: FunnelAuditMetric): boolean {
 function getMetricAnchorSubtitle(metric: FunnelAuditMetric): string {
   if (metric === "booked") return "Anchored on actual booking date";
   if (metric === "attended") return "Anchored on attendance date";
-  if (metric === "enrolled" || metric === "cash") {
-    return "Anchored on enrollment / payment date";
-  }
+  if (metric === "enrolled") return "Anchored on enrollment date";
+  if (metric === "cash") return "Anchored on payment date";
   return "Anchored on lead creation date";
 }
 
@@ -208,7 +211,8 @@ function getRowSortTimestamp(
 ): number {
   if (metric === "booked") return row.bookedTs || row.convertedTs || row.createdTs;
   if (metric === "attended") return row.attendedTs || row.convertedTs || row.createdTs;
-  if (metric === "enrolled" || metric === "cash") return row.convertedTs || row.createdTs;
+  if (metric === "enrolled") return row.convertedTs || row.createdTs;
+  if (metric === "cash") return row.paidTs || row.convertedTs || row.createdTs;
   return row.createdTs;
 }
 
@@ -230,7 +234,7 @@ function getActorAttributionNote(
     return `Attended marked by ${row.attendedBy}`;
   }
   if (
-    (metric === "enrolled" || metric === "cash") &&
+    metric === "enrolled" &&
     row.enrolledBy &&
     row.enrolledBy.toLowerCase() !== ownerLower
   ) {
@@ -245,9 +249,8 @@ function getMilestoneTimestamp(
 ): { label: string; ts: number | null } {
   if (metric === "booked") return { label: "Booked", ts: row.bookedTs };
   if (metric === "attended") return { label: "Attended", ts: row.attendedTs };
-  if (metric === "enrolled" || metric === "cash") {
-    return { label: "Converted", ts: row.convertedTs };
-  }
+  if (metric === "cash") return { label: "Paid", ts: row.paidTs || row.convertedTs };
+  if (metric === "enrolled") return { label: "Converted", ts: row.convertedTs };
   return { label: "Created", ts: row.createdTs };
 }
 
@@ -1680,7 +1683,7 @@ export function FunnelAuditModal({
                     }).label;
                     return (
                       <div
-                        key={row.id}
+                        key={row.rowKey || row.id}
                         className={`p-3.5 rounded-xl border bg-[var(--bg-card)] flex flex-col justify-between gap-2.5 ${
                           drawerChatId === row.id
                             ? "border-[#0066FF] ring-1 ring-[#0066FF]/30"
@@ -1874,7 +1877,7 @@ export function FunnelAuditModal({
                         }).label;
                         return (
                           <tr
-                            key={row.id}
+                            key={row.rowKey || row.id}
                             className="hover:bg-[var(--bg-hover)] transition-colors"
                             style={{
                               background:
@@ -2066,7 +2069,7 @@ export function FunnelAuditModal({
                     }).label;
                     return (
                     <div
-                      key={`${ex.id}-${ex.excludedReason}`}
+                      key={ex.rowKey || `${ex.id}-${ex.excludedReason}`}
                       className={`p-3.5 rounded-xl border bg-[var(--bg-card)] flex flex-col justify-between gap-2.5 ${
                         drawerChatId === ex.id
                           ? "border-[#0066FF] ring-1 ring-[#0066FF]/30"
@@ -2179,7 +2182,7 @@ export function FunnelAuditModal({
                         }).label;
                         return (
                         <tr
-                          key={`${ex.id}-${ex.excludedReason}`}
+                          key={ex.rowKey || `${ex.id}-${ex.excludedReason}`}
                           className="hover:bg-[var(--bg-hover)] transition-colors"
                           style={{
                             background:

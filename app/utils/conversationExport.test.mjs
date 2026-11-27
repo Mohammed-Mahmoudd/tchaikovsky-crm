@@ -250,5 +250,39 @@ describe("conversationExport", () => {
     assert.equal(entries[1].name, "conversation-Sara-2026-11-24-2.txt");
     assert.ok(entries[0].content.startsWith("\uFEFF"));
   });
+
+  it("includes per-payment recorder breakdown when cashEntries exist", () => {
+    const transcript = formatConversationTranscript(
+      {
+        id: "lead_multi_cash",
+        name: "Rami",
+        cashIn: 2500,
+        cashEntries: [
+          {
+            id: "c1",
+            amount: 1000,
+            recordedBy: "Youssef",
+            recordedAt: Date.UTC(2026, 10, 20, 10, 0, 0),
+            note: "Deposit",
+            isVoided: false,
+          },
+          {
+            id: "c2",
+            amount: 1500,
+            recordedBy: "Nourhan",
+            recordedAt: Date.UTC(2026, 10, 21, 10, 0, 0),
+            isVoided: false,
+          },
+        ],
+        messages: [],
+      },
+      { exportedAt: new Date("2026-11-24T12:00:00.000Z") }
+    );
+
+    assert.match(transcript, /Cash In: 2500 SAR/);
+    assert.match(transcript, /1,000 SAR · Added by Youssef/);
+    assert.match(transcript, /Deposit/);
+    assert.match(transcript, /1,500 SAR · Added by Nourhan/);
+  });
 });
 

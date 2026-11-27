@@ -2,6 +2,7 @@
 
 import React, { useState, useMemo } from 'react';
 import { useCRM, Conversation } from '../context/CRMContext';
+import { resolveConversationCashPayments } from '../utils/leadCash';
 import {
   TrendingUp,
   Users,
@@ -298,13 +299,19 @@ export default function ReportsPage() {
     const convertedInPeriod = conversations.filter(c =>
       filterMode === 'all' ? isConvertedLead(c) : inPeriod(getConvertedTime(c))
     );
-    const paidInPeriod = convertedInPeriod.filter(c => (Number(c.cashIn) || 0) > 0);
+    const cashPaymentsInPeriod = conversations.flatMap(c =>
+      resolveConversationCashPayments(c)
+        .filter(p => (filterMode === 'all' ? true : inPeriod(p.timestamp)))
+        .map(p => ({ conv: c, payment: p }))
+    );
 
     const total = leadsInPeriod.length;
     const booked = bookedInPeriod.length;
     const att = attendedInPeriod.length;
     const enr = convertedInPeriod.length;
-    const totalCash = paidInPeriod.reduce((acc, c) => acc + (Number(c.cashIn) || 0), 0);
+    const totalCash = Math.round(
+      cashPaymentsInPeriod.reduce((acc, item) => acc + item.payment.amount, 0) * 100
+    ) / 100;
 
     const bPct = total > 0 ? `${Math.round((booked / total) * 100)}%` : '0%';
     const aPct = booked > 0 ? `${Math.round((att / booked) * 100)}%` : '0%';
@@ -341,18 +348,23 @@ export default function ReportsPage() {
       }))
       .sort((a, b) => b.cashIn - a.cashIn || b.convertedAt - a.convertedAt);
 
-    // 3. Cash In breakdown list (who paid and how much)
-    const cashList = paidInPeriod
-      .map(c => ({
+    // 3. Cash In breakdown list (per recorded payment with who added it)
+    const cashList = cashPaymentsInPeriod
+      .map(({ conv: c, payment }) => ({
+        entryId: payment.id,
         id: c.id,
         name: getDisplayName(c),
         phone: c.phone || '',
         pipeline: c.pipeline,
         agent: c.agent || 'Unassigned',
+        addedBy: payment.actor || '',
+        isLegacy: payment.isLegacy,
+        note: payment.note || '',
+        recordedAt: payment.timestamp,
         campaign: getCampaignName(c),
-        cashIn: Number(c.cashIn) || 0,
+        cashIn: payment.amount,
       }))
-      .sort((a, b) => b.cashIn - a.cashIn);
+      .sort((a, b) => b.recordedAt - a.recordedAt || b.cashIn - a.cashIn);
 
     // Aggregate by campaign across the selected period
     const campaignMap: Record<string, CampaignStats> = {};
@@ -392,7 +404,11 @@ export default function ReportsPage() {
     convertedInPeriod.forEach(c => {
       const entry = ensureCampaign(getCampaignName(c));
       entry.enrolled += 1;
-      entry.cashIn += Number(c.cashIn) || 0;
+    });
+
+    cashPaymentsInPeriod.forEach(({ conv: c, payment }) => {
+      const entry = ensureCampaign(getCampaignName(c));
+      entry.cashIn = Math.round((entry.cashIn + payment.amount) * 100) / 100;
     });
 
     const rows = Object.values(campaignMap).sort(
@@ -943,42 +959,89 @@ export default function ReportsPage() {
                 </div>
               ) : (
                 <div className="divide-y divide-[var(--border-main)]">
-                  {cashBreakdownList.map((entry, idx) => (
-                    <div
-                      key={`${entry.id}-${idx}`}
-                      className="px-5 py-2.5 flex items-center justify-between gap-3"
-                      style={{ background: idx % 2 === 0 ? 'transparent' : 'var(--bg-table-alt)' }}
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div
-                          className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold"
-                          style={{ background: 'var(--bg-selected)', color: '#0066FF' }}
-                        >
-                          {(entry.name || '?').charAt(0).toUpperCase()}
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-[12px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{entry.name}</p>
-                          <div className="flex items-center gap-2 mt-0.5">
-                            {entry.phone && (
-                              <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{entry.phone}</span>
+                  {cashBreakdownList.map((entry, idx) => {
+                    const addedLabel = entry.addedBy
+                      ? `Added by ${entry.addedBy}`
+                      : entry.isLegacy
+                        ? 'Legacy · Unrecorded'
+                        : 'Unrecorded';
+                    const showOwner =
+                      entry.agent &&
+                      entry.agent !== 'Unassigned' &&
+                      entry.agent.toLowerCase() !== entry.addedBy.toLowerCase();
+                    const paidDateLabel =
+                      entry.recordedAt > 0
+                        ? new Date(entry.recordedAt).toLocaleDateString('en-US', {
+                            month: 'short',
+                            day: 'numeric',
+                          })
+                        : '';
+                    return (
+                      <div
+                        key={`${entry.id}-${entry.entryId}-${idx}`}
+                        className="px-5 py-2.5 flex items-center justify-between gap-3"
+                        style={{ background: idx % 2 === 0 ? 'transparent' : 'var(--bg-table-alt)' }}
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div
+                            className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold"
+                            style={{ background: 'var(--bg-selected)', color: '#0066FF' }}
+                          >
+                            {(entry.name || '?').charAt(0).toUpperCase()}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-[12px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{entry.name}</p>
+                            <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                              <span className="text-[10px] font-semibold" style={{ color: 'var(--text-primary)' }}>
+                                {addedLabel}
+                              </span>
+                              {paidDateLabel && (
+                                <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                  · {paidDateLabel}
+                                </span>
+                              )}
+                              {showOwner && (
+                                <span className="text-[10px]" style={{ color: 'var(--text-secondary)' }}>
+                                  · Owner: {entry.agent}
+                                </span>
+                              )}
+                              <span
+                                className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded"
+                                style={{
+                                  background: 'var(--bg-selected)',
+                                  color: '#0066FF',
+                                }}
+                              >
+                                {entry.pipeline}
+                              </span>
+                            </div>
+                            {entry.note && (
+                              <p className="text-[10px] truncate mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                                {entry.note}
+                              </p>
                             )}
-                            <span
-                              className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded"
-                              style={{
-                                background: 'var(--bg-selected)',
-                                color: '#0066FF',
-                              }}
-                            >
-                              {entry.pipeline}
-                            </span>
                           </div>
                         </div>
+                        <div className="flex items-center gap-2.5 shrink-0">
+                          <span className="text-[13px] font-bold tabular-nums" style={{ color: 'var(--text-primary)' }}>
+                            {entry.cashIn.toLocaleString()} <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>SAR</span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActiveModal(null);
+                              openChat(entry.id);
+                            }}
+                            className="min-h-[32px] px-2.5 rounded-md text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                            style={{ background: 'var(--bg-pill)', color: '#0066FF', border: '1px solid var(--border-input)' }}
+                          >
+                            <MessageSquare className="w-3 h-3" />
+                            Chat
+                          </button>
+                        </div>
                       </div>
-                      <span className="text-[13px] font-bold shrink-0" style={{ color: 'var(--text-primary)' }}>
-                        {entry.cashIn.toLocaleString()} <span className="text-[10px] font-medium" style={{ color: 'var(--text-muted)' }}>SAR</span>
-                      </span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

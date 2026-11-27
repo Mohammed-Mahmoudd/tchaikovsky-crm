@@ -1,3 +1,9 @@
+import type { CashEntry } from "./leadCash";
+import {
+  computeActiveCashTotal,
+  resolveConversationCashPayments,
+} from "./leadCashHelpers.mjs";
+
 export interface ActivityLogEntryLike {
   id: string;
   type: string;
@@ -26,6 +32,8 @@ export interface TeamConversationLike {
   enrolledAt?: string;
   paidAt?: string;
   cashIn?: number;
+  cashRecordedBy?: string;
+  cashEntries?: ReadonlyArray<CashEntry>;
   createdAt?: string;
   updatedAt?: string;
   lastMessageAt?: number;
@@ -131,6 +139,13 @@ function findEarliestActivityTs(
   return earliest;
 }
 
+function getEffectiveCashIn(c: TeamConversationLike): number {
+  if (Array.isArray(c.cashEntries) && c.cashEntries.length > 0) {
+    return computeActiveCashTotal(c);
+  }
+  return Math.round((Number(c.cashIn) || 0) * 100) / 100;
+}
+
 /**
  * Returns true if the lead actually attended an audition (or progressed past it),
  * explicitly excluding non-attendance outcomes such as "no-show" and "joining-later".
@@ -138,7 +153,7 @@ function findEarliestActivityTs(
 export function isAttendedLead(c: TeamConversationLike): boolean {
   const p = (c.pipeline || "").toLowerCase().trim();
   const out = (c.auditionOutcome || "").toLowerCase().trim();
-  const cash = Number(c.cashIn) || 0;
+  const cash = getEffectiveCashIn(c);
   if (out === "no-show" && p !== "enrolled" && cash <= 0) {
     return false;
   }
@@ -158,7 +173,7 @@ export function isBookedLead(c: TeamConversationLike): boolean {
 export function isConvertedLead(c: TeamConversationLike): boolean {
   const p = (c.pipeline || "").toLowerCase().trim();
   const out = (c.auditionOutcome || "").toLowerCase().trim();
-  return p === "enrolled" || p.includes("registered") || out === "registered" || (Number(c.cashIn) || 0) > 0;
+  return p === "enrolled" || p.includes("registered") || out === "registered" || getEffectiveCashIn(c) > 0;
 }
 
 /** Resolves the canonical booking timestamp for period filtering. */
@@ -323,6 +338,7 @@ export interface AuditConversationInput extends TeamConversationLike {
   bookedBy?: string;
   attendedBy?: string;
   enrolledBy?: string;
+  cashRecordedBy?: string;
 }
 
 export interface BuildFunnelAuditOptions {
@@ -354,6 +370,7 @@ export interface ComputeTeamFunnelOptions {
 }
 
 export interface FunnelAuditLeadRow {
+  rowKey?: string;
   id: string;
   leadName: string;
   leadPhone: string;
@@ -364,16 +381,19 @@ export interface FunnelAuditLeadRow {
   bookedBy?: string;
   attendedBy?: string;
   enrolledBy?: string;
+  cashRecordedBy?: string;
   pipeline: string;
   auditionDate: string;
   auditionOutcome: string;
   followUpDate: string;
   cashIn: number;
+  paymentNote?: string;
   createdTs: number;
   createdSource: "createdAt" | "lastMessageAt" | "updatedAt" | "unknown";
   bookedTs: number | null;
   attendedTs: number | null;
   convertedTs: number | null;
+  paidTs?: number | null;
   reasonKey: string;
   reasonLabel: string;
   reasonDetail: string;
@@ -402,6 +422,7 @@ export type FunnelAuditExcludedReason =
   | "reassigned_actor";
 
 export interface FunnelAuditExcludedRow {
+  rowKey?: string;
   id: string;
   leadName: string;
   leadPhone: string;
@@ -744,7 +765,7 @@ function getBucketOrdering(metric: FunnelAuditMetric): ReadonlyArray<string> {
     case "enrolled":
       return ["stage_enrolled", "outcome_registered", "cash_recorded"];
     case "cash":
-      return ["paid_enrolled", "unpaid_enrolled"];
+      return ["paid_payment", "legacy_payment", "paid_enrolled", "unpaid_enrolled"];
     case "awaiting_reply":
       return ["new_unread", "unread", "stage_new"];
     default:
@@ -799,7 +820,7 @@ function resolveConversationMilestones(c: AuditConversationInput): ResolvedLeadM
   const enrolled = directEnrolled;
   const attended = enrolled || directAttended;
   const booked = attended || directBooked;
-  const cashIn = enrolled ? Number(c.cashIn) || 0 : 0;
+  const cashIn = enrolled ? getEffectiveCashIn(c) : 0;
 
   const convertedTs = enrolled ? getConvertedTime(c) : null;
   const attendedTs = attended ? getAttendedTime(c) ?? convertedTs : null;
@@ -835,7 +856,8 @@ function resolveConversationMilestones(c: AuditConversationInput): ResolvedLeadM
 
 /**
  * Computes Conversion Funnel totals and per-staff counts where each stage is filtered
- * by its own milestone date and attributed to the acting staff member (falling back to owner).
+ * by its own milestone date and attributed to the acting staff member (falling back to owner),
+ * while each cash payment is credited strictly to the agent who recorded it.
  */
 export function computeTeamFunnelSummary(
   conversations: ReadonlyArray<AuditConversationInput>,
@@ -869,7 +891,8 @@ export function computeTeamFunnelSummary(
   };
 
   for (let i = 0; i < conversations.length; i++) {
-    const m = resolveConversationMilestones(conversations[i]);
+    const c = conversations[i];
+    const m = resolveConversationMilestones(c);
 
     if (m.realAssigned && inPeriod(m.createdTs)) {
       team.leads += 1;
@@ -888,10 +911,17 @@ export function computeTeamFunnelSummary(
 
     if (m.enrolled && isRealAssignedAgent(m.enrolledBy) && inPeriod(m.convertedTs)) {
       team.enrolled += 1;
-      team.cash += m.cashIn;
-      const agentCounts = ensureAgent(m.enrolledBy);
-      agentCounts.enrolled += 1;
-      agentCounts.cash += m.cashIn;
+      ensureAgent(m.enrolledBy).enrolled += 1;
+    }
+
+    const payments = resolveConversationCashPayments(c);
+    for (let j = 0; j < payments.length; j++) {
+      const p = payments[j];
+      if (isRealAssignedAgent(p.actor) && inPeriod(p.timestamp)) {
+        team.cash = Math.round((team.cash + p.amount) * 100) / 100;
+        const agentCounts = ensureAgent(p.actor);
+        agentCounts.cash = Math.round((agentCounts.cash + p.amount) * 100) / 100;
+      }
     }
   }
 
@@ -1028,8 +1058,8 @@ function buildAuditCopy(
           : 0;
       return {
         title: `Revenue Audit — ${formatSar(counts.cohortCashTotal)}`,
-        ruleSummary: `Sum of cashIn across the ${counts.cohortEnrolledCount} enrolled/converted leads inside ${periodLabel}${scopeActorClause}.`,
-        formulaText: `${formatSar(counts.cohortCashTotal)} from ${counts.paidCount} paid record${counts.paidCount === 1 ? "" : "s"}${counts.unpaidEnrolledCount > 0 ? ` + ${counts.unpaidEnrolledCount} enrolled with 0 SAR` : ""} · avg ${formatSar(avgPerStudent)} / enrolled`,
+        ruleSummary: `Sum of active payments recorded inside ${periodLabel}${scopeActorClause} (each payment credited to the staff member who recorded it).`,
+        formulaText: `${formatSar(counts.cohortCashTotal)} across ${counts.paidCount} payment${counts.paidCount === 1 ? "" : "s"}${counts.unpaidEnrolledCount > 0 ? ` · ${counts.unpaidEnrolledCount} enrolled with 0 SAR` : ""} · avg ${formatSar(avgPerStudent)} / enrolled`,
       };
     }
     case "stage": {
@@ -1111,7 +1141,144 @@ export function buildFunnelAuditReport(
     }
     if (m.enrolled && matchesScope(m.enrolledBy) && inPeriod(m.convertedTs)) {
       cohortEnrolledCount += 1;
-      cohortCashTotal += m.cashIn;
+    }
+
+    const cashPayments = resolveConversationCashPayments(c);
+    for (let j = 0; j < cashPayments.length; j++) {
+      const p = cashPayments[j];
+      if (matchesScope(p.actor) && inPeriod(p.timestamp)) {
+        cohortCashTotal = Math.round((cohortCashTotal + p.amount) * 100) / 100;
+      }
+    }
+
+    if (target.metric === "cash") {
+      if (m.enrolled && matchesScope(m.enrolledBy) && inPeriod(m.convertedTs) && m.cashIn <= 0) {
+        unpaidEnrolledCount += 1;
+      }
+
+      for (let j = 0; j < cashPayments.length; j++) {
+        const p = cashPayments[j];
+        const inPaymentPeriod = inPeriod(p.timestamp);
+        if (matchesScope(p.actor) && inPaymentPeriod) {
+          paidCount += 1;
+          const reasonKey = p.isLegacy ? "legacy_payment" : "paid_payment";
+          const reasonLabel = p.isLegacy ? "Legacy Payment" : "Recorded Payment";
+          const ownerNote =
+            p.actor.toLowerCase() !== m.assignedLower
+              ? ` (Lead owner: ${m.assignedAgent})`
+              : "";
+          const reasonDetail = `${formatSar(p.amount)} added by ${p.actor}${
+            p.note ? ` · ${p.note}` : ""
+          }${ownerNote}`;
+
+          rows.push({
+            rowKey: `${c.id}_${p.id}`,
+            id: c.id,
+            leadName: getAuditDisplayName(c),
+            leadPhone: c.phone || "",
+            channelLabel: getAuditChannelLabel(c),
+            branch: (c.branch || "").trim(),
+            assignedAgent: m.assignedAgent,
+            attributedAgent: p.actor,
+            bookedBy: m.explicitBookedBy,
+            attendedBy: m.explicitAttendedBy,
+            enrolledBy: m.explicitEnrolledBy,
+            cashRecordedBy: p.actor,
+            pipeline: (c.pipeline || "New").trim(),
+            auditionDate: (c.auditionDate || "").trim(),
+            auditionOutcome: (c.auditionOutcome || "").trim(),
+            followUpDate: (c.followUpDate || "").trim(),
+            cashIn: p.amount,
+            paymentNote: p.note,
+            createdTs: m.createdTs,
+            createdSource: getCreatedTimeSource(c),
+            bookedTs: m.bookedTs,
+            attendedTs: m.attendedTs,
+            convertedTs: m.convertedTs,
+            paidTs: p.timestamp,
+            reasonKey,
+            reasonLabel,
+            reasonDetail,
+            isBooked: m.booked,
+            isAttended: m.attended,
+            isEnrolled: m.enrolled,
+          });
+
+          const existingBucket = bucketMap.get(reasonKey);
+          if (existingBucket) {
+            existingBucket.count += 1;
+            existingBucket.cashTotal = Math.round((existingBucket.cashTotal + p.amount) * 100) / 100;
+          } else {
+            bucketMap.set(reasonKey, {
+              key: reasonKey,
+              label: reasonLabel,
+              description: p.isLegacy
+                ? "Legacy tuition payment attributed via recorded actor or enrollment."
+                : "Tuition payment attributed to the staff member who recorded it.",
+              count: 1,
+              cashTotal: p.amount,
+            });
+          }
+
+          const actorLower = p.actor.toLowerCase();
+          const existingAgent = agentMap.get(actorLower);
+          if (existingAgent) {
+            existingAgent.count += 1;
+            existingAgent.cashTotal = Math.round((existingAgent.cashTotal + p.amount) * 100) / 100;
+          } else {
+            agentMap.set(actorLower, {
+              agent: p.actor,
+              count: 1,
+              cashTotal: p.amount,
+            });
+          }
+          continue;
+        }
+
+        if (!isAllTime && !inPaymentPeriod) continue;
+        const pipeline = (c.pipeline || "New").trim();
+        const auditionDate = (c.auditionDate || "").trim();
+        if (agentFilterLower === null && !isRealAssignedAgent(p.actor)) {
+          excludedRows.push({
+            rowKey: `${c.id}_${p.id}_ex`,
+            id: c.id,
+            leadName: getAuditDisplayName(c),
+            leadPhone: c.phone || "",
+            assignedAgent: m.assignedAgent,
+            actorName: p.actor || "Unattributed",
+            pipeline,
+            auditionDate,
+            cashIn: p.amount,
+            createdTs: m.createdTs,
+            milestoneTs: p.timestamp || null,
+            excludedReason: "unassigned",
+            excludedDetail: `Legacy/unattributed payment (${formatSar(p.amount)}) has no recorded staff actor, so it is excluded from team cash metrics.`,
+          });
+        } else if (
+          agentFilterLower !== null &&
+          isRealAssignedAgent(p.actor) &&
+          p.actor.toLowerCase() !== agentFilterLower &&
+          m.realAssigned &&
+          m.assignedLower === agentFilterLower
+        ) {
+          excludedRows.push({
+            rowKey: `${c.id}_${p.id}_ex`,
+            id: c.id,
+            leadName: getAuditDisplayName(c),
+            leadPhone: c.phone || "",
+            assignedAgent: m.assignedAgent,
+            actorName: p.actor,
+            pipeline,
+            auditionDate,
+            cashIn: p.amount,
+            createdTs: m.createdTs,
+            milestoneTs: p.timestamp || null,
+            excludedReason: "reassigned_actor",
+            excludedDetail: `Lead is currently assigned to ${m.assignedAgent}, but ${formatSar(p.amount)} was recorded by ${p.actor} (credited to ${p.actor}).`,
+          });
+        }
+      }
+      continue;
     }
 
     let metricTarget: {
@@ -1137,13 +1304,13 @@ export function buildFunnelAuditReport(
         actor: m.attendedBy,
         word: "attended",
       };
-    } else if (target.metric === "enrolled" || target.metric === "cash") {
+    } else if (target.metric === "enrolled") {
       metricTarget = {
         qualified: m.enrolled,
-        qualifiesForExclusion: target.metric === "cash" ? m.enrolled && m.cashIn > 0 : m.enrolled,
+        qualifiesForExclusion: m.enrolled,
         ts: m.convertedTs,
         actor: m.enrolledBy,
-        word: target.metric === "cash" ? "paid" : "enrolled",
+        word: "enrolled",
       };
     } else {
       metricTarget = {
@@ -1165,8 +1332,7 @@ export function buildFunnelAuditReport(
         target.metric === "leads" ||
         target.metric === "booked" ||
         target.metric === "attended" ||
-        target.metric === "enrolled" ||
-        target.metric === "cash"
+        target.metric === "enrolled"
       ) {
         const excluded = checkExcludedMilestone(target.metric, c, m, metricTarget, {
           isAllTime,
@@ -1252,7 +1418,7 @@ export function buildFunnelAuditReport(
   rows.sort((a, b) => {
     if (target.metric === "cash") {
       if (b.cashIn !== a.cashIn) return b.cashIn - a.cashIn;
-      return (b.convertedTs || b.createdTs) - (a.convertedTs || a.createdTs);
+      return (b.paidTs || b.convertedTs || b.createdTs) - (a.paidTs || a.convertedTs || a.createdTs);
     }
     if (target.metric === "booked") {
       return (b.bookedTs || b.convertedTs || b.createdTs) - (a.bookedTs || a.convertedTs || a.createdTs);
@@ -1281,7 +1447,7 @@ export function buildFunnelAuditReport(
     return a.agent.localeCompare(b.agent);
   });
 
-  const totalCash = rows.reduce((sum, r) => sum + r.cashIn, 0);
+  const totalCash = Math.round(rows.reduce((sum, r) => sum + r.cashIn, 0) * 100) / 100;
   const { title, ruleSummary, formulaText } = buildAuditCopy(target, scopeLabel, periodDescription, {
     totalCount: rows.length,
     cohortLeadsCount,

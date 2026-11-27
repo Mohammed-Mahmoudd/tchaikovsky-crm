@@ -47,7 +47,7 @@ export function ConversationDetailsSidebar({
   showOpenConversationButton = false,
   className = "",
 }: ConversationDetailsSidebarProps) {
-  const { patchConversation } = useCRM();
+  const { patchConversation, addConversationCash, voidConversationCash } = useCRM();
   const { user, isReadOnly } = useAuth();
 
   const userClean = (user?.name || "").trim().toLowerCase();
@@ -356,8 +356,14 @@ export function ConversationDetailsSidebar({
       <LeadCashInSection
         conversationId={conversation.id}
         cashIn={conversation.cashIn}
+        cashRecordedBy={conversation.cashRecordedBy}
+        cashEntries={conversation.cashEntries}
+        enrolledBy={conversation.enrolledBy}
+        paidAt={conversation.paidAt}
+        activityLog={conversation.activityLog}
         isReadOnly={isReadOnly}
-        onSaveCash={(amount) => patchConversation(conversation.id, { cashIn: amount })}
+        onAddCash={(input) => addConversationCash(conversation.id, input)}
+        onVoidCash={(entryId, reason) => voidConversationCash(conversation.id, entryId, reason)}
       />
 
       {/* SOURCE */}

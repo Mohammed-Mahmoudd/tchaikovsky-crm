@@ -26,6 +26,11 @@ import {
   matchesAssignedLeadAgentFilter,
   parseValidTs,
 } from '../utils/teamMetrics';
+import {
+  computeActiveCashTotal,
+  type ResolvedCashPayment,
+  resolveConversationCashPayments,
+} from '../utils/leadCash';
 import { FunnelAuditModal } from '../components/FunnelAuditModal';
 import { ResponseAuditModal, type ResponseAuditTarget } from '../components/ResponseAuditModal';
 import { ScreenTimeAuditModal } from '../components/ScreenTimeAuditModal';
@@ -444,6 +449,7 @@ type ParsedConversationData = {
   convTs: number | null;
   convActor: string;
   cashInNum: number;
+  cashPayments: ResolvedCashPayment[];
   events: RawConvEvent[];
   actorStats: ConvActorStats[];
   involvedActors: Set<string>;
@@ -463,7 +469,8 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
   const assignedAgent = (c.agent || 'Unassigned').trim();
   const assignedAgentLower = assignedAgent.toLowerCase();
   const createdTs = getCreatedTime(c);
-  const cashInNum = Number(c.cashIn) || 0;
+  const cashPayments = resolveConversationCashPayments(c);
+  const cashInNum = cashPayments.length > 0 ? computeActiveCashTotal(c) : Number(c.cashIn) || 0;
 
   const events: RawConvEvent[] = [];
   const actorStats: ConvActorStats[] = [];
@@ -695,18 +702,37 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
   const convertedLead = isConvertedLead(c);
   const convTs = convertedLead ? getConvertedTime(c) : null;
   const convActor = (c.enrolledBy || assignedAgent).trim();
-  if (!seenTypes.has('cash_recorded') && convertedLead && convTs) {
-    pushRawEvent(
-      `${c.id}_enrolled`,
-      'cash_recorded',
-      convActor,
-      undefined,
-      cashInNum > 0 ? `Recorded payment: ${cashInNum.toLocaleString()} SAR` : 'Enrolled student',
-      c.branch ? `Branch: ${c.branch}` : 'Enrolled',
-      convTs,
-      'Attended',
-      cashInNum > 0 ? `${cashInNum.toLocaleString()} SAR` : 'Enrolled'
-    );
+  if (!seenTypes.has('cash_recorded')) {
+    if (cashPayments.length > 0) {
+      for (let i = 0; i < cashPayments.length; i++) {
+        const payment = cashPayments[i];
+        const paymentTs = payment.timestamp || convTs;
+        if (!paymentTs || !payment.actor) continue;
+        pushRawEvent(
+          `${c.id}_cash_${payment.id}`,
+          'cash_recorded',
+          payment.actor,
+          undefined,
+          `Recorded payment: ${payment.amount.toLocaleString()} SAR`,
+          payment.note || (c.branch ? `Branch: ${c.branch}` : 'Payment logged'),
+          paymentTs,
+          'Attended',
+          `${payment.amount.toLocaleString()} SAR`
+        );
+      }
+    } else if (convertedLead && convTs) {
+      pushRawEvent(
+        `${c.id}_enrolled`,
+        'cash_recorded',
+        convActor,
+        undefined,
+        'Enrolled student',
+        c.branch ? `Branch: ${c.branch}` : 'Enrolled',
+        convTs,
+        'Attended',
+        'Enrolled'
+      );
+    }
   }
 
   if (!seenTypes.has('note_updated') && c.notes && c.notes.trim() && assignedAgent !== 'Unassigned') {
@@ -745,6 +771,7 @@ function getParsedConversationData(c: Conversation): ParsedConversationData {
     convTs,
     convActor,
     cashInNum,
+    cashPayments,
     events,
     actorStats,
     involvedActors,
@@ -1722,10 +1749,18 @@ function TeamActivitiesPageInner() {
         const cSt = ensureStaff(p.convActor);
         if (cSt) {
           cSt.allTimeEnrolled += 1;
-          cSt.allTimeCash += p.cashInNum;
           if (isAllTime || inPeriod(p.convTs)) {
             cSt.enrolledInPeriod += 1;
-            cSt.cashInPeriod += p.cashInNum;
+          }
+        }
+      }
+      for (let j = 0; j < p.cashPayments.length; j++) {
+        const payment = p.cashPayments[j];
+        const cashSt = ensureStaff(payment.actor);
+        if (cashSt) {
+          cashSt.allTimeCash = Math.round((cashSt.allTimeCash + payment.amount) * 100) / 100;
+          if (isAllTime || inPeriod(payment.timestamp)) {
+            cashSt.cashInPeriod = Math.round((cashSt.cashInPeriod + payment.amount) * 100) / 100;
           }
         }
       }

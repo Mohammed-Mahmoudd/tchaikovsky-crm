@@ -3,6 +3,11 @@ import {
   deduplicateArchiveFilenames,
   triggerBinaryFileDownload,
 } from "./zipArchive.mjs";
+import type { CashEntry } from "./leadCash";
+import {
+  computeActiveCashTotal,
+  resolveConversationCashPayments,
+} from "./leadCashHelpers.mjs";
 
 export interface ExportAttachmentLike {
   type?: string;
@@ -114,6 +119,9 @@ export interface ExportConversationInput {
   followUpCompleted?: boolean;
   followUpTags?: ReadonlyArray<string>;
   cashIn?: number;
+  paidAt?: string | null;
+  cashRecordedBy?: string;
+  cashEntries?: ReadonlyArray<CashEntry>;
   notes?: string;
   savedForAgent?: boolean;
   savedForAgentAt?: string | null;
@@ -534,8 +542,21 @@ export function formatConversationTranscript(
       ].filter(Boolean);
       headerLines.push(`Follow-up: ${followParts.join(" · ")}`);
     }
-    if (typeof conv.cashIn === "number" && conv.cashIn > 0) {
-      headerLines.push(`Cash In: ${conv.cashIn} SAR`);
+    const cashPayments = resolveConversationCashPayments(conv);
+    const totalCash = cashPayments.length > 0 ? computeActiveCashTotal(conv) : Number(conv.cashIn) || 0;
+    if (totalCash > 0) {
+      headerLines.push(`Cash In: ${totalCash} SAR`);
+      if (Array.isArray(conv.cashEntries) && conv.cashEntries.length > 0 && cashPayments.length > 0) {
+        for (const payment of cashPayments) {
+          const actorLabel = payment.actor ? `Added by ${payment.actor}` : "Legacy";
+          const dateLabel =
+            payment.timestamp > 0 ? DATE_HEADER_FORMATTER.format(new Date(payment.timestamp)) : "";
+          const noteSuffix = payment.note ? ` · ${payment.note}` : "";
+          headerLines.push(
+            `  - ${payment.amount.toLocaleString("en-US")} SAR · ${actorLabel}${dateLabel ? ` · ${dateLabel}` : ""}${noteSuffix}`
+          );
+        }
+      }
     }
   }
 

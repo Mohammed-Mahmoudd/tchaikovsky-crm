@@ -315,6 +315,8 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
     assignableAgents,
     operationAssignableAgents,
     patchConversation,
+    addConversationCash,
+    voidConversationCash,
     bulkUpdateSavedForAgent,
     fetchConversationsForBatchExport,
     markConversationAsRead,
@@ -4184,8 +4186,14 @@ export default function InboxWorkspace({ inboxMode = "admissions" }: InboxWorksp
             <LeadCashInSection
               conversationId={activeConv.id}
               cashIn={activeConv.cashIn}
+              cashRecordedBy={activeConv.cashRecordedBy}
+              cashEntries={activeConv.cashEntries}
+              enrolledBy={activeConv.enrolledBy}
+              paidAt={activeConv.paidAt}
+              activityLog={activeConv.activityLog}
               isReadOnly={isReadOnly}
-              onSaveCash={(amount) => patchConversation(activeConv.id, { cashIn: amount })}
+              onAddCash={(input) => addConversationCash(activeConv.id, input)}
+              onVoidCash={(entryId, reason) => voidConversationCash(activeConv.id, entryId, reason)}
             />
 
             <div className="mb-5">

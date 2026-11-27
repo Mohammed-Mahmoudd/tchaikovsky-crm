@@ -138,6 +138,7 @@ describe("teamMetrics", () => {
         id: "c3",
         name: "Walk-in Paid",
         agent: "Youssef",
+        enrolledBy: "Youssef",
         channel: "WA",
         pipeline: "Contacted",
         cashIn: 2500,
@@ -285,7 +286,7 @@ describe("teamMetrics", () => {
     });
     assert.equal(cashReport.totalCash, 2500);
     assert.equal(summary.team.cash, cashReport.totalCash);
-    assert.equal(summary.team.enrolled, cashReport.totalCount);
+    assert.equal(cashReport.totalCount, 1);
     assert.equal(cashReport.paidCount, 1);
     assert.equal(cashReport.unpaidEnrolledCount, 1);
     assert.equal(
@@ -362,6 +363,7 @@ describe("teamMetrics", () => {
       id: "w1",
       name: "Walk-in Enrolled",
       agent: "Nourhan",
+      enrolledBy: "Nourhan",
       pipeline: "Enrolled",
       cashIn: 3000,
       createdAt: "2026-11-01T10:00:00Z",
@@ -424,6 +426,119 @@ describe("teamMetrics", () => {
     assert.equal(withDeactivated.has("old agent"), true);
     assert.equal(withDeactivated.get("old agent")?.active, false);
     assert.equal(withDeactivated.has("sara"), false);
+  });
+
+  it("credits multiple cash payments per lead to each recording agent in their payment period, never assigned owner", () => {
+    const startMs = new Date("2026-11-10T00:00:00Z").getTime();
+    const endMs = new Date("2026-11-20T23:59:59Z").getTime();
+
+    const leads = [
+      // Lead owned by Mariam, enrolled by Youssef, with 2 payments by Youssef & Nourhan (plus 1 voided & 1 out-of-period)
+      {
+        id: "m1",
+        name: "Multi Cash Lead",
+        agent: "Mariam",
+        enrolledBy: "Youssef",
+        pipeline: "Enrolled",
+        createdAt: "2026-11-01T10:00:00Z",
+        enrolledAt: "2026-11-12T10:00:00Z",
+        cashIn: 2500,
+        cashEntries: [
+          {
+            id: "ce1",
+            amount: 1000,
+            recordedBy: "Youssef",
+            recordedAt: new Date("2026-11-11T10:00:00Z").getTime(),
+            note: "Deposit",
+            isVoided: false,
+          },
+          {
+            id: "ce2",
+            amount: 1500,
+            recordedBy: "Nourhan",
+            recordedAt: new Date("2026-11-15T10:00:00Z").getTime(),
+            note: "Remaining balance",
+            isVoided: false,
+          },
+          {
+            id: "ce_void",
+            amount: 999,
+            recordedBy: "Mariam",
+            recordedAt: new Date("2026-11-16T10:00:00Z").getTime(),
+            isVoided: true,
+          },
+          {
+            id: "ce_old",
+            amount: 400,
+            recordedBy: "Mariam",
+            recordedAt: new Date("2026-11-02T10:00:00Z").getTime(),
+            isVoided: false,
+          },
+        ],
+      },
+      // Legacy lead with enrolledBy fallback -> credits Omar, not Mariam
+      {
+        id: "m2",
+        name: "Legacy EnrolledBy Lead",
+        agent: "Mariam",
+        enrolledBy: "Omar",
+        pipeline: "Enrolled",
+        createdAt: "2026-11-01T10:00:00Z",
+        paidAt: "2026-11-13T10:00:00Z",
+        cashIn: 800,
+      },
+      // Legacy lead with NO cashRecordedBy, NO activityLog, NO enrolledBy -> excluded as unattributed, NOT credited to Mariam
+      {
+        id: "m3",
+        name: "Unattributed Legacy Cash",
+        agent: "Mariam",
+        pipeline: "Enrolled",
+        createdAt: "2026-11-01T10:00:00Z",
+        paidAt: "2026-11-14T10:00:00Z",
+        cashIn: 600,
+      },
+    ];
+
+    const summary = computeTeamFunnelSummary(leads, {
+      filterMode: "range",
+      periodStartMs: startMs,
+      periodEndMs: endMs,
+    });
+
+    assert.equal(summary.team.enrolled, 3); // m1 (Youssef), m2 (Omar), m3 (fallback Mariam for enrolled)
+    assert.equal(summary.team.cash, 3300); // 1000 + 1500 + 800 (m3 cash unattributed -> excluded!)
+    assert.equal(summary.byAgent.get("youssef")?.cash, 1000);
+    assert.equal(summary.byAgent.get("nourhan")?.cash, 1500);
+    assert.equal(summary.byAgent.get("omar")?.cash, 800);
+    assert.equal(summary.byAgent.get("mariam")?.cash || 0, 0);
+
+    const allCashAudit = buildFunnelAuditReport(leads, {
+      target: { metric: "cash" },
+      selectedAgent: "__all__",
+      filterMode: "range",
+      periodStartMs: startMs,
+      periodEndMs: endMs,
+      periodDescription: "Nov 10 – Nov 20, 2026",
+    });
+    assert.equal(allCashAudit.totalCount, 3);
+    assert.equal(allCashAudit.totalCash, 3300);
+    assert.equal(allCashAudit.excludedRows.length, 1);
+    assert.equal(allCashAudit.excludedRows[0].id, "m3");
+    assert.equal(allCashAudit.excludedRows[0].excludedReason, "unassigned");
+
+    // Viewing Mariam (lead owner) shows reassigned_actor exclusions for Youssef, Nourhan, Omar
+    const mariamAudit = buildFunnelAuditReport(leads, {
+      target: { metric: "cash" },
+      selectedAgent: "Mariam",
+      filterMode: "range",
+      periodStartMs: startMs,
+      periodEndMs: endMs,
+      periodDescription: "Nov 10 – Nov 20, 2026",
+    });
+    assert.equal(mariamAudit.totalCount, 0);
+    assert.equal(mariamAudit.totalCash, 0);
+    assert.equal(mariamAudit.excludedRows.length, 3);
+    assert.ok(mariamAudit.excludedRows.every((r) => r.excludedReason === "reassigned_actor"));
   });
 });
 

@@ -571,7 +571,7 @@ const Column = React.memo(function Column({
 const subscribeNoop = () => () => {};
 
 function PipelinePageInner() {
-  const { admissionsConversations: conversations, patchConversation, openChat, setPollPaused, assignableAgents } = useCRM();
+  const { admissionsConversations: conversations, patchConversation, addConversationCash, voidConversationCash, openChat, setPollPaused, assignableAgents } = useCRM();
   const { isReadOnly, user } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -1782,8 +1782,14 @@ function PipelinePageInner() {
                   variant="panel"
                   conversationId={panelLead.id}
                   cashIn={panelConv?.cashIn}
+                  cashRecordedBy={panelConv?.cashRecordedBy}
+                  cashEntries={panelConv?.cashEntries}
+                  enrolledBy={panelConv?.enrolledBy}
+                  paidAt={panelConv?.paidAt}
+                  activityLog={panelConv?.activityLog}
                   isReadOnly={isReadOnly}
-                  onSaveCash={(amount) => patchConversation(panelLead.id, { cashIn: amount })}
+                  onAddCash={(input) => addConversationCash(panelLead.id, input)}
+                  onVoidCash={(entryId, reason) => voidConversationCash(panelLead.id, entryId, reason)}
                 />
 
                 <div className="mb-6">
