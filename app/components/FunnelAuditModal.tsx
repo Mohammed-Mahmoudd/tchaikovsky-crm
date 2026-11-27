@@ -135,6 +135,7 @@ function getReasonBarColor(reasonKey: string, idx: number): string {
     case "enrolled_rollup":
     case "unpaid_enrolled":
     case "legacy_payment":
+    case "unattributed_payment":
     case "new_unread":
     case "unread":
       return "bg-amber-500";
@@ -167,6 +168,7 @@ function getReasonPillClass(reasonKey: string): string {
     case "enrolled_rollup":
     case "unpaid_enrolled":
     case "legacy_payment":
+    case "unattributed_payment":
     case "new_unread":
     case "unread":
       return "text-amber-500 bg-amber-500/10 border-amber-500/25";

@@ -4,6 +4,17 @@ import React, { useState, useMemo } from 'react';
 import { useCRM, Conversation } from '../context/CRMContext';
 import { resolveConversationCashPayments } from '../utils/leadCash';
 import {
+  clampRatePct,
+  computeTeamFunnelSummary,
+  getAttendedTime,
+  getBookedTime,
+  getConvertedTime,
+  getCreatedTime,
+  isAttendedLead,
+  isBookedLead,
+  isConvertedLead,
+} from '../utils/teamMetrics';
+import {
   TrendingUp,
   Users,
   CalendarCheck,
@@ -26,7 +37,7 @@ type CampaignStats = {
   unqualified: number;
 };
 
-type BreakdownModalType = 'booked' | 'converted' | 'cash' | null;
+type BreakdownModalType = 'booked' | 'attended' | 'converted' | 'cash' | null;
 
 function addDays(date: Date, days: number) {
   const d = new Date(date);
@@ -84,104 +95,6 @@ function getWeekEnd(start: Date) {
   d.setDate(d.getDate() + 6);
   d.setHours(23, 59, 59, 999);
   return d;
-}
-
-function getCreatedTime(c: Conversation): number {
-  if (c.createdAt) {
-    const t = new Date(c.createdAt).getTime();
-    if (!isNaN(t)) return t;
-  }
-  return c.lastMessageAt || (c.updatedAt ? new Date(c.updatedAt).getTime() : 0);
-}
-
-function getUpdatedTime(c: Conversation): number {
-  if (c.updatedAt) {
-    const t = new Date(c.updatedAt).getTime();
-    if (!isNaN(t)) return t;
-  }
-  return getCreatedTime(c);
-}
-
-function isBookedLead(c: Conversation): boolean {
-  return ['Audition Booked', 'Attended', 'Enrolled'].includes(c.pipeline);
-}
-
-function isAttendedLead(c: Conversation): boolean {
-  return ['Attended', 'Enrolled'].includes(c.pipeline);
-}
-
-function isConvertedLead(c: Conversation): boolean {
-  return (
-    c.pipeline === 'Enrolled' ||
-    c.auditionOutcome === 'registered' ||
-    (Number(c.cashIn) || 0) > 0
-  );
-}
-
-function getBookedTime(c: Conversation): number | null {
-  if (!isBookedLead(c)) return null;
-
-  const explicit =
-    c.auditionBookedAt ||
-    (typeof c.source === 'object' && c.source?.auditionBookedAt ? c.source.auditionBookedAt : undefined);
-  if (explicit) {
-    const t = new Date(explicit).getTime();
-    if (!isNaN(t)) return t;
-  }
-
-  if (c.pipeline === 'Audition Booked') {
-    const upd = getUpdatedTime(c);
-    // If an auditionDate is explicitly set in the past relative to updatedAt (e.g. a past audition was later viewed/read),
-    // cap the booking timestamp at the end of auditionDate so past auditions do not appear booked after they occurred.
-    if (c.auditionDate && /^\d{4}-\d{2}-\d{2}$/.test(c.auditionDate)) {
-      const [y, m, d] = c.auditionDate.split('-').map(Number);
-      if (y >= 2020) {
-        const auditionDayEnd = new Date(y, m - 1, d, 23, 59, 59, 999).getTime();
-        if (upd > auditionDayEnd) {
-          return Math.min(getCreatedTime(c), auditionDayEnd);
-        }
-      }
-    }
-    return upd;
-  }
-
-  return getCreatedTime(c);
-}
-
-function getAttendedTime(c: Conversation): number | null {
-  if (!isAttendedLead(c)) return null;
-
-  const explicit =
-    c.attendedAt ||
-    (typeof c.source === 'object' && c.source?.attendedAt ? c.source.attendedAt : undefined);
-  if (explicit) {
-    const t = new Date(explicit).getTime();
-    if (!isNaN(t)) return t;
-  }
-
-  if (c.auditionDate && /^\d{4}-\d{2}-\d{2}$/.test(c.auditionDate)) {
-    const [y, m, d] = c.auditionDate.split('-').map(Number);
-    if (y >= 2020) {
-      return new Date(y, m - 1, d, 12, 0, 0, 0).getTime();
-    }
-  }
-
-  return getUpdatedTime(c);
-}
-
-function getConvertedTime(c: Conversation): number | null {
-  if (!isConvertedLead(c)) return null;
-
-  const explicit =
-    c.enrolledAt ||
-    c.paidAt ||
-    (typeof c.source === 'object' ? c.source?.enrolledAt || c.source?.paidAt : undefined);
-  if (explicit) {
-    const t = new Date(explicit).getTime();
-    if (!isNaN(t)) return t;
-  }
-
-  return getUpdatedTime(c);
 }
 
 function getCampaignName(c: Conversation): string {
@@ -275,6 +188,7 @@ export default function ReportsPage() {
     enrolledPct,
     campaignRows,
     bookedBreakdownList,
+    attendedBreakdownList,
     convertedBreakdownList,
     cashBreakdownList,
   } = useMemo(() => {
@@ -282,91 +196,17 @@ export default function ReportsPage() {
     const endMs = filterMode === 'day' ? dayEnd.getTime() : weekEnd.getTime();
 
     const inPeriod = (ts: number | null): boolean => {
-      if (ts === null) return false;
       if (filterMode === 'all') return true;
+      if (ts === null || ts <= 0) return false;
       return ts >= startMs && ts <= endMs;
     };
 
-    const leadsInPeriod = conversations.filter(c =>
-      filterMode === 'all' ? true : inPeriod(getCreatedTime(c))
-    );
-    const bookedInPeriod = conversations.filter(c =>
-      filterMode === 'all' ? isBookedLead(c) : inPeriod(getBookedTime(c))
-    );
-    const attendedInPeriod = conversations.filter(c =>
-      filterMode === 'all' ? isAttendedLead(c) : inPeriod(getAttendedTime(c))
-    );
-    const convertedInPeriod = conversations.filter(c =>
-      filterMode === 'all' ? isConvertedLead(c) : inPeriod(getConvertedTime(c))
-    );
-    const cashPaymentsInPeriod = conversations.flatMap(c =>
-      resolveConversationCashPayments(c)
-        .filter(p => (filterMode === 'all' ? true : inPeriod(p.timestamp)))
-        .map(p => ({ conv: c, payment: p }))
-    );
+    const funnelSummary = computeTeamFunnelSummary(conversations, {
+      filterMode,
+      periodStartMs: startMs,
+      periodEndMs: endMs,
+    });
 
-    const total = leadsInPeriod.length;
-    const booked = bookedInPeriod.length;
-    const att = attendedInPeriod.length;
-    const enr = convertedInPeriod.length;
-    const totalCash = Math.round(
-      cashPaymentsInPeriod.reduce((acc, item) => acc + item.payment.amount, 0) * 100
-    ) / 100;
-
-    const bPct = total > 0 ? `${Math.round((booked / total) * 100)}%` : '0%';
-    const aPct = booked > 0 ? `${Math.round((att / booked) * 100)}%` : '0%';
-    const ePct = total > 0 ? `${Math.round((enr / total) * 100)}%` : '0%';
-    const avgCash = enr > 0 ? Math.round(totalCash / enr) : 0;
-
-    // 1. Auditions Booked breakdown list
-    const bookedList = bookedInPeriod
-      .map(c => ({
-        id: c.id,
-        name: getDisplayName(c),
-        phone: c.phone || '',
-        pipeline: c.pipeline,
-        auditionDate: c.auditionDate || c.followUpDate || '',
-        branch: c.branch || '',
-        agent: c.agent || 'Unassigned',
-        campaign: getCampaignName(c),
-        bookedAt: getBookedTime(c) || 0,
-      }))
-      .sort((a, b) => b.bookedAt - a.bookedAt);
-
-    // 2. Converted (Enrolled / Paid) breakdown list
-    const convertedList = convertedInPeriod
-      .map(c => ({
-        id: c.id,
-        name: getDisplayName(c),
-        phone: c.phone || '',
-        pipeline: c.pipeline,
-        auditionOutcome: c.auditionOutcome || '',
-        agent: c.agent || 'Unassigned',
-        campaign: getCampaignName(c),
-        cashIn: Number(c.cashIn) || 0,
-        convertedAt: getConvertedTime(c) || 0,
-      }))
-      .sort((a, b) => b.cashIn - a.cashIn || b.convertedAt - a.convertedAt);
-
-    // 3. Cash In breakdown list (per recorded payment with who added it)
-    const cashList = cashPaymentsInPeriod
-      .map(({ conv: c, payment }) => ({
-        entryId: payment.id,
-        id: c.id,
-        name: getDisplayName(c),
-        phone: c.phone || '',
-        pipeline: c.pipeline,
-        agent: c.agent || 'Unassigned',
-        addedBy: payment.actor || '',
-        isLegacy: payment.isLegacy,
-        note: payment.note || '',
-        recordedAt: payment.timestamp,
-        campaign: getCampaignName(c),
-        cashIn: payment.amount,
-      }))
-      .sort((a, b) => b.recordedAt - a.recordedAt || b.cashIn - a.cashIn);
-
-    // Aggregate by campaign across the selected period
     const campaignMap: Record<string, CampaignStats> = {};
     const ensureCampaign = (campName: string): CampaignStats => {
       if (!campaignMap[campName]) {
@@ -383,37 +223,168 @@ export default function ReportsPage() {
       return campaignMap[campName];
     };
 
-    leadsInPeriod.forEach(c => {
-      const entry = ensureCampaign(getCampaignName(c));
-      entry.leads += 1;
-      if (c.pipeline === 'Lost' || c.pipeline === 'Unqualified') {
-        entry.unqualified += 1;
+    const bookedList: Array<{
+      id: string;
+      name: string;
+      phone: string;
+      pipeline: string;
+      auditionDate: string;
+      branch: string;
+      agent: string;
+      campaign: string;
+      bookedAt: number;
+    }> = [];
+
+    const attendedList: Array<{
+      id: string;
+      name: string;
+      phone: string;
+      pipeline: string;
+      auditionDate: string;
+      branch: string;
+      agent: string;
+      campaign: string;
+      attendedAt: number;
+    }> = [];
+
+    const convertedList: Array<{
+      id: string;
+      name: string;
+      phone: string;
+      pipeline: string;
+      auditionOutcome: string;
+      agent: string;
+      campaign: string;
+      cashIn: number;
+      convertedAt: number;
+    }> = [];
+
+    const cashList: Array<{
+      entryId: string;
+      id: string;
+      name: string;
+      phone: string;
+      pipeline: string;
+      agent: string;
+      addedBy: string;
+      isLegacy: boolean;
+      note: string;
+      recordedAt: number;
+      campaign: string;
+      cashIn: number;
+    }> = [];
+
+    // Single-pass O(N) breakdown & campaign aggregation matching computeTeamFunnelSummary
+    for (let i = 0; i < conversations.length; i += 1) {
+      const c = conversations[i];
+      const campName = getCampaignName(c);
+      const displayName = getDisplayName(c);
+      const isPipelineLead = (c.pipeline || '').toLowerCase().trim() !== 'direct';
+
+      if (isPipelineLead && inPeriod(getCreatedTime(c))) {
+        const entry = ensureCampaign(campName);
+        entry.leads += 1;
+        if (c.pipeline === 'Lost' || c.pipeline === 'Unqualified') {
+          entry.unqualified += 1;
+        }
       }
-    });
 
-    bookedInPeriod.forEach(c => {
-      const entry = ensureCampaign(getCampaignName(c));
-      entry.booked += 1;
-    });
+      if (isBookedLead(c)) {
+        const bookedAt = getBookedTime(c);
+        if (inPeriod(bookedAt)) {
+          ensureCampaign(campName).booked += 1;
+          bookedList.push({
+            id: c.id,
+            name: displayName,
+            phone: c.phone || '',
+            pipeline: c.pipeline,
+            auditionDate: c.auditionDate || c.followUpDate || '',
+            branch: c.branch || '',
+            agent: c.agent || 'Unassigned',
+            campaign: campName,
+            bookedAt: bookedAt || 0,
+          });
+        }
+      }
 
-    attendedInPeriod.forEach(c => {
-      const entry = ensureCampaign(getCampaignName(c));
-      entry.attended += 1;
-    });
+      if (isAttendedLead(c)) {
+        const attendedAt = getAttendedTime(c);
+        if (inPeriod(attendedAt)) {
+          ensureCampaign(campName).attended += 1;
+          attendedList.push({
+            id: c.id,
+            name: displayName,
+            phone: c.phone || '',
+            pipeline: c.pipeline,
+            auditionDate: c.auditionDate || '',
+            branch: c.branch || '',
+            agent: c.agent || 'Unassigned',
+            campaign: campName,
+            attendedAt: attendedAt || 0,
+          });
+        }
+      }
 
-    convertedInPeriod.forEach(c => {
-      const entry = ensureCampaign(getCampaignName(c));
-      entry.enrolled += 1;
-    });
+      if (isConvertedLead(c)) {
+        const convertedAt = getConvertedTime(c);
+        if (inPeriod(convertedAt)) {
+          ensureCampaign(campName).enrolled += 1;
+          convertedList.push({
+            id: c.id,
+            name: displayName,
+            phone: c.phone || '',
+            pipeline: c.pipeline,
+            auditionOutcome: c.auditionOutcome || '',
+            agent: c.agent || 'Unassigned',
+            campaign: campName,
+            cashIn: Number(c.cashIn) || 0,
+            convertedAt: convertedAt || 0,
+          });
+        }
+      }
 
-    cashPaymentsInPeriod.forEach(({ conv: c, payment }) => {
-      const entry = ensureCampaign(getCampaignName(c));
-      entry.cashIn = Math.round((entry.cashIn + payment.amount) * 100) / 100;
-    });
+      const payments = resolveConversationCashPayments(c);
+      for (let j = 0; j < payments.length; j += 1) {
+        const payment = payments[j];
+        if (!inPeriod(payment.timestamp)) continue;
+        const entry = ensureCampaign(campName);
+        entry.cashIn = Math.round((entry.cashIn + payment.amount) * 100) / 100;
+        cashList.push({
+          entryId: payment.id,
+          id: c.id,
+          name: displayName,
+          phone: c.phone || '',
+          pipeline: c.pipeline,
+          agent: c.agent || 'Unassigned',
+          addedBy: payment.actor || '',
+          isLegacy: payment.isLegacy,
+          note: payment.note || '',
+          recordedAt: payment.timestamp,
+          campaign: campName,
+          cashIn: payment.amount,
+        });
+      }
+    }
+
+    bookedList.sort((a, b) => b.bookedAt - a.bookedAt);
+    attendedList.sort((a, b) => b.attendedAt - a.attendedAt);
+    convertedList.sort((a, b) => b.cashIn - a.cashIn || b.convertedAt - a.convertedAt);
+    cashList.sort((a, b) => b.recordedAt - a.recordedAt || b.cashIn - a.cashIn);
 
     const rows = Object.values(campaignMap).sort(
       (a, b) => b.leads - a.leads || b.enrolled - a.enrolled || b.booked - a.booked
     );
+
+    const total = funnelSummary.team.leads;
+    const booked = funnelSummary.team.booked;
+    const att = funnelSummary.team.attended;
+    const enr = funnelSummary.team.enrolled;
+    const totalCash = funnelSummary.team.cash;
+
+    const bPct = `${Math.round(clampRatePct(booked, total))}%`;
+    const aPct = `${Math.round(clampRatePct(att, booked))}%`;
+    const ePct = `${Math.round(clampRatePct(enr, total))}%`;
+    const avgCash = enr > 0 ? Math.round(totalCash / enr) : 0;
 
     return {
       totalLeads: total,
@@ -427,6 +398,7 @@ export default function ReportsPage() {
       enrolledPct: ePct,
       campaignRows: rows,
       bookedBreakdownList: bookedList,
+      attendedBreakdownList: attendedList,
       convertedBreakdownList: convertedList,
       cashBreakdownList: cashList,
     };
@@ -636,6 +608,8 @@ export default function ReportsPage() {
             subValue={attendedPct}
             subLabel="show rate"
             icon={<TrendingUp className="w-4 h-4 text-cyan-500" />}
+            onClick={() => setActiveModal('attended')}
+            clickHint="View attended"
           />
           <KpiCard
             title="Converted (Paid)"
@@ -756,6 +730,104 @@ export default function ReportsPage() {
               ) : (
                 <div className="divide-y divide-[var(--border-main)]">
                   {bookedBreakdownList.map((entry, idx) => (
+                    <div
+                      key={`${entry.id}-${idx}`}
+                      className="px-5 py-2.5 flex items-center justify-between gap-3"
+                      style={{ background: idx % 2 === 0 ? 'transparent' : 'var(--bg-table-alt)' }}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div
+                          className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-[11px] font-bold"
+                          style={{ background: 'var(--bg-selected)', color: '#0066FF' }}
+                        >
+                          {(entry.name || '?').charAt(0).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-[12px] font-semibold truncate" style={{ color: 'var(--text-primary)' }}>{entry.name}</p>
+                          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                            {entry.phone && (
+                              <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{entry.phone}</span>
+                            )}
+                            <span
+                              className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded"
+                              style={{ background: 'var(--bg-selected)', color: '#0066FF' }}
+                            >
+                              {entry.pipeline}
+                            </span>
+                            {entry.auditionDate && (
+                              <span className="text-[10px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                                Audition: {entry.auditionDate}
+                              </span>
+                            )}
+                            {entry.branch && (
+                              <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
+                                · {entry.branch}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveModal(null);
+                          openChat(entry.id);
+                        }}
+                        className="h-7 px-2.5 rounded-md text-[11px] font-semibold flex items-center gap-1 shrink-0 transition-colors cursor-pointer"
+                        style={{ background: 'var(--bg-pill)', color: '#0066FF', border: '1px solid var(--border-input)' }}
+                      >
+                        <MessageSquare className="w-3 h-3" />
+                        Chat
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Attended Breakdown Modal */}
+      {activeModal === 'attended' && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+          onClick={() => setActiveModal(null)}
+        >
+          <div className="absolute inset-0" style={{ background: 'rgba(0,0,0,0.35)' }} />
+          <div
+            className="relative w-full sm:max-w-[560px] max-h-[85vh] flex flex-col rounded-t-2xl sm:rounded-xl overflow-hidden"
+            style={{ background: 'var(--bg-card)', border: '1px solid var(--border-main)', boxShadow: 'var(--shadow-card)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="px-5 py-3.5 flex items-center justify-between shrink-0" style={{ borderBottom: '1px solid var(--border-main)' }}>
+              <div>
+                <h2 className="text-[14px] font-bold" style={{ color: 'var(--text-primary)' }}>Attended</h2>
+                <p className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                  {attendedBreakdownList.length} lead{attendedBreakdownList.length !== 1 ? 's' : ''} attended (Attended + Enrolled) · <strong style={{ color: 'var(--text-primary)' }}>{periodDescription}</strong>
+                </p>
+              </div>
+              <button
+                onClick={() => setActiveModal(null)}
+                className="h-7 w-7 flex items-center justify-center rounded-md transition-colors cursor-pointer"
+                style={{ background: 'var(--bg-pill)', color: 'var(--text-secondary)', border: '1px solid var(--border-input)' }}
+                aria-label="Close"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto" style={{ WebkitOverflowScrolling: 'touch' }}>
+              {attendedBreakdownList.length === 0 ? (
+                <div className="p-8 text-center">
+                  <TrendingUp className="w-7 h-7 mx-auto mb-2" style={{ color: 'var(--text-muted)' }} />
+                  <p className="text-[12px] font-medium" style={{ color: 'var(--text-secondary)' }}>
+                    No attended leads recorded for {periodDescription}
+                  </p>
+                </div>
+              ) : (
+                <div className="divide-y divide-[var(--border-main)]">
+                  {attendedBreakdownList.map((entry, idx) => (
                     <div
                       key={`${entry.id}-${idx}`}
                       className="px-5 py-2.5 flex items-center justify-between gap-3"

@@ -213,7 +213,7 @@ describe("auditionRemoval", () => {
     assert.equal(isLiveAuditionConversation(updatedConv, {}, {}), false);
     assert.equal(isBookedLead(updatedConv), false);
     assert.equal(isAttendedLead(updatedConv), false);
-    assert.equal(isConvertedLead(updatedConv), true);
+    assert.equal(isConvertedLead(updatedConv), false);
     assert.equal(updatedConv.cashIn, 3000);
   });
 

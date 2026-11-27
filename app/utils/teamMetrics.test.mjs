@@ -20,31 +20,39 @@ import {
 } from "./teamMetrics.ts";
 
 describe("teamMetrics", () => {
-  it("excludes no-show and joining-later from attended leads", () => {
+  it("uses Option A cumulative pipeline predicates for booked, attended, and enrolled", () => {
     assert.equal(isAttendedLead({ pipeline: "Lost", auditionDate: "2026-11-01", auditionOutcome: "no-show" }), false);
     assert.equal(isAttendedLead({ pipeline: "Joining Later", auditionOutcome: "joining-later" }), false);
-    assert.equal(isAttendedLead({ pipeline: "Audition Booked", auditionOutcome: "booked" }), false);
+    assert.equal(isAttendedLead({ pipeline: "Audition Booked", auditionOutcome: "paid-trial" }), false);
+    assert.equal(isAttendedLead({ pipeline: "Contacted", cashIn: 2500 }), false);
 
     assert.equal(isAttendedLead({ pipeline: "Attended", auditionOutcome: "schedule-followup" }), true);
-    assert.equal(isAttendedLead({ pipeline: "Audition Booked", auditionOutcome: "paid-trial" }), true);
     assert.equal(isAttendedLead({ pipeline: "Enrolled", auditionOutcome: "registered", cashIn: 2500 }), true);
   });
 
-  it("recognizes booked and converted leads consistently", () => {
-    // No-show with auditionDate still counts as having booked an audition, not attended
+  it("recognizes booked and converted leads strictly by cumulative pipeline stages", () => {
+    // No-show (Lost) and Joining Later do NOT stay in Booked under Option A
     const noShow = { pipeline: "Lost", auditionDate: "2026-11-05", auditionOutcome: "no-show" };
-    assert.equal(isBookedLead(noShow), true);
+    assert.equal(isBookedLead(noShow), false);
     assert.equal(isAttendedLead(noShow), false);
     assert.equal(isConvertedLead(noShow), false);
 
-    // Joining Later without auditionDate is neither booked nor attended
     const later = { pipeline: "Joining Later", auditionOutcome: "joining-later" };
     assert.equal(isBookedLead(later), false);
     assert.equal(isAttendedLead(later), false);
+    assert.equal(isConvertedLead(later), false);
 
-    // Walk-in / direct tuition payment
+    // Direct tuition payment without moving pipeline stage does not inflate Booked/Attended/Enrolled
     const paidDirect = { pipeline: "Contacted", cashIn: 1800 };
-    assert.equal(isConvertedLead(paidDirect), true);
+    assert.equal(isBookedLead(paidDirect), false);
+    assert.equal(isAttendedLead(paidDirect), false);
+    assert.equal(isConvertedLead(paidDirect), false);
+
+    // Enrolled rolls up into Booked and Attended cumulatively
+    const enrolled = { pipeline: "Enrolled" };
+    assert.equal(isBookedLead(enrolled), true);
+    assert.equal(isAttendedLead(enrolled), true);
+    assert.equal(isConvertedLead(enrolled), true);
   });
 
   it("uses explicit or activityLog timestamps before updatedAt fallbacks", () => {
@@ -122,18 +130,18 @@ describe("teamMetrics", () => {
         createdAt: "2026-11-08T10:00:00Z",
         auditionBookedAt: "2026-11-09T11:00:00Z",
       },
-      // 2. Progressed to Attended via outcome (Mariam)
+      // 2. Attended stage (Mariam)
       {
         id: "c2",
         name: "Lead Attended Trial",
         agent: "Mariam",
         channel: "IG",
-        pipeline: "Audition Booked",
+        pipeline: "Attended",
         auditionDate: "2026-11-10",
         auditionOutcome: "paid-trial",
         createdAt: "2026-11-08T12:00:00Z",
       },
-      // 3. Direct payment walk-in without audition date (Youssef) -> rolls up into enrolled, attended, booked
+      // 3. Direct payment walk-in in Contacted (Youssef) -> counts in Cash In only, not Booked/Attended/Enrolled
       {
         id: "c3",
         name: "Walk-in Paid",
@@ -145,7 +153,7 @@ describe("teamMetrics", () => {
         createdAt: "2026-11-09T09:00:00Z",
         paidAt: "2026-11-10T14:00:00Z",
       },
-      // 4. No-show with auditionDate -> counted in booked, excluded from attended/enrolled (Youssef)
+      // 4. No-show in Lost with auditionDate -> excluded from Booked/Attended/Enrolled under Option A
       {
         id: "c4",
         name: "No Show Lead",
@@ -177,7 +185,7 @@ describe("teamMetrics", () => {
         unreadCount: 2,
         createdAt: "2026-11-10T09:00:00Z",
       },
-      // 7. Excluded: Unassigned booked lead in period
+      // 7. Unassigned booked lead in period -> counted in team + unassigned, not byAgent
       {
         id: "c7",
         name: "Unassigned Booked",
@@ -212,6 +220,15 @@ describe("teamMetrics", () => {
         createdAt: "2026-10-25T10:00:00Z",
         auditionBookedAt: "2026-11-11T12:00:00Z",
       },
+      // 10. Direct non-pipeline chat -> excluded from Leads count
+      {
+        id: "c10",
+        name: "Direct Chat",
+        agent: "Mariam",
+        channel: "WA",
+        pipeline: "direct",
+        createdAt: "2026-11-10T11:00:00Z",
+      },
     ];
 
     const summary = computeTeamFunnelSummary(sampleConversations, {
@@ -229,12 +246,14 @@ describe("teamMetrics", () => {
       periodDescription: "Nov 7 – Nov 13, 2026",
     });
 
-    // Leads: c1..c6 = 6 assigned leads created in period
-    // Booked: c1..c5 + c8 (older lead booked in period) + c9 (booked by Mariam) = 7 booked
-    assert.equal(bookedReport.cohortLeadsCount, 6);
-    assert.equal(bookedReport.totalCount, 7);
+    // Leads: c1..c7 = 7 pipeline leads created in period (6 assigned + 1 unassigned; c10 "direct" excluded)
+    // Booked: c1, c2, c5, c7 (unassigned), c8 (Youssef), c9 (Mariam) = 6 booked
+    assert.equal(bookedReport.cohortLeadsCount, 7);
+    assert.equal(bookedReport.totalCount, 6);
     assert.equal(summary.team.leads, bookedReport.cohortLeadsCount);
     assert.equal(summary.team.booked, bookedReport.totalCount);
+    assert.equal(summary.unassigned.leads, 1);
+    assert.equal(summary.unassigned.booked, 1);
     assert.equal(
       bookedReport.reasonBuckets.reduce((sum, b) => sum + b.count, 0),
       bookedReport.totalCount
@@ -245,21 +264,16 @@ describe("teamMetrics", () => {
     );
 
     const bucketByKey = Object.fromEntries(bookedReport.reasonBuckets.map((b) => [b.key, b]));
-    assert.equal(bucketByKey.stage_booked.count, 3); // c1, c8, c9
+    assert.equal(bucketByKey.stage_booked.count, 4); // c1, c7, c8, c9
     assert.equal(bucketByKey.progressed_attended.count, 1); // c2
-    assert.equal(bucketByKey.progressed_enrolled.count, 2); // c3, c5
-    assert.equal(bucketByKey.audition_date_other.count, 1); // c4
+    assert.equal(bucketByKey.progressed_enrolled.count, 1); // c5
+    assert.equal(bookedReport.excludedRows.length, 0);
 
-    // Excluded cross-checks: c7 (unassigned lead with no bookedBy actor)
-    assert.equal(bookedReport.excludedRows.length, 1);
-    assert.equal(bookedReport.excludedRows[0].id, "c7");
-    assert.equal(bookedReport.excludedRows[0].excludedReason, "unassigned");
-
-    // Youssef booked c3, c4, and c8 (which is assigned to Mariam) -> 3 booked for Youssef
-    assert.equal(summary.byAgent.get("youssef")?.booked, 3);
+    // Youssef booked c8 (which is assigned to Mariam) -> 1 booked for Youssef
+    assert.equal(summary.byAgent.get("youssef")?.booked, 1);
     assert.equal(summary.byAgent.get("mariam")?.booked, 4); // c1, c2, c5, c9
 
-    // Attended audit catches direct payment roll-up on c3
+    // Attended audit includes Attended (c2) + Enrolled (c5) only
     const attendedReport = buildFunnelAuditReport(sampleConversations, {
       target: { metric: "attended" },
       selectedAgent: "__all__",
@@ -268,11 +282,10 @@ describe("teamMetrics", () => {
       periodEndMs: endMs,
       periodDescription: "Nov 7 – Nov 13, 2026",
     });
-    assert.equal(attendedReport.totalCount, 3); // c2, c3, c5
+    assert.equal(attendedReport.totalCount, 2); // c2, c5
     assert.equal(summary.team.attended, attendedReport.totalCount);
     const attBuckets = Object.fromEntries(attendedReport.reasonBuckets.map((b) => [b.key, b]));
-    assert.equal(attBuckets.outcome_attended.count, 1); // c2
-    assert.equal(attBuckets.enrolled_rollup.count, 1); // c3 direct payment in Contacted
+    assert.equal(attBuckets.stage_attended.count, 1); // c2
     assert.equal(attBuckets.progressed_enrolled.count, 1); // c5
 
     // Cash audit reconciles totalCash and highlights 0 SAR enrolled leads
@@ -286,6 +299,7 @@ describe("teamMetrics", () => {
     });
     assert.equal(cashReport.totalCash, 2500);
     assert.equal(summary.team.cash, cashReport.totalCash);
+    assert.equal(summary.team.enrolled, 1); // c5 only
     assert.equal(cashReport.totalCount, 1);
     assert.equal(cashReport.paidCount, 1);
     assert.equal(cashReport.unpaidEnrolledCount, 1);
@@ -303,7 +317,7 @@ describe("teamMetrics", () => {
       periodEndMs: endMs,
       periodDescription: "Nov 7 – Nov 13, 2026",
     });
-    assert.equal(waReport.totalCount, 4); // c1, c3, c5, c6
+    assert.equal(waReport.totalCount, 5); // c1, c3, c5, c6, c7 (c10 "direct" excluded)
 
     const waitingReport = buildFunnelAuditReport(sampleConversations, {
       target: { metric: "awaiting_reply" },
@@ -506,7 +520,8 @@ describe("teamMetrics", () => {
     });
 
     assert.equal(summary.team.enrolled, 3); // m1 (Youssef), m2 (Omar), m3 (fallback Mariam for enrolled)
-    assert.equal(summary.team.cash, 3300); // 1000 + 1500 + 800 (m3 cash unattributed -> excluded!)
+    assert.equal(summary.team.cash, 3900); // 1000 + 1500 + 800 + 600 (includes unattributed in All Agents total)
+    assert.equal(summary.unassigned.cash, 600);
     assert.equal(summary.byAgent.get("youssef")?.cash, 1000);
     assert.equal(summary.byAgent.get("nourhan")?.cash, 1500);
     assert.equal(summary.byAgent.get("omar")?.cash, 800);
@@ -520,11 +535,13 @@ describe("teamMetrics", () => {
       periodEndMs: endMs,
       periodDescription: "Nov 10 – Nov 20, 2026",
     });
-    assert.equal(allCashAudit.totalCount, 3);
-    assert.equal(allCashAudit.totalCash, 3300);
-    assert.equal(allCashAudit.excludedRows.length, 1);
-    assert.equal(allCashAudit.excludedRows[0].id, "m3");
-    assert.equal(allCashAudit.excludedRows[0].excludedReason, "unassigned");
+    assert.equal(allCashAudit.totalCount, 4);
+    assert.equal(allCashAudit.totalCash, 3900);
+    assert.equal(allCashAudit.excludedRows.length, 0);
+    const unattrBucket = allCashAudit.reasonBuckets.find((b) => b.key === "unattributed_payment");
+    assert.equal(unattrBucket?.cashTotal, 600);
+    const unattrAgent = allCashAudit.agentBreakdown.find((a) => a.agent === "Unattributed");
+    assert.equal(unattrAgent?.cashTotal, 600);
 
     // Viewing Mariam (lead owner) shows reassigned_actor exclusions for Youssef, Nourhan, Omar
     const mariamAudit = buildFunnelAuditReport(leads, {
@@ -539,6 +556,58 @@ describe("teamMetrics", () => {
     assert.equal(mariamAudit.totalCash, 0);
     assert.equal(mariamAudit.excludedRows.length, 3);
     assert.ok(mariamAudit.excludedRows.every((r) => r.excludedReason === "reassigned_actor"));
+  });
+
+  it("reconciles sum(byAgent) + unassigned === team and matches cumulative pipeline on All Time", () => {
+    const convs = [
+      { id: "p1", agent: "Mariam", pipeline: "Audition Booked" },
+      { id: "p2", agent: "Unassigned", pipeline: "Attended" },
+      { id: "p3", agent: "Youssef", pipeline: "Enrolled", cashIn: 1200 },
+      { id: "p4", agent: "Mariam", pipeline: "Lost", auditionDate: "2026-11-10", auditionOutcome: "no-show" },
+      { id: "p5", agent: "Mariam", pipeline: "direct" },
+    ];
+
+    const summary = computeTeamFunnelSummary(convs, {
+      filterMode: "all",
+      periodStartMs: 0,
+      periodEndMs: 0,
+    });
+
+    assert.equal(summary.team.leads, 4); // p1..p4 (p5 "direct" skipped)
+    assert.equal(summary.team.booked, 3); // p1 + p2 + p3
+    assert.equal(summary.team.attended, 2); // p2 + p3
+    assert.equal(summary.team.enrolled, 1); // p3
+    assert.equal(summary.team.cash, 1200); // p3 unattributed legacy cash included in team + unassigned
+
+    const agentSum = { leads: 0, booked: 0, attended: 0, enrolled: 0, cash: 0 };
+    summary.byAgent.forEach((counts) => {
+      agentSum.leads += counts.leads;
+      agentSum.booked += counts.booked;
+      agentSum.attended += counts.attended;
+      agentSum.enrolled += counts.enrolled;
+      agentSum.cash += counts.cash;
+    });
+    assert.equal(agentSum.leads + summary.unassigned.leads, summary.team.leads);
+    assert.equal(agentSum.booked + summary.unassigned.booked, summary.team.booked);
+    assert.equal(agentSum.attended + summary.unassigned.attended, summary.team.attended);
+    assert.equal(agentSum.enrolled + summary.unassigned.enrolled, summary.team.enrolled);
+    assert.equal(agentSum.cash + summary.unassigned.cash, summary.team.cash);
+
+    for (const metric of ["leads", "booked", "attended", "enrolled", "cash"]) {
+      const report = buildFunnelAuditReport(convs, {
+        target: { metric },
+        selectedAgent: "__all__",
+        filterMode: "all",
+        periodStartMs: 0,
+        periodEndMs: 0,
+        periodDescription: "All Time",
+      });
+      if (metric === "cash") {
+        assert.equal(report.totalCash, summary.team.cash);
+      } else {
+        assert.equal(report.totalCount, summary.team[metric]);
+      }
+    }
   });
 });
 

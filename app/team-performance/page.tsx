@@ -3949,6 +3949,33 @@ function TeamActivitiesPageInner() {
                               </div>
                             );
                           })}
+                          {(funnelCohort.unassigned.leads > 0 ||
+                            funnelCohort.unassigned.booked > 0 ||
+                            funnelCohort.unassigned.attended > 0 ||
+                            funnelCohort.unassigned.enrolled > 0 ||
+                            funnelCohort.unassigned.cash > 0) && (
+                            <div className="p-3.5 space-y-1.5" style={{ background: 'var(--bg-table-alt)' }}>
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[13px] font-semibold" style={{ color: 'var(--text-secondary)' }}>
+                                  Unassigned / Unattributed
+                                </span>
+                                <span
+                                  className="text-[10px] font-medium px-2 py-0.5 rounded-full"
+                                  style={{ background: 'var(--bg-pill)', color: 'var(--text-muted)' }}
+                                >
+                                  No staff actor
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                                <span>
+                                  {funnelCohort.unassigned.leads} leads · {funnelCohort.unassigned.booked} booked · {funnelCohort.unassigned.attended} attended · {funnelCohort.unassigned.enrolled} enrolled
+                                </span>
+                                <span className="font-semibold tabular-nums" style={{ color: 'var(--text-primary)' }}>
+                                  {funnelCohort.unassigned.cash.toLocaleString()} SAR
+                                </span>
+                              </div>
+                            </div>
+                          )}
                         </div>
 
                         <div className="hidden sm:block overflow-x-auto w-full" style={{ WebkitOverflowScrolling: 'touch' }}>
@@ -4157,6 +4184,46 @@ function TeamActivitiesPageInner() {
                                   </tr>
                                 );
                               })}
+                              {(funnelCohort.unassigned.leads > 0 ||
+                                funnelCohort.unassigned.booked > 0 ||
+                                funnelCohort.unassigned.attended > 0 ||
+                                funnelCohort.unassigned.enrolled > 0 ||
+                                funnelCohort.unassigned.cash > 0) && (
+                                <tr
+                                  style={{
+                                    borderBottom: '1px solid var(--border-main)',
+                                    background: 'var(--bg-table-alt)',
+                                  }}
+                                >
+                                  <td className="py-2.5 px-4">
+                                    <span className="font-medium" style={{ color: 'var(--text-secondary)' }}>
+                                      Unassigned / Unattributed
+                                    </span>
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right">
+                                    <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>—</span>
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums" style={{ color: 'var(--text-muted)' }}>—</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums" style={{ color: 'var(--text-muted)' }}>—</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums" style={{ color: 'var(--text-muted)' }}>—</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums" style={{ color: 'var(--text-muted)' }}>—</td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums" style={{ color: 'var(--text-secondary)' }}>
+                                    {funnelCohort.unassigned.leads.toLocaleString()}
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums" style={{ color: 'var(--text-secondary)' }}>
+                                    {funnelCohort.unassigned.booked.toLocaleString()}
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums" style={{ color: 'var(--text-secondary)' }}>
+                                    {funnelCohort.unassigned.attended.toLocaleString()}
+                                  </td>
+                                  <td className="py-2.5 px-3 text-right tabular-nums" style={{ color: 'var(--text-secondary)' }}>
+                                    {funnelCohort.unassigned.enrolled.toLocaleString()}
+                                  </td>
+                                  <td className="py-2.5 px-4 text-right font-semibold tabular-nums" style={{ color: 'var(--text-secondary)' }}>
+                                    {funnelCohort.unassigned.cash.toLocaleString()}
+                                  </td>
+                                </tr>
+                              )}
                             </tbody>
                             <tfoot
                               className="text-[11px] font-bold"

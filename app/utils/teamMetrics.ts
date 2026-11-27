@@ -58,20 +58,11 @@ export const BOOKED_PIPELINES = new Set([
   "audition booked",
   "attended",
   "enrolled",
-  "audition confirmed",
-  "audition attended",
-  "audition passed",
-  "payment pending",
-  "registered",
 ]);
 
 export const ATTENDED_PIPELINES = new Set([
   "attended",
   "enrolled",
-  "audition attended",
-  "audition passed",
-  "payment pending",
-  "registered",
 ]);
 
 /** Returns true when an assigned agent name represents a real staff member (not a placeholder). */
@@ -147,33 +138,27 @@ function getEffectiveCashIn(c: TeamConversationLike): number {
 }
 
 /**
- * Returns true if the lead actually attended an audition (or progressed past it),
- * explicitly excluding non-attendance outcomes such as "no-show" and "joining-later".
+ * Returns true if the lead's pipeline stage is Attended or Enrolled (Option A cumulative pipeline).
  */
 export function isAttendedLead(c: TeamConversationLike): boolean {
   const p = (c.pipeline || "").toLowerCase().trim();
-  const out = (c.auditionOutcome || "").toLowerCase().trim();
-  const cash = getEffectiveCashIn(c);
-  if (out === "no-show" && p !== "enrolled" && cash <= 0) {
-    return false;
-  }
-  if (ATTENDED_PIPELINES.has(p)) return true;
-  return ATTENDED_OUTCOMES.has(out);
+  return ATTENDED_PIPELINES.has(p);
 }
 
-/** Returns true if an audition was booked for the lead (including past/no-show bookings). */
+/**
+ * Returns true if the lead's pipeline stage is Audition Booked, Attended, or Enrolled (Option A cumulative pipeline).
+ */
 export function isBookedLead(c: TeamConversationLike): boolean {
   const p = (c.pipeline || "").toLowerCase().trim();
-  if (BOOKED_PIPELINES.has(p)) return true;
-  if (c.auditionDate && String(c.auditionDate).trim()) return true;
-  return isAttendedLead(c);
+  return BOOKED_PIPELINES.has(p);
 }
 
-/** Returns true if the lead enrolled or recorded tuition cash. */
+/**
+ * Returns true if the lead's pipeline stage is Enrolled (Option A strict pipeline).
+ */
 export function isConvertedLead(c: TeamConversationLike): boolean {
   const p = (c.pipeline || "").toLowerCase().trim();
-  const out = (c.auditionOutcome || "").toLowerCase().trim();
-  return p === "enrolled" || p.includes("registered") || out === "registered" || getEffectiveCashIn(c) > 0;
+  return p === "enrolled";
 }
 
 /** Resolves the canonical booking timestamp for period filtering. */
@@ -186,7 +171,8 @@ export function getBookedTime(c: TeamConversationLike): number | null {
   const logTs = findEarliestActivityTs(c, (e) => e.type === "audition_booked");
   if (logTs !== null) return logTs;
 
-  if (c.pipeline === "Audition Booked") {
+  const p = (c.pipeline || "").toLowerCase().trim();
+  if (p === "audition booked") {
     const upd = getUpdatedTime(c);
     if (c.auditionDate && /^\d{4}-\d{2}-\d{2}$/.test(c.auditionDate)) {
       const [y, m, d] = c.auditionDate.split("-").map(Number);
@@ -200,11 +186,7 @@ export function getBookedTime(c: TeamConversationLike): number | null {
     return upd;
   }
 
-  if (!c.auditionDate) {
-    if (isConvertedLead(c)) return getConvertedTime(c);
-    if (isAttendedLead(c)) return getAttendedTime(c);
-  }
-
+  if (isAttendedLead(c)) return getAttendedTime(c);
   return getCreatedTime(c);
 }
 
@@ -225,19 +207,19 @@ export function getAttendedTime(c: TeamConversationLike): number | null {
   const logTs = findEarliestActivityTs(
     c,
     (e) =>
-      (e.type === "audition_outcome" && ATTENDED_OUTCOMES.has((e.toValue || "").toLowerCase().trim())) ||
-      (e.type === "stage_changed" && ATTENDED_PIPELINES.has((e.toValue || "").toLowerCase().trim()))
+      (e.type === "stage_changed" && ATTENDED_PIPELINES.has((e.toValue || "").toLowerCase().trim())) ||
+      (e.type === "audition_outcome" && ATTENDED_OUTCOMES.has((e.toValue || "").toLowerCase().trim()))
   );
   if (logTs !== null) return logTs;
 
-  if (!c.auditionDate && isConvertedLead(c)) {
+  if (isConvertedLead(c)) {
     return getConvertedTime(c);
   }
 
   return getUpdatedTime(c);
 }
 
-/** Resolves the canonical enrollment / payment timestamp for period filtering. */
+/** Resolves the canonical enrollment timestamp for period filtering. */
 export function getConvertedTime(c: TeamConversationLike): number | null {
   if (!isConvertedLead(c)) return null;
   const src = getSourceObject(c);
@@ -247,9 +229,8 @@ export function getConvertedTime(c: TeamConversationLike): number | null {
   const logTs = findEarliestActivityTs(
     c,
     (e) =>
-      e.type === "cash_recorded" ||
-      (e.type === "audition_outcome" && (e.toValue || "").toLowerCase().trim() === "registered") ||
-      (e.type === "stage_changed" && (e.toValue || "").toLowerCase().trim() === "enrolled")
+      (e.type === "stage_changed" && (e.toValue || "").toLowerCase().trim() === "enrolled") ||
+      (e.type === "audition_outcome" && (e.toValue || "").toLowerCase().trim() === "registered")
   );
   if (logTs !== null) return logTs;
 
@@ -361,6 +342,7 @@ export interface FunnelCounts {
 export interface TeamFunnelSummary {
   team: FunnelCounts;
   byAgent: Map<string, FunnelCounts>;
+  unassigned: FunnelCounts;
 }
 
 export interface ComputeTeamFunnelOptions {
@@ -504,13 +486,6 @@ function getAuditChannelBucket(channel?: string): FunnelAuditChannel | "Other" {
   return "Other";
 }
 
-function hasExplicitAuditionBookingRecord(c: TeamConversationLike): boolean {
-  if (c.auditionDate && String(c.auditionDate).trim()) return true;
-  const src = getSourceObject(c);
-  if (parseValidTs(c.auditionBookedAt || src?.auditionBookedAt) > 0) return true;
-  return findEarliestActivityTs(c, (e) => e.type === "audition_booked") !== null;
-}
-
 function resolveStageFlagReason(
   c: AuditConversationInput,
   flags: { booked: boolean; attended: boolean; enrolled: boolean; cashIn: number }
@@ -519,8 +494,8 @@ function resolveStageFlagReason(
   if (flags.enrolled) {
     return {
       key: "enrolled",
-      label: "Enrolled / Paid",
-      description: "Converted to enrolled student or recorded tuition cash.",
+      label: "Enrolled",
+      description: "Pipeline stage is Enrolled.",
       detail:
         flags.cashIn > 0
           ? `Stage: ${pipeline} · ${formatSar(flags.cashIn)}`
@@ -531,7 +506,7 @@ function resolveStageFlagReason(
     return {
       key: "attended",
       label: "Attended (Not Enrolled)",
-      description: "Attended an audition, not yet enrolled or paid.",
+      description: "Pipeline stage is Attended.",
       detail: c.auditionOutcome
         ? `Stage: ${pipeline} · ${formatAuditOutcome(c.auditionOutcome)}`
         : `Stage: ${pipeline}`,
@@ -541,14 +516,14 @@ function resolveStageFlagReason(
     return {
       key: "booked",
       label: "Booked (Not Attended)",
-      description: "Has a booked audition or audition date, not yet attended.",
+      description: "Pipeline stage is Audition Booked.",
       detail: c.auditionDate ? `Stage: ${pipeline} · Audition ${c.auditionDate}` : `Stage: ${pipeline}`,
     };
   }
   return {
     key: "not_booked",
     label: "Not Booked",
-    description: "No audition booking, attendance, or payment recorded yet.",
+    description: "Not yet in Audition Booked, Attended, or Enrolled.",
     detail: `Stage: ${pipeline}`,
   };
 }
@@ -565,9 +540,6 @@ function classifyMetricReason(
   }
 ): ReasonMeta | null {
   const pipeline = (c.pipeline || "New").trim();
-  const pipelineLower = pipeline.toLowerCase();
-  const outcomeLower = (c.auditionOutcome || "").toLowerCase().trim();
-  const outcomeLabel = formatAuditOutcome(c.auditionOutcome);
   const auditionDate = (c.auditionDate || "").trim();
 
   switch (target.metric) {
@@ -578,136 +550,72 @@ function classifyMetricReason(
       if (!flags.booked) return null;
       if (flags.enrolled) {
         const cashSuffix = flags.cashIn > 0 ? ` (${formatSar(flags.cashIn)})` : "";
-        let detail: string;
-        if (hasExplicitAuditionBookingRecord(c)) {
-          detail = `Enrolled${cashSuffix}${auditionDate ? ` · Audition ${auditionDate}` : ""} · counted cumulatively in Booked`;
-        } else if (
-          pipelineLower === "enrolled" ||
-          pipelineLower.includes("registered") ||
-          outcomeLower === "registered"
-        ) {
-          detail = `Enrolled${cashSuffix} without an audition date · counted cumulatively in Booked`;
-        } else {
-          detail = `Direct payment (${formatSar(flags.cashIn)}) in ${pipeline} · rolled up cumulatively to Booked`;
-        }
         return {
           key: "progressed_enrolled",
-          label: "Progressed to Enrolled / Paid",
-          description: "Reached Enrolled or paid tuition (counted cumulatively in Booked).",
-          detail,
+          label: "Progressed to Enrolled",
+          description: "Reached Enrolled (counted cumulatively in Booked).",
+          detail: `Pipeline is ${pipeline}${cashSuffix}${auditionDate ? ` · Audition ${auditionDate}` : ""} · counted cumulatively in Booked`,
         };
       }
       if (flags.attended) {
-        const detail = ATTENDED_PIPELINES.has(pipelineLower)
-          ? `Currently in ${pipeline}${auditionDate ? ` · Audition ${auditionDate}` : ""} (attended leads passed booking)`
-          : `Outcome is ${outcomeLabel} while stage is ${pipeline} (counted cumulatively)`;
         return {
           key: "progressed_attended",
           label: "Progressed to Attended",
           description: "Moved beyond booking to Attended (counted cumulatively in Booked).",
-          detail,
-        };
-      }
-      if (BOOKED_PIPELINES.has(pipelineLower)) {
-        return {
-          key: "stage_booked",
-          label: "Pipeline: Audition Booked",
-          description: "Currently in an Audition Booked or Confirmed stage.",
-          detail: auditionDate
-            ? `Pipeline is ${pipeline} · Audition ${auditionDate}`
-            : `Pipeline is ${pipeline}`,
+          detail: `Pipeline is ${pipeline}${auditionDate ? ` · Audition ${auditionDate}` : ""} · counted cumulatively in Booked`,
         };
       }
       return {
-        key: "audition_date_other",
-        label: "Audition Date (Past / No-Show)",
-        description: "In another pipeline stage (such as Lost or Joining Later) with an audition date recorded.",
-        detail: `Stage is ${pipeline}${outcomeLabel ? ` (${outcomeLabel})` : ""}, counted via audition date ${auditionDate}`,
+        key: "stage_booked",
+        label: "Pipeline: Audition Booked",
+        description: "Currently in the Audition Booked stage.",
+        detail: auditionDate
+          ? `Pipeline is ${pipeline} · Audition ${auditionDate}`
+          : `Pipeline is ${pipeline}`,
       };
     }
 
     case "attended": {
       if (!flags.attended) return null;
-      if (flags.enrolled && flags.directAttended) {
+      if (flags.enrolled) {
         return {
           key: "progressed_enrolled",
-          label: "Progressed to Enrolled / Paid",
-          description: "Attended and progressed to Enrolled / Paid (counted cumulatively).",
-          detail: `Enrolled${flags.cashIn > 0 ? ` (${formatSar(flags.cashIn)})` : ""} · counted cumulatively in Attended`,
-        };
-      }
-      if (flags.enrolled && !flags.directAttended) {
-        return {
-          key: "enrolled_rollup",
-          label: "Direct Payment / Enrollment Roll-up",
-          description: "Enrolled or paid directly without an Attended stage or attended audition outcome.",
-          detail:
-            flags.cashIn > 0
-              ? `Rolled up from tuition payment (${formatSar(flags.cashIn)}) while stage is ${pipeline}`
-              : `Rolled up from ${outcomeLabel || pipeline} without an Attended stage`,
-        };
-      }
-      if (ATTENDED_PIPELINES.has(pipelineLower)) {
-        return {
-          key: "stage_attended",
-          label: "Pipeline: Attended",
-          description: "Currently in an Attended pipeline stage.",
-          detail: `Pipeline is ${pipeline}${auditionDate ? ` · Audition ${auditionDate}` : ""}`,
+          label: "Progressed to Enrolled",
+          description: "Attended and progressed to Enrolled (counted cumulatively in Attended).",
+          detail: `Pipeline is ${pipeline}${flags.cashIn > 0 ? ` (${formatSar(flags.cashIn)})` : ""} · counted cumulatively in Attended`,
         };
       }
       return {
-        key: "outcome_attended",
-        label: "Attended via Outcome",
-        description: "Has an attended audition outcome (such as Paid Trial or Follow-up).",
-        detail: `Audition outcome is ${outcomeLabel} while stage is ${pipeline}`,
+        key: "stage_attended",
+        label: "Pipeline: Attended",
+        description: "Currently in the Attended stage.",
+        detail: auditionDate ? `Pipeline is ${pipeline} · Audition ${auditionDate}` : `Pipeline is ${pipeline}`,
       };
     }
 
     case "enrolled": {
       if (!flags.enrolled) return null;
-      if (pipelineLower === "enrolled" || pipelineLower.includes("registered")) {
-        return {
-          key: "stage_enrolled",
-          label: "Pipeline: Enrolled",
-          description: "Pipeline stage is Enrolled or Registered.",
-          detail:
-            flags.cashIn > 0
-              ? `Pipeline is ${pipeline} · ${formatSar(flags.cashIn)} recorded`
-              : `Pipeline is ${pipeline} · 0 SAR recorded`,
-        };
-      }
-      if (outcomeLower === "registered") {
-        return {
-          key: "outcome_registered",
-          label: "Outcome: Registered",
-          description: "Audition outcome is Registered while pipeline is another stage.",
-          detail: `Outcome is Registered (stage: ${pipeline})${flags.cashIn > 0 ? ` · ${formatSar(flags.cashIn)}` : ""}`,
-        };
-      }
       return {
-        key: "cash_recorded",
-        label: "Tuition Cash Recorded",
-        description: "Positive tuition payment (cashIn > 0) recorded without Enrolled stage.",
-        detail: `Cash recorded (${formatSar(flags.cashIn)}) while stage is ${pipeline}`,
+        key: "stage_enrolled",
+        label: "Pipeline: Enrolled",
+        description: "Pipeline stage is Enrolled.",
+        detail:
+          flags.cashIn > 0
+            ? `Pipeline is ${pipeline} · ${formatSar(flags.cashIn)} recorded`
+            : `Pipeline is ${pipeline} · 0 SAR recorded`,
       };
     }
 
     case "cash": {
-      if (!flags.enrolled) return null;
       if (flags.cashIn > 0) {
-        const origin =
-          pipelineLower === "enrolled" || pipelineLower.includes("registered")
-            ? "Pipeline: Enrolled"
-            : outcomeLower === "registered"
-              ? "Outcome: Registered"
-              : `Direct payment in ${pipeline}`;
         return {
           key: "paid_enrolled",
           label: "Paid Tuition",
-          description: "Enrolled/converted leads with positive cash recorded.",
-          detail: `${formatSar(flags.cashIn)} recorded · ${origin}`,
+          description: "Tuition payment recorded for this lead.",
+          detail: `${formatSar(flags.cashIn)} recorded · Pipeline: ${pipeline}`,
         };
       }
+      if (!flags.enrolled) return null;
       return {
         key: "unpaid_enrolled",
         label: "Enrolled (0 SAR)",
@@ -759,13 +667,13 @@ function classifyMetricReason(
 function getBucketOrdering(metric: FunnelAuditMetric): ReadonlyArray<string> {
   switch (metric) {
     case "booked":
-      return ["stage_booked", "progressed_attended", "progressed_enrolled", "audition_date_other"];
+      return ["stage_booked", "progressed_attended", "progressed_enrolled"];
     case "attended":
-      return ["stage_attended", "outcome_attended", "progressed_enrolled", "enrolled_rollup"];
+      return ["stage_attended", "progressed_enrolled"];
     case "enrolled":
-      return ["stage_enrolled", "outcome_registered", "cash_recorded"];
+      return ["stage_enrolled"];
     case "cash":
-      return ["paid_payment", "legacy_payment", "paid_enrolled", "unpaid_enrolled"];
+      return ["paid_payment", "legacy_payment", "unattributed_payment"];
     case "awaiting_reply":
       return ["new_unread", "unread", "stage_new"];
     default:
@@ -865,8 +773,8 @@ export function computeTeamFunnelSummary(
 ): TeamFunnelSummary {
   const isAllTime = options.filterMode === "all";
   const inPeriod = (ts: number | null | undefined): boolean => {
-    if (!ts || ts <= 0) return false;
     if (isAllTime) return true;
+    if (!ts || ts <= 0) return false;
     return ts >= options.periodStartMs && ts <= options.periodEndMs;
   };
 
@@ -878,6 +786,7 @@ export function computeTeamFunnelSummary(
     cash: 0,
   });
   const team = emptyCounts();
+  const unassigned = emptyCounts();
   const byAgent = new Map<string, FunnelCounts>();
 
   const ensureAgent = (agentName: string): FunnelCounts => {
@@ -893,39 +802,60 @@ export function computeTeamFunnelSummary(
   for (let i = 0; i < conversations.length; i++) {
     const c = conversations[i];
     const m = resolveConversationMilestones(c);
+    const isPipelineLead = (c.pipeline || "").toLowerCase().trim() !== "direct";
 
-    if (m.realAssigned && inPeriod(m.createdTs)) {
+    if (isPipelineLead && inPeriod(m.createdTs)) {
       team.leads += 1;
-      ensureAgent(m.assignedAgent).leads += 1;
+      if (m.realAssigned) {
+        ensureAgent(m.assignedAgent).leads += 1;
+      } else {
+        unassigned.leads += 1;
+      }
     }
 
-    if (m.booked && isRealAssignedAgent(m.bookedBy) && inPeriod(m.bookedTs)) {
+    if (m.booked && inPeriod(m.bookedTs)) {
       team.booked += 1;
-      ensureAgent(m.bookedBy).booked += 1;
+      if (isRealAssignedAgent(m.bookedBy)) {
+        ensureAgent(m.bookedBy).booked += 1;
+      } else {
+        unassigned.booked += 1;
+      }
     }
 
-    if (m.attended && isRealAssignedAgent(m.attendedBy) && inPeriod(m.attendedTs)) {
+    if (m.attended && inPeriod(m.attendedTs)) {
       team.attended += 1;
-      ensureAgent(m.attendedBy).attended += 1;
+      if (isRealAssignedAgent(m.attendedBy)) {
+        ensureAgent(m.attendedBy).attended += 1;
+      } else {
+        unassigned.attended += 1;
+      }
     }
 
-    if (m.enrolled && isRealAssignedAgent(m.enrolledBy) && inPeriod(m.convertedTs)) {
+    if (m.enrolled && inPeriod(m.convertedTs)) {
       team.enrolled += 1;
-      ensureAgent(m.enrolledBy).enrolled += 1;
+      if (isRealAssignedAgent(m.enrolledBy)) {
+        ensureAgent(m.enrolledBy).enrolled += 1;
+      } else {
+        unassigned.enrolled += 1;
+      }
     }
 
     const payments = resolveConversationCashPayments(c);
     for (let j = 0; j < payments.length; j++) {
       const p = payments[j];
-      if (isRealAssignedAgent(p.actor) && inPeriod(p.timestamp)) {
+      if (inPeriod(p.timestamp)) {
         team.cash = Math.round((team.cash + p.amount) * 100) / 100;
-        const agentCounts = ensureAgent(p.actor);
-        agentCounts.cash = Math.round((agentCounts.cash + p.amount) * 100) / 100;
+        if (isRealAssignedAgent(p.actor)) {
+          const agentCounts = ensureAgent(p.actor);
+          agentCounts.cash = Math.round((agentCounts.cash + p.amount) * 100) / 100;
+        } else {
+          unassigned.cash = Math.round((unassigned.cash + p.amount) * 100) / 100;
+        }
       }
     }
   }
 
-  return { team, byAgent };
+  return { team, byAgent, unassigned };
 }
 
 function checkExcludedMilestone(
@@ -1029,26 +959,29 @@ function buildAuditCopy(
   switch (target.metric) {
     case "leads":
       return {
-        title: `Assigned Leads Audit — ${counts.totalCount.toLocaleString("en-US")}`,
-        ruleSummary: `All conversations currently assigned to ${scopeLabel} whose creation timestamp falls inside ${periodLabel}. Unassigned, Staff, and System threads are excluded.`,
-        formulaText: `${counts.cohortLeadsCount} assigned leads · ${counts.cohortBookedCount} booked (${bookingRateStr}%) · ${counts.cohortAttendedCount} attended · ${counts.cohortEnrolledCount} enrolled (${winRateStr}% win)`,
+        title: `Leads Audit — ${counts.totalCount.toLocaleString("en-US")}`,
+        ruleSummary:
+          scopeLabel === "All Agents"
+            ? `All pipeline leads whose creation timestamp falls inside ${periodLabel} (including Unassigned leads).`
+            : `All conversations currently assigned to ${scopeLabel} whose creation timestamp falls inside ${periodLabel}.`,
+        formulaText: `${counts.cohortLeadsCount} leads · ${counts.cohortBookedCount} booked (${bookingRateStr}%) · ${counts.cohortAttendedCount} attended · ${counts.cohortEnrolledCount} enrolled (${winRateStr}% win)`,
       };
     case "booked":
       return {
         title: `Booked Audit — ${counts.totalCount.toLocaleString("en-US")}`,
-        ruleSummary: `${counts.totalCount} lead${counts.totalCount === 1 ? "" : "s"} whose audition booking occurred inside ${periodLabel}${scopeActorClause} (anchored on booking date, including leads that progressed to Attended or Enrolled).`,
-        formulaText: `${counts.cohortBookedCount} booked in period / ${counts.cohortLeadsCount} assigned leads = ${bookingRateStr}% booking rate`,
+        ruleSummary: `${counts.totalCount} lead${counts.totalCount === 1 ? "" : "s"} in Audition Booked, Attended, or Enrolled inside ${periodLabel}${scopeActorClause} (cumulative pipeline).`,
+        formulaText: `${counts.cohortBookedCount} booked in period / ${counts.cohortLeadsCount} leads = ${bookingRateStr}% booking rate`,
       };
     case "attended":
       return {
         title: `Attended Audit — ${counts.totalCount.toLocaleString("en-US")}`,
-        ruleSummary: `${counts.totalCount} lead${counts.totalCount === 1 ? "" : "s"} who attended an audition or enrolled/paid directly inside ${periodLabel}${scopeActorClause}. No-Show and Joining Later are excluded unless later enrolled.`,
+        ruleSummary: `${counts.totalCount} lead${counts.totalCount === 1 ? "" : "s"} in Attended or Enrolled inside ${periodLabel}${scopeActorClause} (cumulative pipeline).`,
         formulaText: `${counts.cohortAttendedCount} attended / ${counts.cohortBookedCount} booked = ${showRateStr}% show-up rate`,
       };
     case "enrolled":
       return {
         title: `Enrolled Audit — ${counts.totalCount.toLocaleString("en-US")}`,
-        ruleSummary: `${counts.totalCount} lead${counts.totalCount === 1 ? "" : "s"} enrolled or with recorded tuition cash (> 0 SAR) inside ${periodLabel}${scopeActorClause}.`,
+        ruleSummary: `${counts.totalCount} lead${counts.totalCount === 1 ? "" : "s"} in the Enrolled pipeline stage inside ${periodLabel}${scopeActorClause}.`,
         formulaText: `${counts.cohortEnrolledCount} enrolled / ${counts.cohortAttendedCount} attended = ${closeRateStr}% close rate (${winRateStr}% of ${counts.cohortLeadsCount} leads)`,
       };
     case "cash": {
@@ -1104,14 +1037,15 @@ export function buildFunnelAuditReport(
   const scopeLabel = isAllAgentsScope ? "All Agents" : requestedAgent;
 
   const inPeriod = (ts: number | null | undefined): boolean => {
-    if (!ts || ts <= 0) return false;
     if (isAllTime) return true;
+    if (!ts || ts <= 0) return false;
     return ts >= periodStartMs && ts <= periodEndMs;
   };
 
-  const matchesScope = (actorName: string): boolean =>
-    isRealAssignedAgent(actorName) &&
-    (agentFilterLower === null || actorName.toLowerCase() === agentFilterLower);
+  const matchesScope = (actorName: string): boolean => {
+    if (agentFilterLower === null) return true;
+    return isRealAssignedAgent(actorName) && actorName.toLowerCase() === agentFilterLower;
+  };
 
   let cohortLeadsCount = 0;
   let cohortBookedCount = 0;
@@ -1129,8 +1063,9 @@ export function buildFunnelAuditReport(
   for (let i = 0; i < conversations.length; i++) {
     const c = conversations[i];
     const m = resolveConversationMilestones(c);
+    const isPipelineLead = (c.pipeline || "").toLowerCase().trim() !== "direct";
 
-    if (matchesScope(m.assignedAgent) && inPeriod(m.createdTs)) {
+    if (isPipelineLead && matchesScope(m.assignedAgent) && inPeriod(m.createdTs)) {
       cohortLeadsCount += 1;
     }
     if (m.booked && matchesScope(m.bookedBy) && inPeriod(m.bookedTs)) {
@@ -1161,13 +1096,26 @@ export function buildFunnelAuditReport(
         const inPaymentPeriod = inPeriod(p.timestamp);
         if (matchesScope(p.actor) && inPaymentPeriod) {
           paidCount += 1;
-          const reasonKey = p.isLegacy ? "legacy_payment" : "paid_payment";
-          const reasonLabel = p.isLegacy ? "Legacy Payment" : "Recorded Payment";
+          const isRealActor = isRealAssignedAgent(p.actor);
+          const displayActor = isRealActor ? p.actor : "Unattributed";
+          const reasonKey = !isRealActor
+            ? "unattributed_payment"
+            : p.isLegacy
+              ? "legacy_payment"
+              : "paid_payment";
+          const reasonLabel = !isRealActor
+            ? "Legacy Payment (Unattributed)"
+            : p.isLegacy
+              ? "Legacy Payment"
+              : "Recorded Payment";
           const ownerNote =
-            p.actor.toLowerCase() !== m.assignedLower
+            isRealActor && p.actor.toLowerCase() !== m.assignedLower
               ? ` (Lead owner: ${m.assignedAgent})`
-              : "";
-          const reasonDetail = `${formatSar(p.amount)} added by ${p.actor}${
+              : !isRealActor && m.realAssigned
+                ? ` · Lead owner: ${m.assignedAgent}`
+                : "";
+          const actorPhrase = isRealActor ? `added by ${p.actor}` : "no recorded staff actor";
+          const reasonDetail = `${formatSar(p.amount)} (${actorPhrase})${
             p.note ? ` · ${p.note}` : ""
           }${ownerNote}`;
 
@@ -1179,11 +1127,11 @@ export function buildFunnelAuditReport(
             channelLabel: getAuditChannelLabel(c),
             branch: (c.branch || "").trim(),
             assignedAgent: m.assignedAgent,
-            attributedAgent: p.actor,
+            attributedAgent: displayActor,
             bookedBy: m.explicitBookedBy,
             attendedBy: m.explicitAttendedBy,
             enrolledBy: m.explicitEnrolledBy,
-            cashRecordedBy: p.actor,
+            cashRecordedBy: isRealActor ? p.actor : undefined,
             pipeline: (c.pipeline || "New").trim(),
             auditionDate: (c.auditionDate || "").trim(),
             auditionOutcome: (c.auditionOutcome || "").trim(),
@@ -1212,22 +1160,24 @@ export function buildFunnelAuditReport(
             bucketMap.set(reasonKey, {
               key: reasonKey,
               label: reasonLabel,
-              description: p.isLegacy
-                ? "Legacy tuition payment attributed via recorded actor or enrollment."
-                : "Tuition payment attributed to the staff member who recorded it.",
+              description: !isRealActor
+                ? "Legacy tuition payment with no recorded staff actor."
+                : p.isLegacy
+                  ? "Legacy tuition payment attributed via recorded actor or enrollment."
+                  : "Tuition payment attributed to the staff member who recorded it.",
               count: 1,
               cashTotal: p.amount,
             });
           }
 
-          const actorLower = p.actor.toLowerCase();
+          const actorLower = displayActor.toLowerCase();
           const existingAgent = agentMap.get(actorLower);
           if (existingAgent) {
             existingAgent.count += 1;
             existingAgent.cashTotal = Math.round((existingAgent.cashTotal + p.amount) * 100) / 100;
           } else {
             agentMap.set(actorLower, {
-              agent: p.actor,
+              agent: displayActor,
               count: 1,
               cashTotal: p.amount,
             });
@@ -1238,23 +1188,7 @@ export function buildFunnelAuditReport(
         if (!isAllTime && !inPaymentPeriod) continue;
         const pipeline = (c.pipeline || "New").trim();
         const auditionDate = (c.auditionDate || "").trim();
-        if (agentFilterLower === null && !isRealAssignedAgent(p.actor)) {
-          excludedRows.push({
-            rowKey: `${c.id}_${p.id}_ex`,
-            id: c.id,
-            leadName: getAuditDisplayName(c),
-            leadPhone: c.phone || "",
-            assignedAgent: m.assignedAgent,
-            actorName: p.actor || "Unattributed",
-            pipeline,
-            auditionDate,
-            cashIn: p.amount,
-            createdTs: m.createdTs,
-            milestoneTs: p.timestamp || null,
-            excludedReason: "unassigned",
-            excludedDetail: `Legacy/unattributed payment (${formatSar(p.amount)}) has no recorded staff actor, so it is excluded from team cash metrics.`,
-          });
-        } else if (
+        if (
           agentFilterLower !== null &&
           isRealAssignedAgent(p.actor) &&
           p.actor.toLowerCase() !== agentFilterLower &&
@@ -1314,8 +1248,8 @@ export function buildFunnelAuditReport(
       };
     } else {
       metricTarget = {
-        qualified: true,
-        qualifiesForExclusion: target.metric === "leads",
+        qualified: isPipelineLead,
+        qualifiesForExclusion: isPipelineLead && target.metric === "leads",
         ts: m.createdTs,
         actor: m.assignedAgent,
         word: "created",
@@ -1358,6 +1292,8 @@ export function buildFunnelAuditReport(
       else unpaidEnrolledCount += 1;
     }
 
+    const displayActor = isRealAssignedAgent(metricTarget.actor) ? metricTarget.actor : "Unassigned";
+
     rows.push({
       id: c.id,
       leadName: getAuditDisplayName(c),
@@ -1365,7 +1301,7 @@ export function buildFunnelAuditReport(
       channelLabel: getAuditChannelLabel(c),
       branch: (c.branch || "").trim(),
       assignedAgent: m.assignedAgent,
-      attributedAgent: metricTarget.actor,
+      attributedAgent: displayActor,
       bookedBy: m.explicitBookedBy,
       attendedBy: m.explicitAttendedBy,
       enrolledBy: m.explicitEnrolledBy,
@@ -1401,14 +1337,14 @@ export function buildFunnelAuditReport(
       });
     }
 
-    const actorLower = metricTarget.actor.toLowerCase();
+    const actorLower = displayActor.toLowerCase();
     const existingAgent = agentMap.get(actorLower);
     if (existingAgent) {
       existingAgent.count += 1;
       existingAgent.cashTotal += m.cashIn;
     } else {
       agentMap.set(actorLower, {
-        agent: metricTarget.actor,
+        agent: displayActor,
         count: 1,
         cashTotal: m.cashIn,
       });
